@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { createStore } from '../server/store.js';
@@ -37,7 +38,7 @@ test('online backup restores matching credentials and transactional message stat
   const finished = new Promise(resolve => writer.once('exit', resolve));
   try {
     await new Promise((resolve, reject) => { writer.once('message', resolve); writer.once('error', reject); writer.once('exit', code => reject(new Error(`Writer exited before readiness: ${code}`))); });
-    assert.equal(backupDatabase(dataDir, destination), destination);
+    assert.equal(backupDatabase(dataDir, destination), resolve(destination));
   } finally {
     Atomics.store(stop, 0, 1);
     Atomics.notify(stop, 0);

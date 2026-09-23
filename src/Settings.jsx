@@ -156,7 +156,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         )}
       </div>
 
-      {window.morrowDesktop && <button className="button secondary" disabled={operationBusy} onClick={async () => {
+      {window.morrowDesktop && tab === 'mail' && <button className="button secondary" disabled={operationBusy} onClick={async () => {
         try { const response = await fetch('/api/state'); const result = await response.json(); if (!response.ok) throw new Error(result.error); onUpdate(result); notify('Mailbox connections refreshed.'); }
         catch { setError('Could not refresh connections. Please try again.'); }
       }}>Refresh connections</button>}

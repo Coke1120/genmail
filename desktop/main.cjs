@@ -138,7 +138,7 @@ app.whenReady().then(async () => {
     if ((await fetch(`${origin}/api/state`)).status !== 401) throw new Error('Private API was exposed.');
     const health = await fetch(`${origin}/api/health`, { headers: { Authorization: `Bearer ${token}` } });
     if (!health.ok) throw new Error('Private service health check failed.');
-    console.log('Desktop smoke passed: bundled service, authenticated renderer, demo inbox, sandbox, private API.');
+    console.log(`Desktop smoke passed: ${app.isPackaged ? 'bundled' : 'development'} service, authenticated renderer, demo inbox, sandbox, private API.`);
     stop();
   }
 }).catch(error => { if (smoke) console.error(error.message); fatal(); });

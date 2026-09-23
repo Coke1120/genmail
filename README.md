@@ -105,7 +105,7 @@ $env:DATA_DIR = Join-Path $env:APPDATA 'Morrow Mail'
 
 ## Keeping platform releases aligned
 
-`package.json` is the version source for both apps and archive names. Pushes and pull requests run backend/web checks on Ubuntu, macOS and Windows. macOS also compiles and tests SwiftUI; Windows builds and launches its packaged `.exe`. Successful platform builds upload both packages as CI artifacts.
+`package.json` is the version source for both apps and archive names. Pushes and pull requests run backend/web checks on Ubuntu, macOS and Windows. macOS also compiles and tests SwiftUI; Windows builds and launches its packaged `.exe`. Tag and manually dispatched builds upload both packages as short-lived CI artifacts; published release downloads remain available.
 
 To publish a new alpha, update the changelog and verification notes, bump the package version with `npm version <version>-alpha.<number> --no-git-tag-version`, commit, then push the matching `v<version>-alpha.<number>` tag. The workflow builds both platforms from that **same tag**. It verifies both archives and their checksums, uploads them to a draft release, and makes the release public only after every platform job succeeds. Failed builds publish no partial release; failed uploads leave a draft. Published assets are never overwritten.
 

@@ -144,19 +144,20 @@ export default function Calendar({ onNotify, onOpenSettings, onDirtyChange, onBu
   }
 
   return <section className="calendar-page" aria-label="Calendar">
+    <div className="calendar-inner">
     {(recovery || recoveryError) && <div className="settings-error" role="alert"><strong>Unconfirmed calendar request</strong><p>{recoveryError || `${recovery.review.title} · ${recovery.review.connectionEmail}. Check your calendar before retrying.`}</p>{recovery && <><button className="button secondary" disabled={creating} onClick={() => {
       const restored = recovery.review;
-      if (!catalog.connections.some(item => item.provider === restored.provider && item.email === restored.connectionEmail && item.connected)) { setCreateError('Reconnect the original calendar account first.'); return; }
+      if (!catalog.connections.some(item => item.provider === restored.provider && item.email === restored.connectionEmail && item.connected) || !catalog.calendars.some(item => item.provider === restored.provider && item.id === restored.calendarId && item.canWrite)) { setRecoveryError('Reconnect the original writable calendar before retrying.'); return; }
+      setRecoveryError('');
       setSelection(calendarKey({ provider: restored.provider, id: restored.calendarId }));
       setReview(restored); setFormOpen(true);
       const { provider, calendarName, ...payload } = restored;
       attempt.current = { fingerprint: JSON.stringify({ provider, ...payload }), requestId: recovery.requestId };
     }}>Review original request</button><button className="button secondary" disabled={creating} onClick={() => {
       if (!window.confirm('Have you checked the provider calendar? Clear this local request only after verifying whether the event exists. This will not delete any provider event.')) return;
-      try { storage.removeItem('morrow.pendingCalendar'); setRecovery(null); setFormOpen(false); setReview(null); attempt.current = null; } catch { setCreateError('Could not clear the saved request.'); }
+      try { storage.removeItem('morrow.pendingCalendar'); setRecovery(null); setRecoveryError(''); setFormOpen(false); setReview(null); attempt.current = null; } catch { setCreateError('Could not clear the saved request.'); }
     }}>I checked the calendar — clear request</button></>}</div>}
 
-    <div className="calendar-inner">
       <header className="calendar-heading"><div><span className="eyebrow">A LITTLE ROOM IN YOUR DAY</span><h1>Your calendar<span>.</span></h1><p>Google and Outlook, connected to your real schedule.</p></div><button className="button secondary" onClick={onOpenSettings} disabled={creating}><Settings2 size={15} />Connections</button></header>
       {catalogError && <div className="calendar-error" role="alert"><p>{catalogError}</p><button className="button secondary" onClick={() => setCatalogRevision(value => value + 1)}>Retry connections</button></div>}
       {catalog.errors?.map(error => <div className="calendar-error" role="alert" key={error.provider}><p><strong>{PROVIDERS[error.provider] || error.provider}:</strong> {error.message}</p><button className="button secondary" onClick={onOpenSettings}>Manage connection</button></div>)}
