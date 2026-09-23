@@ -2,7 +2,7 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, e
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import packager from '@electron/packager';
+import { packager } from '@electron/packager';
 
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Build the Windows x64 app on Windows x64 using the official Node distribution.');
 const root = fileURLToPath(new URL('../', import.meta.url));

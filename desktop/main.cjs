@@ -120,6 +120,7 @@ app.whenReady().then(async () => {
   ]));
   await window.loadURL(origin);
   if (smoke) {
+    if (app.isPackaged && JSON.parse(readFileSync(join(__dirname, 'backend/package.json'), 'utf8')).version !== app.getVersion()) throw new Error('Desktop and backend versions differ.');
     // A fresh temporary workspace only: never open or mutate the owner's mailbox.
     const result = await window.webContents.executeJavaScript(`(async () => {
       await new Promise((accept, reject) => {
