@@ -52,5 +52,5 @@ The implementation is intended for a private, single-user Mac workspace. It does
 - Local: 65 backend checks, React build, SwiftUI compilation and native integration passed.
 - Electron shell smoke passed on macOS using an isolated demo profile: actual inbox rendering, authenticated API calls, denied unauthenticated access, no renderer Node API, and persisted disclosure state. This does not substitute for Windows execution.
 - Desktop-state tests cover persistence, invalid keys, oversized writes and corrupt-state rejection; backups retain Windows client recovery metadata.
-- Windows runner: packaging and packaged `.exe` startup verification are performed by the paired CI workflow. See the workflow result for the exact tagged release.
+- [Paired CI run 35875758706](https://github.com/Coke1120/genmail/actions/runs/35875758706) passed on Ubuntu, macOS arm64 and Windows x64 with Node 22. Windows built and launched the packaged `.exe`, checked backend/app version agreement, loaded the demo inbox and verified private API access. macOS passed SwiftUI integration and app packaging. Tagged releases repeat these checks before publication.
 - Windows manual UI acceptance, live providers and distribution signing remain pending. The alpha is not certified production-ready.
