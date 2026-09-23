@@ -580,12 +580,15 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.use('/api', (req, res) => res.status(404).json({ error: 'API route not found.' }));
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
   if (nativeToken) {
-    app.get('/', (req, res) => {
+    app.get('/', (req, res, next) => {
+      if (safeEqual(req.get('Authorization'), `Bearer ${nativeToken}`)) return next();
       const failed = !!(req.query.connectionError || req.query.calendarError);
       res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
       res.type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Morrow Mail</title><style>body{font:18px system-ui;max-width:36rem;margin:15vh auto;padding:2rem;color:#193c34;background:#f5f4ec}h1{font-size:32px}</style><h1>${failed ? 'Connection was not completed.' : 'Return to Morrow Mail.'}</h1><p>${failed ? 'Check your provider app registration and permissions, then try connecting again in Settings.' : 'You can close this browser tab. Your connection status will refresh when you return to the app.'}</p></html>`);
     });
-  } else if (existsSync(dist)) {
+  }
+  if (existsSync(dist)) {
+    if (nativeToken) app.use((req, res, next) => safeEqual(req.get('Authorization'), `Bearer ${nativeToken}`) ? next() : res.status(401).end());
     app.use((req, res, next) => { res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"); next(); });
     app.use(express.static(dist));
     app.get('/{*path}', (req, res) => res.sendFile(resolve(dist, 'index.html')));

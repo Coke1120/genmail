@@ -2,7 +2,7 @@
 // stdin, never command-line arguments; EOF shuts it down if the app crashes.
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
-import { resolve } from 'node:path';
+import { resolve, isAbsolute } from 'node:path';
 import { createApp } from './app.js';
 import { createStore } from './store.js';
 
@@ -21,7 +21,7 @@ input.once('line', line => {
   try {
     if (line.length > 8192) throw new Error();
     const { token, dataDirectory, port = 0 } = JSON.parse(line);
-    if (!/^[a-f0-9]{64}$/.test(token) || typeof dataDirectory !== 'string' || !dataDirectory.startsWith('/') || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error();
+    if (!/^[a-f0-9]{64}$/.test(token) || typeof dataDirectory !== 'string' || !isAbsolute(dataDirectory) || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error();
     store = createStore(resolve(dataDirectory));
     server = createServer();
     server.on('error', () => { console.error('Morrow could not start its private service.'); store.close(); process.exit(1); });

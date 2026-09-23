@@ -31,7 +31,8 @@ export function backupDatabase(dataDir, destination = resolve('backups', `morrow
     } finally { snapshot.close(); }
     const restored = createStore(destination);
     try { restored.getSettings(); } finally { restored.close(); }
-    for (const path of [databasePath, destination]) {
+    // Windows cannot open directories for fsync; SQLite and the key files are flushed above.
+    for (const path of process.platform === 'win32' ? [databasePath] : [databasePath, destination]) {
       const descriptor = openSync(path, 'r');
       try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
     }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, ExternalLink, LoaderCircle, MapPin, Plus, RefreshCw, Settings2, X } from 'lucide-react';
 import './calendar.css';
+import { storage } from './storage';
 
 const PROVIDERS = { google: 'Google Calendar', microsoft: 'Outlook Calendar' };
 const dateValue = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -39,6 +40,14 @@ export default function Calendar({ onNotify, onOpenSettings, onDirtyChange, onBu
   const [creating, setCreating] = useState(false);
   const pendingCreate = useRef(null);
   const attempt = useRef(null);
+  const [recovery, setRecovery] = useState(null);
+  const [recoveryError, setRecoveryError] = useState('');
+  useEffect(() => {
+    try {
+      const raw = storage.getItem('morrow.pendingCalendar');
+      if (raw) { const saved = JSON.parse(raw); if (!saved.review || !saved.requestId || !PROVIDERS[saved.review.provider]) throw new Error(); setRecovery(saved); }
+    } catch { setRecoveryError('The saved calendar request could not be read. Resolve the saved request before creating another event.'); }
+  }, []);
   const formHeading = useRef(null);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const selected = catalog.calendars.find(calendar => calendarKey(calendar) === selection);
@@ -82,6 +91,7 @@ export default function Calendar({ onNotify, onOpenSettings, onDirtyChange, onBu
   }, [selection, connection?.email, range.start, range.end, rangeError, eventsRevision, catalogRevision]);
 
   function openForm() {
+    if (recovery || recoveryError) { setCreateError('Resolve the saved calendar request before creating another event.'); return; }
     setFormOpen(true); setCreateError('');
     requestAnimationFrame(() => formHeading.current?.focus());
   }
@@ -106,15 +116,20 @@ export default function Calendar({ onNotify, onOpenSettings, onDirtyChange, onBu
   }
 
   async function createEvent() {
-    if (!review || pendingCreate.current || !connection || review.connectionEmail !== connection.email || review.provider !== selected?.provider || review.calendarId !== selected?.id) return;
+    if (recoveryError || !review || pendingCreate.current || !connection || review.connectionEmail !== connection.email || review.provider !== selected?.provider || review.calendarId !== selected?.id) return;
     const { provider, calendarName, ...payload } = review;
+    if (recovery && JSON.stringify(recovery.review) !== JSON.stringify(review)) { setCreateError('Resolve the original request before changing its details.'); return; }
     const fingerprint = JSON.stringify({ provider, ...payload });
     if (attempt.current?.fingerprint !== fingerprint) attempt.current = { fingerprint, requestId: crypto.randomUUID() };
+    try {
+      const saved = { review, requestId: attempt.current.requestId }; storage.setItem('morrow.pendingCalendar', JSON.stringify(saved)); setRecovery(saved);
+    } catch { setCreateError('Could not save the request for recovery. No event has been submitted.'); return; }
     const controller = new AbortController(); pendingCreate.current = controller;
     setCreating(true); setCreateError('');
     try {
       await calendarRequest(`/${provider}/events`, { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, requestId: attempt.current.requestId }) });
       if (controller.signal.aborted) return;
+      storage.removeItem('morrow.pendingCalendar'); setRecovery(null);
       setFormOpen(false); setReview(null); resetForm(); attempt.current = null;
       setEventsRevision(value => value + 1);
       onNotify?.(`Event created in ${PROVIDERS[provider]}.`);
@@ -129,6 +144,18 @@ export default function Calendar({ onNotify, onOpenSettings, onDirtyChange, onBu
   }
 
   return <section className="calendar-page" aria-label="Calendar">
+    {(recovery || recoveryError) && <div className="settings-error" role="alert"><strong>Unconfirmed calendar request</strong><p>{recoveryError || `${recovery.review.title} · ${recovery.review.connectionEmail}. Check your calendar before retrying.`}</p>{recovery && <><button className="button secondary" disabled={creating} onClick={() => {
+      const restored = recovery.review;
+      if (!catalog.connections.some(item => item.provider === restored.provider && item.email === restored.connectionEmail && item.connected)) { setCreateError('Reconnect the original calendar account first.'); return; }
+      setSelection(calendarKey({ provider: restored.provider, id: restored.calendarId }));
+      setReview(restored); setFormOpen(true);
+      const { provider, calendarName, ...payload } = restored;
+      attempt.current = { fingerprint: JSON.stringify({ provider, ...payload }), requestId: recovery.requestId };
+    }}>Review original request</button><button className="button secondary" disabled={creating} onClick={() => {
+      if (!window.confirm('Have you checked the provider calendar? Clear this local request only after verifying whether the event exists. This will not delete any provider event.')) return;
+      try { storage.removeItem('morrow.pendingCalendar'); setRecovery(null); setFormOpen(false); setReview(null); attempt.current = null; } catch { setCreateError('Could not clear the saved request.'); }
+    }}>I checked the calendar — clear request</button></>}</div>}
+
     <div className="calendar-inner">
       <header className="calendar-heading"><div><span className="eyebrow">A LITTLE ROOM IN YOUR DAY</span><h1>Your calendar<span>.</span></h1><p>Google and Outlook, connected to your real schedule.</p></div><button className="button secondary" onClick={onOpenSettings} disabled={creating}><Settings2 size={15} />Connections</button></header>
       {catalogError && <div className="calendar-error" role="alert"><p>{catalogError}</p><button className="button secondary" onClick={() => setCatalogRevision(value => value + 1)}>Retry connections</button></div>}
@@ -145,7 +172,7 @@ export default function Calendar({ onNotify, onOpenSettings, onDirtyChange, onBu
         {selected && !selected.canWrite && <p className="calendar-note">You have read-only access to this calendar. Choose a writable calendar to create an event.</p>}
         {formOpen && <section className="calendar-event-form" aria-labelledby="calendar-new-event"><div className="calendar-form-heading"><h2 id="calendar-new-event" tabIndex={-1} ref={formHeading}>{review ? 'Review your event' : 'Make a little time.'}</h2><button className="icon-button" aria-label="Close event draft" onClick={closeForm} disabled={creating}><X size={18} /></button></div>
           {createError && <p className="calendar-error" role="alert">{createError}</p>}
-          {review ? <><dl className="calendar-review"><div><dt>Calendar</dt><dd>{PROVIDERS[review.provider]} · {review.calendarName}<small>{review.connectionEmail}</small></dd></div><div><dt>Event</dt><dd>{review.title}</dd></div><div><dt>Starts</dt><dd>{readableDate(review.start)} · {readableTime(review.start)}</dd></div><div><dt>Ends</dt><dd>{readableDate(review.end)} · {readableTime(review.end)}</dd></div><div><dt>Timezone</dt><dd>{timezone}</dd></div>{review.location && <div><dt>Location</dt><dd>{review.location}</dd></div>}{review.description && <div><dt>Description</dt><dd>{review.description}</dd></div>}</dl><p className="calendar-note">This creates a real event in the selected calendar. No attendees are added.</p><div className="calendar-form-actions"><button className="button secondary" disabled={creating} onClick={() => { setReview(null); setCreateError(''); }}>Edit details</button><button className="button primary" disabled={creating} onClick={createEvent}>{creating ? <LoaderCircle size={15} className="calendar-spinner" /> : <Check size={15} />}{creating ? 'Creating event…' : `Create event in ${PROVIDERS[review.provider]}`}</button></div></> : <form onSubmit={reviewEvent}><fieldset disabled={creating}><label className="calendar-field">Event title<input required maxLength={200} value={form.title} onChange={event => setForm(value => ({ ...value, title: event.target.value }))} placeholder="Time to catch up" /></label><div className="calendar-form-columns"><label className="calendar-field">Starts<input type="datetime-local" required value={form.start} onChange={event => setForm(value => ({ ...value, start: event.target.value }))} /></label><label className="calendar-field">Ends<input type="datetime-local" required value={form.end} onChange={event => setForm(value => ({ ...value, end: event.target.value }))} /></label></div><p className="calendar-note">Enter times in {timezone}. Review the exact date and time before creating.</p><label className="calendar-field">Location <span>(optional)</span><input maxLength={500} value={form.location} onChange={event => setForm(value => ({ ...value, location: event.target.value }))} /></label><label className="calendar-field">Description <span>(optional)</span><textarea rows={3} maxLength={5000} value={form.description} onChange={event => setForm(value => ({ ...value, description: event.target.value }))} /></label><div className="calendar-form-actions"><button type="button" className="button secondary" onClick={closeForm}>Cancel</button><button className="button primary" type="submit">Review event<ChevronRight size={15} /></button></div></fieldset></form>}
+          {review ? <><dl className="calendar-review"><div><dt>Calendar</dt><dd>{PROVIDERS[review.provider]} · {review.calendarName}<small>{review.connectionEmail}</small></dd></div><div><dt>Event</dt><dd>{review.title}</dd></div><div><dt>Starts</dt><dd>{readableDate(review.start)} · {readableTime(review.start)}</dd></div><div><dt>Ends</dt><dd>{readableDate(review.end)} · {readableTime(review.end)}</dd></div><div><dt>Timezone</dt><dd>{timezone}</dd></div>{review.location && <div><dt>Location</dt><dd>{review.location}</dd></div>}{review.description && <div><dt>Description</dt><dd>{review.description}</dd></div>}</dl><p className="calendar-note">This creates a real event in the selected calendar. No attendees are added.</p><div className="calendar-form-actions"><button className="button secondary" disabled={creating || !!recovery} onClick={() => { setReview(null); setCreateError(''); }}>Edit details</button><button className="button primary" disabled={creating} onClick={createEvent}>{creating ? <LoaderCircle size={15} className="calendar-spinner" /> : <Check size={15} />}{creating ? 'Creating event…' : `Create event in ${PROVIDERS[review.provider]}`}</button></div></> : <form onSubmit={reviewEvent}><fieldset disabled={creating}><label className="calendar-field">Event title<input required maxLength={200} value={form.title} onChange={event => setForm(value => ({ ...value, title: event.target.value }))} placeholder="Time to catch up" /></label><div className="calendar-form-columns"><label className="calendar-field">Starts<input type="datetime-local" required value={form.start} onChange={event => setForm(value => ({ ...value, start: event.target.value }))} /></label><label className="calendar-field">Ends<input type="datetime-local" required value={form.end} onChange={event => setForm(value => ({ ...value, end: event.target.value }))} /></label></div><p className="calendar-note">Enter times in {timezone}. Review the exact date and time before creating.</p><label className="calendar-field">Location <span>(optional)</span><input maxLength={500} value={form.location} onChange={event => setForm(value => ({ ...value, location: event.target.value }))} /></label><label className="calendar-field">Description <span>(optional)</span><textarea rows={3} maxLength={5000} value={form.description} onChange={event => setForm(value => ({ ...value, description: event.target.value }))} /></label><div className="calendar-form-actions"><button type="button" className="button secondary" onClick={closeForm}>Cancel</button><button className="button primary" type="submit">Review event<ChevronRight size={15} /></button></div></fieldset></form>}
         </section>}
         {rangeError && <p className="calendar-error" role="alert">{rangeError}</p>}
         {eventError && <div className="calendar-error" role="alert"><p>{eventError}</p><button className="button secondary" onClick={() => setEventsRevision(value => value + 1)}>Retry events</button></div>}

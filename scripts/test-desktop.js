@@ -1,0 +1,13 @@
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+const root = fileURLToPath(new URL('../', import.meta.url));
+const packaged = process.argv.includes('--packaged');
+if (packaged && process.platform !== 'win32') throw new Error('The packaged desktop check requires Windows.');
+const executable = packaged ? resolve(root, 'build/windows/Morrow Mail-win32-x64/Morrow Mail.exe') : (await import('electron')).default;
+if (!existsSync(executable)) throw new Error('Build the app before its packaged smoke test.');
+const child = spawn(executable, [...(packaged ? [] : [resolve(root, 'desktop/main.cjs')]), '--smoke-test'], { cwd: root, env: { ...process.env, MORROW_NODE_BINARY: process.execPath }, stdio: 'inherit' });
+const timer = setTimeout(() => { child.kill(); process.exitCode = 1; }, 90_000);
+child.once('error', error => { clearTimeout(timer); console.error(error.message); process.exitCode = 1; });
+child.once('exit', code => { clearTimeout(timer); process.exitCode = code ?? 1; });

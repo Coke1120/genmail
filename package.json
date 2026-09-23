@@ -1,7 +1,7 @@
 {
   "name": "morrow-mail",
-  "version": "0.3.0-alpha.1",
-  "description": "An open-source native SwiftUI macOS email and calendar client with multiple accounts and bring-your-own AI.",
+  "version": "0.4.0-alpha.1",
+  "description": "An open-source email and calendar client for macOS and Windows, with multiple accounts and bring-your-own AI.",
   "homepage": "https://github.com/Coke1120/genmail#readme",
   "repository": {
     "type": "git",
@@ -51,7 +51,9 @@
     "backup": "node --env-file-if-exists=.env scripts/backup.js",
     "macos:build": "node scripts/build-macos.js",
     "macos:test": "node scripts/test-macos.js",
-    "macos:open": "open \"build/macos/Morrow Mail.app\""
+    "macos:open": "open \"build/macos/Morrow Mail.app\"",
+    "windows:build": "node scripts/build-windows.js",
+    "desktop:test": "node scripts/test-desktop.js"
   },
   "license": "MIT",
   "type": "module",
@@ -67,7 +69,9 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@electron/packager": "20.3.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "electron": "44.4.5",
     "vite": "^8.3.0"
   },
   "private": true,

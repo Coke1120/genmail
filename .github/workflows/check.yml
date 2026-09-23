@@ -1,16 +1,27 @@
-name: Checks
-on: [push, pull_request]
+name: Checks and desktop releases
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   check:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+          - os: macos-15-arm64
+            artifact: macos-arm64
+          - os: windows-latest
+            artifact: windows-x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '22'
           cache: npm
@@ -18,3 +29,37 @@ jobs:
       - run: npm run check
       - if: runner.os == 'macOS'
         run: npm run macos:test
+      - if: runner.os == 'macOS'
+        run: npm run macos:build
+      - if: runner.os == 'Windows'
+        run: npm run windows:build
+      - if: runner.os == 'Windows'
+        run: npm run desktop:test -- --packaged
+      - if: matrix.artifact
+        run: node scripts/package-release.js
+      - if: matrix.artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: morrow-${{ matrix.artifact }}
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: 7
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: morrow-*
+          path: release-artifacts
+          merge-multiple: true
+      - run: node scripts/publish-release.js
+        env:
+          GH_TOKEN: ${{ github.token }}

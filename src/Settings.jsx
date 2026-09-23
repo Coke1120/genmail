@@ -89,6 +89,12 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
       if (!response.ok) throw new Error(result.error || 'Unable to save. Please try again.');
       if (label === 'oauth') {
         if (!result.url) throw new Error('No sign-in URL returned. Please try again.');
+        if (window.morrowDesktop) {
+          await window.morrowDesktop.openSignIn(result.url);
+          setOauth({ google: { clientId: '', clientSecret: '' }, microsoft: { clientId: '' } });
+          notify('Complete sign-in in your browser, then click Refresh connections.');
+          return;
+        }
         allowUnload.current = true;
         window.location.assign(result.url);
         return;
@@ -149,6 +155,11 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
           </button>
         )}
       </div>
+
+      {window.morrowDesktop && <button className="button secondary" disabled={operationBusy} onClick={async () => {
+        try { const response = await fetch('/api/state'); const result = await response.json(); if (!response.ok) throw new Error(result.error); onUpdate(result); notify('Mailbox connections refreshed.'); }
+        catch { setError('Could not refresh connections. Please try again.'); }
+      }}>Refresh connections</button>}
 
       <div className="settings-tabs" role="tablist" aria-label="Workspace settings" onKeyDown={tabKeys}>
         {TABS.map(([id, Icon, label]) => (
@@ -245,7 +256,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
                 ? 'Create a Desktop app OAuth client in Google Cloud, then enter its client ID and client secret below.'
                 : 'Create a desktop app registration in Microsoft Entra, then enter its application (client) ID below. No client secret is needed.'} See README.md in the project folder for setup instructions.</p>
               <span>Redirect URL</span>
-              <code>http://localhost:3001/api/oauth/{provider}/callback</code>
+              <code>{window.morrowDesktop ? `http://localhost:${window.location.port}` : 'http://localhost:3001'}/api/oauth/{provider}/callback</code>
             </div>
             <label className="settings-field">Client ID
               <input required value={oauth[provider].clientId} autoComplete="off" autoCapitalize="none" spellCheck={false}

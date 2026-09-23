@@ -52,9 +52,9 @@ test('persistent isolated messages, encrypted settings, and one-time demo seedin
   assert.equal(disk.includes(mail.accessToken), false);
   assert.equal(disk.includes(mail.refreshToken), false);
   assert.equal(disk.includes(mail.clientSecret), false);
-  assert.equal(statSync(directory).mode & 0o777, 0o700);
-  assert.equal(statSync(`${directory}/encryption.key`).mode & 0o777, 0o600);
-  assert.equal(statSync(`${directory}/genmail.sqlite`).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(directory).mode & 0o777, 0o700);
+  if (process.platform !== 'win32') assert.equal(statSync(`${directory}/encryption.key`).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(statSync(`${directory}/genmail.sqlite`).mode & 0o777, 0o600);
   store = createStore(directory);
   assert.deepEqual(store.getSettings(), { mail, ai, activeAccount: 'demo' });
   assert.equal(store.getMessage('b@example.com', message.id).subject, 'Account B');

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ArrowDownLeft, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, CalendarDays, CircleHelp, FilePenLine, Inbox, Leaf, LoaderCircle, Mail, MailOpen, Menu, Pencil, Plus, RefreshCw, Search, Send, Settings as SettingsIcon, ShieldCheck, Sparkles, Star, Trash2, X } from 'lucide-react';
 import Modal from './Modal';
+import { storage } from './storage';
 import FooterPreview from './FooterPreview';
 import Settings from './Settings';
 import Studio from './Studio';
@@ -36,11 +37,11 @@ function IconButton({ icon: Icon, label, children, ...props }) { return <button 
 
 function AccountGroup({ account, active, children }) {
   const key = `morrow.account.collapsed.${account.id}`;
-  const [open, setOpen] = useState(() => { try { return localStorage.getItem(key) !== 'true'; } catch { return true; } });
+  const [open, setOpen] = useState(() => { try { return storage.getItem(key) !== 'true'; } catch { return true; } });
   return <details className={`account-group ${active ? 'current-account' : ''}`} open={open} onToggle={event => {
     const expanded = event.currentTarget.open;
     setOpen(expanded);
-    try { localStorage.setItem(key, String(!expanded)); } catch { /* UI preferences may be unavailable in private browsing. */ }
+    try { storage.setItem(key, String(!expanded)); } catch { /* UI preferences may be unavailable in private browsing. */ }
   }}><summary title={account.email}><ChevronRight size={14} /><span><strong>{account.email}</strong><small>{account.provider === 'google' ? 'Google' : account.provider === 'microsoft' ? 'Outlook' : account.provider === 'imap' ? 'IMAP' : account.provider}</small></span>{account.unread > 0 && <span className="nav-count">{account.unread}</span>}</summary><div className="account-folders">{children}</div></details>;
 }
 
@@ -111,6 +112,14 @@ function Compose({ initial, account: currentAccount, accounts, preferences, foot
     }
     finally { sendLock.current = false; setBusy(''); }
   }
+  useEffect(() => {
+    const shortcut = event => {
+      if (!(event.ctrlKey || event.metaKey) || busy || aiBusy) return;
+      if (event.key.toLowerCase() === 's' && !event.shiftKey) { event.preventDefault(); submit(false); }
+      if (event.key.toLowerCase() === 'd' && event.shiftKey) { event.preventDefault(); submit(true); }
+    };
+    document.addEventListener('keydown', shortcut); return () => document.removeEventListener('keydown', shortcut);
+  });
   return <Modal title={draft.replyToId ? 'A thoughtful reply' : 'A fresh conversation'} description={account.mode === 'demo' ? 'Demo mode · Sending is simulated. No email leaves your device.' : `Sending from ${preferences.displayName || account.name || ''} <${account.email}>`} onClose={close} closeDisabled={!!busy} className="compose-modal">
     <form className="compose-form" onSubmit={event => { event.preventDefault(); submit(true); }}>
       <label className="compose-field"><span>From</span><select aria-label="Sending account" value={owner} disabled={!!busy || aiBusy || !!draft.id || !!draft.replyToId || needsReview} onChange={event => { setOwner(event.target.value); setAiResult(null); setDraft(previous => ({ ...previous, requestId: crypto.randomUUID() })); }}>{[...accounts, demoAccount].map(item => <option key={item.id} value={item.id}>{item.mode === 'demo' ? 'Demo workspace (simulated)' : item.email}</option>)}</select></label>
@@ -240,11 +249,19 @@ export default function App() {
   useEffect(() => {
     function shortcut(event) {
       const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+      if ((event.ctrlKey || event.metaKey) && !compose && !settingsBusy && !calendarBusy && !studioBusy && !syncing) {
+        const key = event.key.toLowerCase();
+        if (key === 'n') { event.preventDefault(); if (navigate('mail')) setCompose({}); }
+        if (key === 'f') { event.preventDefault(); if (navigate('mail')) searchInput.current?.focus(); }
+        if (key === ',') { event.preventDefault(); setSettingsOpen(true); }
+        if (key === 'r') { event.preventDefault(); if (event.shiftKey) { if (page === 'mail' && selected?.folder !== 'drafts') reply(); } else sync(); }
+        if (['1', '2', '3'].includes(key)) { event.preventDefault(); if (key === '1') changeFolder('inbox'); else if (key === '2') openStudio(); else navigate('calendar'); }
+      }
       if (event.key === '/' && !editing && !settingsOpen && !compose) { event.preventDefault(); searchInput.current?.focus(); }
       if (event.key === 'Escape') { setSidebarOpen(false); if (!settingsOpen && !compose) setAssistantOpen(false); }
     }
     document.addEventListener('keydown', shortcut); return () => document.removeEventListener('keydown', shortcut);
-  }, [settingsOpen, compose]);
+  });
 
   const messages = state?.messages || [];
   const filtered = useMemo(() => messages.filter(message => (folder === 'starred' ? message.starred && message.folder !== 'trash' : message.folder === folder) && (category === 'all' || message.category === category) && (!query.trim() || `${message.fromName} ${message.fromEmail} ${message.to} ${message.subject} ${message.body}`.toLowerCase().includes(query.trim().toLowerCase()))).sort((a, b) => {

@@ -46,7 +46,7 @@ writeFileSync(resolve(contents, 'Info.plist'), `<?xml version="1.0" encoding="UT
 <key>CFBundleExecutable</key><string>MorrowMail</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${version.split("-")[0]}</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleVersion</key><string>${version.split("-")[0]}</string>
 <key>MorrowReleaseVersion</key><string>${version}</string>
 <key>CFBundleIconFile</key><string>Morrow</string>
 <key>LSMinimumSystemVersion</key><string>${minimum}</string>
