@@ -1,0 +1,35 @@
+{
+  "name": "morrow-mail",
+  "version": "0.3.0-alpha.1",
+  "description": "A private, open-source email and calendar workspace with your choice of AI model.",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "test": "node --test tests/*.test.js",
+    "check": "npm test && npm run build",
+    "backup": "node --env-file-if-exists=.env scripts/backup.js",
+    "macos:build": "node scripts/build-macos.js",
+    "macos:test": "node scripts/test-macos.js",
+    "macos:open": "open \"build/macos/Morrow Mail.app\""
+  },
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "express": "^5.2.1",
+    "imapflow": "^2.0.5",
+    "lucide-react": "^1.47.0",
+    "mailparser": "^3.9.28",
+    "nodemailer": "^10.0.10",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

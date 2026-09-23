@@ -1,0 +1,80 @@
+# Morrow Mail feature coverage
+
+Morrow is an independent implementation, not a complete GenMail clone. The reference features below come from Genspark's public product-video descriptions and chapter metadata. They verify advertised capabilities, not hands-on product behavior. No claim of exhaustive parity is made.
+
+The app's authoritative behavior list is [`shared/features.js`](shared/features.js): **19 behaviors**, comprising **8 model-backed/manual actions** and **11 local simulations**. Every behavior has a server-enforced permission checkbox.
+
+## Status definitions
+
+- **Implemented, manual:** runs against the configured model when requested. Demo mode has labeled illustrative output without a model. Generated text remains reviewable.
+- **Mock simulation:** deterministic local preview followed by an explicit apply action where relevant. Never invokes the model, sends mail, accesses the web/calendar, or fetches attachments.
+- **GenMail verified:** explicitly advertised in the July 2026 GenMail launch or product demonstration.
+- **Predecessor/broader Genspark:** advertised for earlier AI Inbox or Super Agent; current GenMail equivalence is unconfirmed.
+- **Inferred addition:** useful coverage supplied by this project, not directly verified as a GenMail feature.
+
+## AI behavior coverage
+
+| Behavior / catalog ID | Reference evidence | Morrow implementation |
+| --- | --- | --- |
+| Email summaries — `summary` | Predecessor/broader Genspark: Outlook summarization [5] | **Implemented, manual.** Summarizes a permitted selected email. |
+| Suggested replies — `reply` | GenMail verified: personalized replies [1] | **Implemented, manual.** Drafts a reply using the configured tone and permitted context; review before insertion or sending. |
+| Ask your inbox — `ask` | Inferred addition; precise GenMail question-answer/search behavior unconfirmed | **Implemented, manual.** Searches permitted cached mail and asks the model using a bounded set of messages. |
+| Write new emails — `write` | GenMail advertises email drafting [1]; this standalone prompt-to-draft mode is inferred | **Implemented, manual.** Turns user instructions into draft text. |
+| Rewrite drafts — `rewrite` | Inferred addition | **Implemented, manual.** Rewrites supplied draft text under the draft/body permissions. |
+| Translate — `translate` | Inferred addition | **Implemented, manual.** Translates permitted email or draft text into the chosen language. |
+| Morning briefing — `briefing` | GenMail verified [1] | **Implemented, manual.** On-demand digest; no scheduled morning delivery. |
+| Prioritize important mail — `triage` | GenMail verified [1] | **Mock simulation.** Reviews local priority candidates and can star them locally. |
+| Smart labels — `labels` | Inferred addition | **Mock simulation.** Previews labels and applies them inside Morrow only. |
+| Email Brain — `memory` | GenMail verified: learned writing/contact context [1] | **Mock simulation.** Creates inspectable local style/contact notes. No model training or autonomous learning. Saved notes can inform model output only while the corresponding permission allows it. |
+| People/company research — `research` | GenMail verified [1] | **Mock simulation.** Brief based on permitted email context; unknown facts remain unknown. No web lookup. |
+| Meeting preparation — `meeting` | GenMail verified [1] | **Mock simulation.** Agenda and talking points from a selected email. No calendar retrieval. |
+| Custom email skills — `skill` | GenMail verified [1], [2] | **Implemented, manual.** Create, edit, remove, and run saved instructions against permitted mail. Skills do not execute arbitrary tools. |
+| Follow-up reminders — `followup` | Earlier AI Inbox advertises task tracking [3]; this reminder workflow is inferred | **Mock simulation.** Saves a local follow-up record; no notification scheduler or automatic follow-up mail. |
+| Meeting scheduling — `schedule` | Predecessor/broader Genspark: calendar coordination [4], [5] | **Mock simulation.** Creates a local proposed event; no availability lookup, calendar booking, or invitation. |
+| Inbox cleanup — `cleanup` | Inferred addition | **Mock simulation.** Previews newsletter archiving and applies it only to Morrow's cached inbox. |
+| Unsubscribe assistant — `unsubscribe` | Inferred addition | **Mock simulation.** Records a simulated unsubscribe locally; does not visit links or contact mailing lists. |
+| Attachment discovery/comparison — `attachments` | Earlier AI Inbox verified [3] | **Mock simulation.** Uses clearly marked sample attachment fixtures. Real attachments are neither fetched nor analyzed. |
+| Batch personalized replies — `batchReplies` | Predecessor/broader Genspark verified [4] | **Mock simulation.** Previews and saves separate local draft replies. Never sends a batch. |
+
+## Mail, settings, and platform coverage
+
+| Area | Reference / implementation status |
+| --- | --- |
+| Gmail and Outlook | GenMail advertises both [1]. Morrow implements OAuth connection, latest-50 inbox import, and explicit manual sending. Real authentication depends on the user's own app registrations; no authenticated provider testing is claimed. |
+| IMAP/SMTP | Additional Morrow functionality requested for this project. TLS IMAP import and explicit SMTP sending are implemented; providers must support the configured authentication method. |
+| Google and Microsoft calendars | **Implemented, manual.** Both can connect concurrently through separate calendar OAuth grants, independently of the current mail/demo account. Select a calendar, read events across a range of up to 90 days, and review before explicitly creating an event without attendees. These calls use the real provider APIs when connected; no authenticated calendar testing is claimed. |
+| Multiple mail accounts | **Implemented.** Multiple Gmail, Outlook, and IMAP connections, separate sidebar views and combined folders, account-owned drafts/replies, a From picker for new messages, and per-account disconnect. Demo remains separate. |
+| Mail organization | Search, drafts, read/unread, stars, archive, and trash are implemented locally. These shortcuts remain local. A separate reviewed Move / Labels dialog supports Gmail label add/remove and Inbox moves, Outlook folder moves, and IMAP MOVE + UIDPLUS folder moves within the owning account; full folder sync is not implemented. |
+| Inbox views and composition | Compact / Comfortable / Spacious density; six persisted sort orders; To, Cc, Bcc and multiple recipients (100 total). Native macOS commands, standard window controls, saved window size and presets. |
+| Custom model | User-supplied OpenAI-compatible base URL, model ID, optional API key, token limit, and temperature. Connection test uses a fixed prompt with no mail and does not save. |
+| AI controls | Master switch, all 19 behavior switches, folder/content scopes, and maximum context count are enforced server-side for model calls and simulations. Disabled or out-of-scope actions are rejected. |
+| General settings | Display name, signature, theme, density, mark-read behavior, tone, language, and app-open sync interval. Settings are global; workspace records remain account-specific. |
+| Local operation | Production build served on loopback, health endpoint, graceful shutdown, and a verified database/key backup command. Public hosting, shared-user access, and production certification are not supplied by these controls. |
+| Native applications | GenMail advertises Mac, Windows, iOS, and Android support [1]. Morrow provides a **native SwiftUI macOS app** and a responsive local web interface. Windows, iOS, and Android native apps are not implemented. |
+| External automation | Autonomous calendar access, web research, provider unsubscribe, attachment processing, scheduled AI runs, and automatic sending are **not implemented**. Relevant Studio workflows are labeled simulations. The separate Calendar page provides live **manual** reading and event creation only. |
+
+Policy changes and disconnecting the owning account invalidate pending workflow previews. Switching views keeps previews bound to their original mailbox; a different account cannot apply them. Applying a preview rechecks permissions; the same plan cannot be applied twice. AI Calendar/contact/attachment scope checkboxes do not grant live access to an external service. Calendar-page connections are separate from the AI policy and persist across mail/demo switches. No connected calendar events enter AI context, and Studio scheduling never creates a live event.
+
+Automated tests exercise local behavior and mocked provider responses. They are not evidence that a user's live mailbox, calendar, provider registration, or model endpoint is configured successfully. Remaining deployment prerequisites include real-account consent and acceptance checks; public or multi-user deployment additionally needs a defined hosting/authentication design and is currently unsupported.
+
+## Primary sources
+
+All sources below are published by **Genspark Products & Guides** (`@GensparkProduct`, channel `UC0SWcHpA_TA00XUN9qZUn8w`). Research inspected the public descriptions and chapter metadata; captions and the GenMail website could not be retrieved reliably.
+
+1. [GenMail launch](https://www.youtube.com/watch?v=i9I4frhlD80), July 2026: personal writing style, priority surfacing, morning briefing, Email Brain, in-inbox agent, research, meeting preparation, custom skills, connected mail providers, and platform claims.
+2. [Genspark Workspace 6.0 demonstration](https://www.youtube.com/watch?v=H18czf1P7qQ), July 2026: GenMail chapter at 20:19 and custom email skills at 22:01.
+3. [Genspark AI Inbox launch](https://www.youtube.com/watch?v=KHzLctOWbA4), November 2025: attachment discovery/comparison, negotiation drafts, scheduled task tracking, and a daily dashboard.
+4. [Genspark AI Secretary](https://www.youtube.com/watch?v=RqGd3LmxpKQ), June 2025: batch personalized responses and calendar availability, appointments, and invitations.
+5. [Outlook Email and Calendar with Genspark Super Agent](https://www.youtube.com/watch?v=E4-vxCKkDOs), July 2025: email summaries, replies, and calendar management.
+
+[1]: https://www.youtube.com/watch?v=i9I4frhlD80
+[2]: https://www.youtube.com/watch?v=H18czf1P7qQ
+[3]: https://www.youtube.com/watch?v=KHzLctOWbA4
+[4]: https://www.youtube.com/watch?v=RqGd3LmxpKQ
+[5]: https://www.youtube.com/watch?v=E4-vxCKkDOs
+
+## Native macOS surface
+
+`macos/Sources/MorrowMail` implements the complete interface in SwiftUI: mail folders/search/reader, reviewed compose/send, custom model settings and connection testing, all AI behavior/scope switches, the 19-tool Studio, editable Brain and skills, local activity, and Google/Outlook calendar connections and agenda/event creation. It consumes the same feature catalog and policy-enforcing backend; mock/live distinctions in this document apply equally to native and web clients. The runtime is bundled in the generated `.app`. OAuth alone opens the user's browser.
+
+Native acceptance checks: `npm run macos:test` validates JSON schema handling, unconfirmed-mail request identity, date/path handling, and persisted calendar retries, compiles SwiftUI, and exercises the actual native API client against private provider fixtures for all 19 behaviors, both calendars, send recovery, multi-account migration/routing, and combined views. `npm test` covers private native-service authentication/shutdown alongside provider, permission, workflow, send-recovery, and backup behavior. See README for signing, notarization, platform and live-account validation requirements.

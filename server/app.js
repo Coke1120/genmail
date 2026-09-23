@@ -1,0 +1,597 @@
+import express from 'express';
+import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as integrations from './integrations.js';
+import * as providers from './providers.js';
+import { recipients } from './recipients.js';
+import { AI_BEHAVIORS, DEFAULT_PREFERENCES, DEFAULT_SKILLS } from '../shared/features.js';
+import { resolvePolicy, updatePolicy, updatePreferences, requireBehavior, permittedMessages, redactMessage } from './policy.js';
+import { createWorkflowPlan } from './workflows.js';
+import { registerCalendarRoutes, calendarState } from './calendar-routes.js';
+
+function fail(message, status = 400) { throw Object.assign(new Error(message), { status }); }
+function text(value, name, max, allowEmpty = false) {
+  if (typeof value !== 'string' || value.length > max || (!allowEmpty && !value.trim())) fail(`${name} is required and must be at most ${max} characters.`);
+  return value;
+}
+function email(value) {
+  const result = text(value, 'Email address', 254).trim();
+  if (!/^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(result)) fail('Enter one valid email address.');
+  return result;
+}
+function hostname(value, name) {
+  const host = text(value, name, 253).trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(host)) fail(`${name} must be a hostname without a URL or port.`);
+  return host;
+}
+function portNumber(value, fallback) {
+  const number = Number(value || fallback);
+  if (!Number.isInteger(number) || number < 1 || number > 65535) fail('Enter a valid port number.');
+  return number;
+}
+function apiBase(value) {
+  let url;
+  try { url = new URL(value); } catch { fail('Enter a valid AI API base URL.'); }
+  if (url.username || url.password || url.search || url.hash || !['https:', 'http:'].includes(url.protocol)) fail('Use an HTTP(S) base URL without credentials, query, or fragment.');
+  if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) fail('Remote AI providers must use HTTPS. Local models may use HTTP on localhost.');
+  return url.href.replace(/\/$/, '');
+}
+function isLoopbackHost(value) {
+  try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(`http://${value}`).hostname); } catch { return false; }
+}
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const first = Buffer.from(a), second = Buffer.from(b);
+  return first.length === second.length && timingSafeEqual(first, second);
+}
+
+export function createApp({ store, port = 3001, appUrl = `http://localhost:${port}`, services = {}, nativeToken = '' }) {
+  let uiUrl;
+  try { uiUrl = new URL(appUrl); } catch { throw new Error('APP_URL must be a localhost HTTP origin.'); }
+  if (uiUrl.protocol !== 'http:' || !isLoopbackHost(uiUrl.host) || uiUrl.origin !== appUrl || uiUrl.username || uiUrl.password) throw new Error('APP_URL must be a localhost HTTP origin without a path.');
+  const api = { ...integrations, ...providers, ...services };
+  const app = express();
+  const trustedOrigins = new Set([appUrl, `http://localhost:${port}`, `http://127.0.0.1:${port}`, 'http://localhost:5173', 'http://127.0.0.1:5173']);
+  const oauthPending = new Map();
+  const sending = new Map();
+  const sendingDrafts = new Set();
+  const previews = new Map();
+  let mailboxBusy = false;
+  app.disable('x-powered-by');
+  app.use((req, res, next) => {
+    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Cross-Origin-Resource-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()' });
+    if (!isLoopbackHost(req.headers.host)) return res.status(403).json({ error: 'Morrow Mail accepts localhost requests only.' });
+    next();
+  });
+  app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    const callback = req.method === 'GET' && /^\/(?:oauth|calendar-oauth)\/(google|microsoft)\/(callback|authorize)\/?$/i.test(req.path);
+    if (nativeToken && !callback && !safeEqual(req.get('Authorization'), `Bearer ${nativeToken}`)) return res.status(401).json({ error: 'Open Morrow Mail to access this workspace.' });
+    if (!callback && ((req.headers.origin && !trustedOrigins.has(req.headers.origin)) || req.headers['sec-fetch-site'] === 'cross-site')) return res.status(403).json({ error: 'This request did not come from Morrow Mail.' });
+    if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method) && !req.is('application/json')) return res.status(415).json({ error: 'Use application/json.' });
+    next();
+  });
+  app.use(express.json({ limit: '256kb' }));
+
+  function settings() { return store.getSettings(); }
+  // Legacy single-mailbox settings are read until the next connection change.
+  function connections(config = settings()) { return config.mailAccounts ?? (config.mail?.email ? { [config.mail.email]: config.mail } : {}); }
+  function validAccount(account) { return account === 'demo' || Object.hasOwn(connections(), account || ''); }
+  function activeAccount() {
+    const selected = settings().activeAccount;
+    return selected === 'all' || validAccount(selected) ? selected : 'demo';
+  }
+  function saveConnection(mail, select = false) {
+    if (select) mail = { ...mail, connectionId: randomUUID() };
+    const config = settings();
+    store.setSettings({ mailAccounts: { ...connections(config), [mail.email]: mail },
+      ...(select || config.mail?.email === mail.email ? { mail } : {}), ...(select ? { activeAccount: mail.email } : {}) });
+  }
+  function canonicalAddress(address) { return Object.keys(connections()).find(key => key.toLowerCase() === address.toLowerCase()) || address; }
+  function ownedMessage(account, message) { return message && { ...message, accountId: account, viewId: JSON.stringify([account, message.id]) }; }
+  app.use('/api', (req, res, next) => {
+    const routePath = req.path.toLowerCase().replace(/\/+$/, '');
+    const supplied = req.get('X-Genmail-Account');
+    const bound = ['POST', 'PATCH', 'DELETE'].includes(req.method) && /^\/(send|drafts|ai|sync|messages\/[^/]+(?:\/organize)?|workflows\/.*|skills(?:\/.*)?|workspace\/.*|account\/disconnect)$/.test(routePath);
+    if (bound && !validAccount(supplied) && !(routePath === '/sync' && supplied === 'all')) {
+      return res.status(409).json({ error: 'Choose a connected mailbox before continuing. This account may have been disconnected.' });
+    }
+    req.mailAccount = validAccount(supplied) || supplied === 'all' ? supplied : activeAccount();
+    next();
+  });
+  function workspace(account = activeAccount()) {
+    return { activity: [], reminders: [], events: [], unsubscribed: [], brain: null, skills: structuredClone(DEFAULT_SKILLS), ...settings().workspaces?.[account] };
+  }
+  function saveWorkspace(account, partial) {
+    const previous = settings().workspaces || {};
+    store.setSettings({ workspaces: { ...previous, [account]: { ...workspace(account), ...partial } } });
+  }
+  function safeMail(mail = {}) {
+    return { configured: !!mail.email, provider: mail.provider || 'imap', email: mail.email || '', imapHost: mail.imapHost || '', imapPort: mail.imapPort || 993, smtpHost: mail.smtpHost || '', smtpPort: mail.smtpPort || 465, clientId: mail.clientId || '', canOrganize: providers.canOrganizeMail(mail) };
+  }
+  function state(selected = activeAccount()) {
+    const config = settings(), accounts = connections(config);
+    const view = selected === 'all' || validAccount(selected) ? selected : activeAccount();
+    const live = view !== 'all' && view !== 'demo';
+    const mail = accounts[view] || config.mail || {};
+    const ai = config.ai || {};
+    const preferences = { ...DEFAULT_PREFERENCES, ...config.preferences };
+    const rows = account => store.listMessages(account).map(message => ownedMessage(account, message));
+    const metadata = Object.values(accounts).map(connection => {
+      const messages = store.listMessages(connection.email);
+      return { id: connection.email, email: connection.email, mode: 'live', provider: connection.provider || 'imap', name: connection.email.split('@')[0],
+        unread: messages.filter(message => message.folder === 'inbox' && !message.read).length,
+        counts: Object.fromEntries(['inbox', 'starred', 'sent', 'drafts', 'archive', 'trash'].map(folder => [folder, messages.filter(message => folder === 'starred' ? message.starred && message.folder !== 'trash' : message.folder === folder).length])),
+        settings: safeMail(connection) };
+    });
+    return {
+      features: AI_BEHAVIORS,
+      account: { id: view, email: live ? view : view === 'all' ? '' : 'alex@genmail.example', name: view === 'all' ? 'All accounts' : preferences.displayName || (live ? view.split('@')[0] : 'Alex Morgan'), mode: view === 'all' ? 'combined' : live ? 'live' : 'demo', provider: live ? mail.provider || 'imap' : view },
+      accounts: metadata,
+      messages: view === 'all' ? Object.keys(accounts).flatMap(rows).sort((a, b) => b.date.localeCompare(a.date) || a.viewId.localeCompare(b.viewId)) : rows(view),
+      settings: {
+        mail: safeMail(mail),
+        ai: { configured: !!(ai.baseUrl && ai.model), baseUrl: ai.baseUrl || 'http://127.0.0.1:11434/v1', model: ai.model || '', hasApiKey: !!ai.apiKey, temperature: ai.temperature ?? 0.3, maxTokens: ai.maxTokens ?? 1200 },
+        policy: resolvePolicy(config.policy), preferences, calendars: calendarState(config),
+      },
+      workspace: workspace(view),
+    };
+  }
+  function getMessage(account, id) {
+    const message = typeof id === 'string' && store.getMessage(account, id);
+    if (!message) fail('Message not found.', 404);
+    return message;
+  }
+  // ponytail: one mailbox operation at a time; per-account locks if concurrent sync throughput matters.
+  async function mailboxOperation(work) {
+    if (mailboxBusy) fail('Another mailbox operation is running. Try again when it finishes.', 409);
+    mailboxBusy = true;
+    try { return await work(); } finally { mailboxBusy = false; }
+  }
+  function importMessages(mail, messages) {
+    const imported = new Map(store.listMessages(mail.email).filter(item => !item.providerFolderId || item.providerFolderId === 'INBOX' || mail.provider !== 'imap').map(item => [item.remoteId || item.id, item]));
+    store.transaction(() => { for (const message of messages) {
+      const existing = imported.get(message.id);
+      store.upsertMessage(mail.email, { ...message, ...(existing ? { id: existing.id, remoteId: existing.remoteId, providerFolderId: existing.providerFolderId, providerFolderName: existing.providerFolderName, folder: existing.folder, read: existing.read, starred: existing.starred, labels: existing.labels } : {}) });
+    } });
+  }
+  async function currentMail(account) {
+    const mail = connections()[account];
+    if (!mail) fail('Connect a mailbox first.', 409);
+    if (!mail.provider || mail.provider === 'imap') return mail;
+    try {
+      const refreshed = await api.refreshMail(mail);
+      saveConnection({ ...refreshed, email: account });
+      return refreshed;
+    } catch { fail('Your mailbox session expired. Reconnect this account in Settings.', 401); }
+  }
+  async function fetchMessages(mail) {
+    return mail.provider && mail.provider !== 'imap' ? api.fetchProviderMessages(mail) : api.fetchImapMessages(mail);
+  }
+
+  app.get('/api/state', (req, res) => res.json(state(req.mailAccount)));
+  function selectAccount(account) {
+    if (account !== 'all' && !validAccount(account)) fail('Choose a connected mailbox.', 409);
+    store.setSettings({ activeAccount: account, ...(connections()[account] ? { mail: connections()[account] } : {}) });
+    return state(account);
+  }
+  app.post('/api/account/select', (req, res) => res.json(selectAccount(req.body?.accountId)));
+  app.post('/api/account/demo', (req, res) => res.json(selectAccount('demo')));
+  app.post('/api/account/live', (req, res) => {
+    const account = req.body?.accountId || settings().mail?.email || Object.keys(connections())[0];
+    if (!account) fail('Connect a mailbox first.', 409);
+    res.json(selectAccount(account));
+  });
+  app.post('/api/account/disconnect', async (req, res) => mailboxOperation(async () => {
+    const accounts = { ...connections() }, account = req.mailAccount;
+    if (!Object.hasOwn(accounts, account)) fail('Choose a connected mailbox.', 409);
+    delete accounts[account];
+    const fallback = Object.keys(accounts)[0] || 'demo';
+    const selected = activeAccount() === account ? fallback : activeAccount();
+    store.setSettings({ mailAccounts: accounts, mail: accounts[settings().mail?.email] || accounts[fallback] || null, activeAccount: selected });
+    for (const [id, preview] of previews) if (preview.account === account) previews.delete(id);
+    res.json(state(selected));
+  }));
+  app.post('/api/settings/mail', async (req, res) => mailboxOperation(async () => {
+    const input = req.body || {};
+    const address = canonicalAddress(email(input.email));
+    const existing = connections()[address];
+    const hosts = { imapHost: hostname(input.imapHost, 'IMAP host'), imapPort: portNumber(input.imapPort, 993), smtpHost: hostname(input.smtpHost, 'SMTP host'), smtpPort: portNumber(input.smtpPort, 465) };
+    const sameDestination = existing?.email === address && existing.provider === 'imap' && Object.entries(hosts).every(([key, value]) => existing[key] === value);
+    const password = input.password || (sameDestination ? existing.password : '');
+    const mail = { provider: 'imap', email: address, password: text(password, 'Mailbox password', 4096), ...hosts };
+    let messages;
+    try { await api.verifySmtp(mail); messages = await fetchMessages(mail); }
+    catch { fail('Mailbox connection failed. Check the hosts, ports, and app password. IMAP requires TLS; SMTP requires TLS or STARTTLS.', 502); }
+    store.transaction(() => { importMessages(mail, messages); saveConnection(mail, true); });
+    res.json(state(address));
+  }));
+  function modelSettings(input) {
+    const previous = settings().ai;
+    const baseUrl = apiBase(text(input.baseUrl, 'AI API base URL', 2048));
+    const model = text(input.model, 'Model', 200).trim();
+    const key = input.clearApiKey ? '' : input.apiKey || (previous?.baseUrl === baseUrl ? previous.apiKey : '') || '';
+    const apiKey = text(key, 'API key', 4096, true);
+    if (/[\r\n]/.test(apiKey)) fail('API key cannot contain line breaks.');
+    const temperature = input.temperature ?? previous?.temperature ?? 0.3;
+    const maxTokens = input.maxTokens ?? previous?.maxTokens ?? 1200;
+    if (typeof temperature !== 'number' || !Number.isFinite(temperature) || temperature < 0 || temperature > 2) fail('Temperature must be between 0 and 2.');
+    if (!Number.isInteger(maxTokens) || maxTokens < 128 || maxTokens > 4096) fail('Maximum response tokens must be between 128 and 4096.');
+    return { baseUrl, model, apiKey, temperature, maxTokens };
+  }
+  app.post('/api/settings/ai', (req, res) => {
+    store.setSettings({ ai: modelSettings(req.body || {}) });
+    res.json(state(req.mailAccount));
+  });
+  app.post('/api/settings/ai/test', async (req, res) => {
+    const ai = modelSettings(req.body || {});
+    try {
+      await api.runModel(ai, 'write', [], 'Reply with exactly: Morrow connection ready.');
+      res.json({ ok: true, text: 'Connection succeeded. The selected model returned a response. No email content was shared.' });
+    } catch { fail('The connection test failed. Check your base URL, model ID, and API key.', 502); }
+  });
+  app.post('/api/settings/policy', (req, res) => {
+    store.setSettings({ policy: updatePolicy(settings().policy, req.body) });
+    previews.clear();
+    res.json(state(req.mailAccount));
+  });
+  app.post('/api/settings/preferences', (req, res) => {
+    store.setSettings({ preferences: updatePreferences(settings().preferences, req.body) });
+    res.json(state(req.mailAccount));
+  });
+  app.post('/api/sync', async (req, res) => mailboxOperation(async () => {
+    const accounts = req.mailAccount === 'all' ? Object.keys(connections()) : req.mailAccount === 'demo' ? [] : [req.mailAccount];
+    const syncErrors = [];
+    for (const account of accounts) {
+      try {
+        const mail = await currentMail(account);
+        importMessages(mail, await fetchMessages(mail));
+      } catch {
+        if (req.mailAccount !== 'all') fail('Mailbox sync failed. Check your connection or reconnect in Settings.', 502);
+        syncErrors.push({ accountId: account, error: 'Sync failed. Check your connection or reconnect this account in Settings.' });
+      }
+    }
+    res.json({ ...state(req.mailAccount), syncErrors });
+  }));
+
+  app.post('/api/oauth/:provider/start', (req, res) => {
+    const provider = req.params.provider;
+    if (!['google', 'microsoft'].includes(provider)) fail('Unknown mail provider.');
+    const config = { clientId: text(req.body?.clientId, 'OAuth client ID', 1024).trim(), organize: req.body?.organize === true };
+    if (provider === 'google') config.clientSecret = text(req.body?.clientSecret, 'Google client secret', 4096).trim();
+    const redirectUri = `http://localhost:${port}/api/oauth/${provider}/callback`;
+    const pending = api.oauthStart(provider, config, redirectUri);
+    const browserToken = randomBytes(32).toString('hex');
+    for (const [key, value] of oauthPending) if (value.expiresAt < Date.now()) oauthPending.delete(key);
+    if (oauthPending.size >= 20) fail('Too many pending connections. Wait a few minutes and try again.', 429);
+    oauthPending.set(pending.state, { ...pending, provider, redirectUri, browserToken, expiresAt: Date.now() + 10 * 60 * 1000 });
+    res.json({ url: `http://localhost:${port}/api/oauth/${provider}/authorize?state=${encodeURIComponent(pending.state)}` });
+  });
+  app.get('/api/oauth/:provider/authorize', (req, res) => {
+    const pending = typeof req.query.state === 'string' ? oauthPending.get(req.query.state) : null;
+    if (!pending || pending.provider !== req.params.provider || pending.expiresAt < Date.now() || pending.started) fail('Connection expired. Start again from Settings.');
+    pending.started = true;
+    // Set the binding cookie on the callback host, even when the UI uses 127.0.0.1.
+    res.cookie('genmail_oauth', pending.browserToken, { httpOnly: true, sameSite: 'lax', maxAge: 10 * 60 * 1000, path: '/api/oauth' });
+    res.redirect(pending.url);
+  });
+  app.get('/api/oauth/:provider/callback', async (req, res) => {
+    const redirect = new URL(appUrl);
+    const pending = typeof req.query.state === 'string' ? oauthPending.get(req.query.state) : null;
+    oauthPending.delete(req.query.state);
+    const cookie = req.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('genmail_oauth='))?.slice('genmail_oauth='.length);
+    res.clearCookie('genmail_oauth', { path: '/api/oauth' });
+    try {
+      if (!pending || pending.expiresAt < Date.now() || pending.provider !== req.params.provider || !safeEqual(cookie, pending.browserToken)) fail('Connection expired or could not be verified. Start again from Settings.');
+      if (req.query.error) fail('Mailbox access was not granted. Try again from Settings.');
+      const code = text(req.query.code, 'Authorization code', 8192);
+      await mailboxOperation(async () => {
+        let mail, messages;
+        try {
+          mail = await api.oauthFinish(pending.provider, { code, verifier: pending.verifier, config: pending.config, redirectUri: pending.redirectUri });
+          messages = await fetchMessages(mail);
+        } catch { fail('The provider connection failed. Check your app registration and permissions, then try again.'); }
+        mail.email = canonicalAddress(email(mail.email));
+        store.transaction(() => { importMessages(mail, messages); saveConnection(mail, true); });
+      });
+      redirect.searchParams.set('connected', pending.provider);
+    } catch (error) { redirect.searchParams.set('connectionError', error.status ? error.message : 'Connection failed. Try again from Settings.'); }
+    res.redirect(redirect.href);
+  });
+
+  async function remoteFolders(mail) {
+    return !mail.provider || mail.provider === 'imap' ? api.listImapFolders(mail) : api.listProviderFolders(mail);
+  }
+  app.get('/api/mail/folders', async (req, res) => mailboxOperation(async () => {
+    const account = req.get('X-Genmail-Account');
+    if (!validAccount(account) || account === 'demo') fail('Choose a connected mailbox.', 409);
+    const mail = await currentMail(account);
+    res.json({ folders: await remoteFolders(mail), provider: mail.provider || 'imap', accountId: account });
+  }));
+  app.post('/api/messages/:id/organize', async (req, res) => mailboxOperation(async () => {
+    const account = req.mailAccount;
+    const message = getMessage(account, req.params.id);
+    const mail = await currentMail(account);
+    const provider = mail.provider || 'imap';
+    if (!(message.remoteId || message.id).startsWith(provider + ':')) fail('Only imported messages can be organized on the provider.');
+    if (!['move', 'addLabel', 'removeLabel'].includes(req.body?.mode)) fail('Choose a supported organization action.');
+    if (req.body.confirmed !== true) fail('Review and confirm this provider change first.');
+    const destination = (await remoteFolders(mail)).find(folder => folder.id === req.body.destinationId);
+    if (!destination) fail('Choose a current folder or label from this mailbox.');
+    let patch;
+    try {
+      patch = await (provider === 'imap' ? api.organizeImapMessage : api.organizeProviderMessage)(mail, message, destination, req.body.mode);
+    } catch {
+      fail('The provider change could not be confirmed. Check the message in your provider before trying again. Your cached copy is retained.', 502);
+    }
+    res.json({ message: ownedMessage(account, store.updateMessage(account, message.id, patch)) });
+  }));
+  app.patch('/api/messages/:id', (req, res) => {
+    const patch = {};
+    for (const key of ['read', 'starred']) if (key in (req.body || {})) {
+      if (typeof req.body[key] !== 'boolean') fail(`${key} must be true or false.`);
+      patch[key] = req.body[key];
+    }
+    if ('folder' in (req.body || {})) {
+      if (!['inbox', 'archive', 'trash'].includes(req.body.folder)) fail('Invalid folder.');
+      patch.folder = req.body.folder;
+    }
+    if (!Object.keys(patch).length) fail('No supported changes were provided.');
+    const account = req.mailAccount;
+    if (sendingDrafts.has(`${account}:${req.params.id}`)) fail('This draft is being sent. Wait for sending to finish.', 409);
+    const original = getMessage(account, req.params.id);
+    if (original.folder === 'drafts' && patch.folder && patch.folder !== 'trash') fail('Save or send this draft before moving it.');
+    res.json({ message: ownedMessage(account, store.updateMessage(account, req.params.id, patch)) });
+  });
+  function content(input, draft) {
+    const addresses = recipients(input, draft);
+    const subject = text(input.subject ?? '', 'Subject', 500, true);
+    if (/[\r\n]/.test(subject)) fail('Recipient and subject must be single lines.');
+    const body = text(input.body ?? '', 'Message body', 100000, draft);
+    return { ...addresses, subject: draft ? subject : subject || '(No subject)', body };
+  }
+  function outgoing(account, value, extra = {}) {
+    const address = account === 'demo' ? 'alex@genmail.example' : account;
+    return { id: randomUUID(), fromName: settings().preferences?.displayName || (account === 'demo' ? 'Alex Morgan' : address), fromEmail: address, date: new Date().toISOString(), read: true, starred: false, category: 'primary', labels: [], ...value, preview: value.body.replace(/\s+/g, ' ').slice(0, 180), ...extra };
+  }
+  app.post('/api/drafts', (req, res) => {
+    const input = req.body || {};
+    const value = content(input, true);
+    const account = req.mailAccount;
+    if (input.id) {
+      if (sendingDrafts.has(`${account}:${input.id}`)) fail('This draft is being sent. Wait for sending to finish.', 409);
+      const existing = getMessage(account, input.id);
+      if (existing.folder !== 'drafts') fail('Only drafts can be edited.');
+    }
+    if (input.replyToId) getMessage(account, input.replyToId);
+    const pendingDelivery = (settings().deliveryAttempts || []).find(item => item.account === account && item.draftId === input.id);
+    if (pendingDelivery) fail('This draft has an unconfirmed delivery. Check your provider’s Sent folder before retrying it.', 409);
+    const message = outgoing(account, value, { id: input.id || randomUUID(), folder: 'drafts', ...(input.replyToId ? { replyToId: input.replyToId } : {}) });
+    res.json({ message: ownedMessage(account, store.upsertMessage(account, message)) });
+  });
+  app.post('/api/send', async (req, res) => {
+    const input = req.body || {};
+    const value = content(input, false);
+    const account = req.mailAccount;
+    const requestId = text(input.requestId, 'Send request ID', 100);
+    if (!/^[a-zA-Z0-9-]{8,100}$/.test(requestId)) fail('Invalid send request ID.');
+    if (input.retryUnconfirmed !== undefined && typeof input.retryUnconfirmed !== 'boolean') fail('Delivery review must be true or false.');
+    const fingerprint = message => createHash('sha256').update(JSON.stringify({ to: message.to, subject: message.subject, body: message.body, replyToId: message.replyToId || '', ...(message.cc ? { cc: message.cc } : {}), ...(message.bcc ? { bcc: message.bcc } : {}) })).digest('hex');
+    const payloadHash = fingerprint({ ...value, replyToId: input.replyToId });
+    const sentId = `sent:${requestId}`;
+    const sent = store.getMessage(account, sentId);
+    if (sent) {
+      if (fingerprint(sent) !== payloadHash) fail('This send request ID was already used for different text. Start a new draft.', 409);
+      return res.json({ message: ownedMessage(account, sent), simulated: account === 'demo' });
+    }
+    const attempts = () => settings().deliveryAttempts || [];
+    const previous = attempts().find(item => item.account === account && (item.requestId === requestId || (input.draftId && item.draftId === input.draftId)));
+    const reviewRequired = (attempt, status = 409) => res.status(status).json({ error: 'Delivery could not be confirmed. This draft is saved. Check your provider’s Sent folder before explicitly retrying; retrying may send a duplicate.', requiresSendReview: true, draftId: attempt.draftId, deliveryRequestId: attempt.requestId, message: ownedMessage(account, store.getMessage(account, attempt.draftId)) });
+    if (previous && (!input.retryUnconfirmed || previous.requestId !== requestId)) return reviewRequired(previous);
+    if (previous && previous.payloadHash !== payloadHash) fail('This draft has an unconfirmed delivery with different text. Check your provider’s Sent folder and reopen the saved draft before retrying.', 409);
+    const draftId = input.draftId || previous?.draftId || (account !== 'demo' ? `outbox:${requestId}` : null);
+    const sendKey = `${account}:${requestId}`;
+    const draftKey = draftId ? `${account}:${draftId}` : null;
+    if (sending.has(sendKey) || (draftKey && sendingDrafts.has(draftKey))) fail('This draft is already being sent. Wait before retrying.', 409);
+    if (input.draftId && getMessage(account, input.draftId).folder !== 'drafts') fail('Only saved drafts can be sent.');
+    const original = input.replyToId ? getMessage(account, input.replyToId) : null;
+    sending.set(sendKey, true);
+    if (draftKey) sendingDrafts.add(draftKey);
+    try {
+      await mailboxOperation(async () => {
+        let messageId = '', attempt;
+        if (account !== 'demo') {
+          const mail = await currentMail(account);
+          // Persist before delivery: a crash or lost response must never trigger an automatic resend.
+          attempt = previous || { account, requestId, draftId, payloadHash, createdAt: new Date().toISOString() };
+          if (!previous && attempts().length >= 1000) fail('Too many unconfirmed deliveries. Review your saved drafts before sending more.', 409);
+          store.transaction(() => {
+            store.upsertMessage(account, outgoing(account, value, { id: draftId, folder: 'drafts', deliveryStatus: 'unconfirmed', deliveryRequestId: requestId, ...(input.replyToId ? { replyToId: input.replyToId } : {}) }));
+            if (!previous) store.setSettings({ deliveryAttempts: [...attempts(), attempt] });
+          });
+          const message = { ...value, fromName: settings().preferences?.displayName || '', replyMessageId: original?.messageId?.replace(/[\r\n]/g, '') || undefined };
+          try {
+            const result = mail.provider === 'imap' ? await api.sendSmtpMessage(mail, message) : await api.sendProviderMessage(mail, message);
+            messageId = typeof result === 'string' ? result : result?.messageId || '';
+          } catch { return reviewRequired(attempt, 502); }
+        }
+        const message = outgoing(account, value, { id: sentId, folder: 'sent', messageId: typeof messageId === 'string' ? messageId : '', ...(input.replyToId ? { replyToId: input.replyToId } : {}) });
+        try {
+          store.transaction(() => {
+            store.upsertMessage(account, message);
+            if (draftId) store.deleteMessage(account, draftId);
+            if (attempt) store.setSettings({ deliveryAttempts: attempts().filter(item => !(item.account === account && item.requestId === requestId)) });
+          });
+        } catch (error) {
+          if (attempt) return reviewRequired(attempt, 502);
+          throw error;
+        }
+        res.json({ message: ownedMessage(account, message), simulated: account === 'demo' });
+      });
+    } finally { sending.delete(sendKey); if (draftKey) sendingDrafts.delete(draftKey); }
+  });
+  function contextFor(action, input, account) {
+    const config = settings();
+    const policy = resolvePolicy(config.policy);
+    const feature = requireBehavior(policy, action);
+    let messages = [], skill;
+    if (action === 'skill') {
+      skill = workspace(account).skills.find(item => item.id === input.skillId);
+      if (!skill) fail('Choose a saved email skill.', 404);
+      if (skill.enabled === false) fail('This email skill is disabled.', 403);
+    }
+    if (action === 'rewrite' || (action === 'translate' && input.draftText !== undefined)) {
+      if (!policy.folders.drafts || !policy.content.body) fail('Enable draft and body access in AI permissions.', 403);
+      messages = [{ id: 'unsaved-draft', body: text(input.draftText, 'Draft text', 100000), subject: '', fromName: '', fromEmail: '', date: new Date().toISOString(), folder: 'drafts' }];
+    } else if (feature.context === 'selected') {
+      const message = getMessage(account, input.messageId);
+      if (!policy.folders[message.folder]) fail('This folder is outside the permitted AI scope.', 403);
+      messages = [redactMessage(message, policy)];
+    } else if (feature.context === 'mailbox') {
+      messages = permittedMessages(store.listMessages(account), policy).filter(message => !skill?.folders || skill.folders[message.folder]);
+      if (!messages.length) fail('No messages are available within the permitted folders.', 403);
+      if (action === 'ask') messages = api.searchContext(messages, input.prompt || '', policy.maxMessages);
+      messages = messages.slice(0, policy.maxMessages);
+    }
+    return { config, policy, feature, account, messages, skill };
+  }
+  app.post('/api/ai', async (req, res) => {
+    const input = req.body || {};
+    const { action, prompt = '' } = input;
+    text(prompt, 'AI instructions', 2000, !['ask', 'write'].includes(action));
+    const { config, policy, feature, account, messages, skill } = contextFor(action, input, req.mailAccount);
+    if (feature.mock) fail('Use the workflow preview for simulated behaviors.');
+    const brain = workspace(account).brain;
+    const useBrain = policy.behaviors.memory && policy.content.contacts && policy.content.sender && policy.content.body && policy.content.subject &&
+      brain && (brain.sourceMessageIds || []).every(id => {
+        const folder = store.getMessage(account, id)?.folder;
+        return policy.folders[folder] && (!skill?.folders || skill.folders[folder]);
+      });
+    const options = { preferences: { ...DEFAULT_PREFERENCES, ...config.preferences }, brain: useBrain ? brain : null };
+    const instructions = skill ? `${skill.instructions}\n\n${prompt}` : prompt;
+    if (!config.ai?.model || !config.ai?.baseUrl) {
+      if (account !== 'demo') fail('Choose an AI model in Settings to use assistance with your mailbox.', 409);
+      return res.json({ text: api.demoAssistance(action, messages, instructions, options), source: 'demo' });
+    }
+    let result;
+    try { result = await api.runModel(config.ai, action, messages, instructions, options); }
+    catch (error) { fail(error.message?.startsWith('The AI provider returned') ? error.message : 'Could not reach the AI model or read its response. Check your endpoint and model, then try again.', 502); }
+    if (!validAccount(account) || connections(config)[account]?.connectionId !== connections()[account]?.connectionId || JSON.stringify(policy) !== JSON.stringify(resolvePolicy(settings().policy)) || (skill && JSON.stringify(skill) !== JSON.stringify(workspace(account).skills.find(item => item.id === skill.id)))) fail('The account or AI permissions changed while this request was running. Its response was discarded.', 409);
+    res.json({ text: result, source: 'model' });
+  });
+
+  app.post('/api/workflows/preview', (req, res) => {
+    const input = req.body || {};
+    const { policy, feature, account, messages } = contextFor(input.action, input, req.mailAccount);
+    if (!feature.mock) fail('This behavior uses the AI assistant, not a mock workflow.');
+    if (input.when !== undefined && (typeof input.when !== 'string' || !Number.isFinite(Date.parse(input.when)) || Date.parse(input.when) <= Date.now())) fail('Choose a future date and time.');
+    for (const [id, preview] of previews) if (preview.expiresAt < Date.now()) previews.delete(id);
+    if (previews.size >= 100) fail('Too many pending previews. Apply a preview or wait ten minutes.', 429);
+    const plan = createWorkflowPlan(input.action, messages, { when: input.when });
+    const id = randomUUID(), createdAt = new Date().toISOString();
+    const preview = { id, action: input.action, title: plan.title, summary: plan.summary, items: plan.items, createdAt };
+    previews.set(id, { ...preview, account, policy: JSON.stringify(policy), messages, plan, expiresAt: Date.now() + 10 * 60 * 1000 });
+    res.json({ preview, simulated: true });
+  });
+  app.post('/api/workflows/apply', (req, res) => {
+    const preview = previews.get(req.body?.previewId);
+    if (!preview || preview.expiresAt < Date.now()) fail('This preview expired or was already applied. Generate a fresh preview.', 409);
+    const account = req.mailAccount, policy = resolvePolicy(settings().policy);
+    if (preview.account !== account || preview.policy !== JSON.stringify(policy)) fail('The account or permissions changed. Generate a fresh preview.', 409);
+    requireBehavior(policy, preview.action);
+    for (const previous of preview.messages) {
+      const current = getMessage(account, previous.id);
+      if (!policy.folders[current.folder] || JSON.stringify(redactMessage(current, policy)) !== JSON.stringify(previous)) fail('A source message changed after this preview. Generate a fresh preview.', 409);
+      if (sendingDrafts.has(`${account}:${current.id}`)) fail('A source draft is being sent. Wait for sending to finish.', 409);
+    }
+    store.transaction(() => {
+    const current = workspace(account), next = {};
+    for (const { messageId, patch } of preview.plan.changes || []) {
+      const current = getMessage(account, messageId);
+      store.updateMessage(account, messageId, { ...patch, ...(patch.labels ? { labels: [...new Set([...(current.labels || []), ...patch.labels])] } : {}) });
+    }
+    const now = new Date().toISOString();
+    for (const collection of ['reminders', 'events', 'unsubscribed']) {
+      if (preview.plan.records[collection]) next[collection] = [...preview.plan.records[collection].map(record => ({ ...record, id: randomUUID(), createdAt: now, done: false, simulated: true })), ...current[collection]].slice(0, 100);
+    }
+    if (preview.plan.records.brain) next.brain = { ...preview.plan.records.brain, updatedAt: now, sourceMessageIds: preview.messages.map(message => message.id), simulated: true };
+    for (const [index, draft] of (preview.plan.records.drafts || []).entries()) {
+      const value = content(draft, true);
+      store.upsertMessage(account, outgoing(account, value, { id: `mock-draft:${preview.id}:${index}`, folder: 'drafts', replyToId: draft.replyToId }));
+    }
+    next.activity = [{ id: preview.id, action: preview.action, title: preview.title, detail: preview.summary, createdAt: now, simulated: true }, ...current.activity].slice(0, 100);
+    saveWorkspace(account, next);
+    });
+    previews.delete(preview.id);
+    res.json({ ...state(req.mailAccount), simulated: true });
+  });
+  app.post('/api/skills', (req, res) => {
+    const input = req.body || {}, account = req.mailAccount, current = workspace(account);
+    const existing = input.id ? current.skills.find(skill => skill.id === input.id) : null;
+    if (input.id && !existing) fail('Skill not found.', 404);
+    if (!input.id && current.skills.length >= 20) fail('Keep at most 20 custom skills.');
+    const name = text(input.name, 'Skill name', 80).trim(), instructions = text(input.instructions, 'Skill instructions', 4000).trim();
+    if (input.enabled !== undefined && typeof input.enabled !== 'boolean') fail('Skill enabled must be true or false.');
+    const folders = input.folders ? updatePolicy({ folders: { inbox: true, sent: false, drafts: false, archive: false, trash: false } }, { folders: input.folders }).folders : existing?.folders || { inbox: true, sent: false, drafts: false, archive: false, trash: false };
+    const skill = { id: existing?.id || randomUUID(), name, instructions, enabled: input.enabled ?? existing?.enabled ?? true, folders };
+    saveWorkspace(account, { skills: existing ? current.skills.map(item => item.id === skill.id ? skill : item) : [...current.skills, skill] });
+    res.json(state(req.mailAccount));
+  });
+  app.delete('/api/skills/:id', (req, res) => {
+    const account = req.mailAccount, current = workspace(account);
+    if (!current.skills.some(skill => skill.id === req.params.id)) fail('Skill not found.', 404);
+    saveWorkspace(account, { skills: current.skills.filter(skill => skill.id !== req.params.id) });
+    res.json(state(req.mailAccount));
+  });
+  app.post('/api/workspace/brain', (req, res) => {
+    const account = req.mailAccount, current = workspace(account);
+    const voice = text(req.body?.voice ?? '', 'Writing voice', 2000, true), notes = text(req.body?.notes ?? '', 'Brain notes', 4000, true);
+    saveWorkspace(account, { brain: { ...current.brain, voice, notes, contacts: current.brain?.contacts || [], updatedAt: new Date().toISOString() } });
+    res.json(state(req.mailAccount));
+  });
+  app.delete('/api/workspace/brain', (req, res) => { saveWorkspace(req.mailAccount, { brain: null }); res.json(state(req.mailAccount)); });
+  app.patch('/api/workspace/:collection/:id', (req, res) => {
+    const { collection, id } = req.params, account = req.mailAccount, current = workspace(account);
+    if (!['reminders', 'events'].includes(collection)) fail('Unknown workspace collection.');
+    const item = current[collection].find(record => record.id === id);
+    if (!item) fail('Workspace item not found.', 404);
+    const patch = {};
+    if ('done' in (req.body || {})) {
+      if (typeof req.body.done !== 'boolean') fail('Done must be true or false.');
+      patch.done = req.body.done;
+    }
+    if (collection === 'events' && 'cancelled' in (req.body || {})) {
+      if (typeof req.body.cancelled !== 'boolean') fail('Cancelled must be true or false.');
+      patch.cancelled = req.body.cancelled;
+    }
+    if (!Object.keys(patch).length) fail('No supported workspace change was provided.');
+    saveWorkspace(account, { [collection]: current[collection].map(record => record.id === id ? { ...record, ...patch } : record) });
+    res.json(state(req.mailAccount));
+  });
+  registerCalendarRoutes(app, { store, port, appUrl, services });
+  app.get('/api/health', (req, res) => {
+    store.getSettings();
+    res.json({ status: 'ok', service: 'morrow-mail' });
+  });
+  app.use('/api', (req, res) => res.status(404).json({ error: 'API route not found.' }));
+  const dist = fileURLToPath(new URL('../dist/', import.meta.url));
+  if (nativeToken) {
+    app.get('/', (req, res) => {
+      const failed = !!(req.query.connectionError || req.query.calendarError);
+      res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
+      res.type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Morrow Mail</title><style>body{font:18px system-ui;max-width:36rem;margin:15vh auto;padding:2rem;color:#193c34;background:#f5f4ec}h1{font-size:32px}</style><h1>${failed ? 'Connection was not completed.' : 'Return to Morrow Mail.'}</h1><p>${failed ? 'Check your provider app registration and permissions, then try connecting again in Settings.' : 'You can close this browser tab. Your connection status will refresh when you return to the app.'}</p></html>`);
+    });
+  } else if (existsSync(dist)) {
+    app.use((req, res, next) => { res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"); next(); });
+    app.use(express.static(dist));
+    app.get('/{*path}', (req, res) => res.sendFile(resolve(dist, 'index.html')));
+  } else app.get('/', (req, res) => res.type('text').send('Morrow Mail API is ready. Run npm run dev and open http://localhost:5173, or npm run build && npm start.'));
+  app.use((error, req, res, next) => {
+    if (res.headersSent) return next(error);
+    const status = error.status || 500;
+    res.status(status).json({ error: status === 500 ? 'Something went wrong. Your saved messages are still on this device.' : (error.type === 'entity.parse.failed' ? 'Invalid JSON request.' : error.message) });
+  });
+  return app;
+}
