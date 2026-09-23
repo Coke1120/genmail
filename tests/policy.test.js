@@ -52,5 +52,5 @@ test('preferences validate persisted controls without mutating their defaults', 
   assert.equal(preferences.displayName, 'Morgan');
   assert.equal(preferences.language, 'English');
   assert.deepEqual(DEFAULT_PREFERENCES, defaults);
-  for (const patch of [{ theme: 'purple' }, { density: 'tight' }, { syncInterval: 1 }, { markReadOnOpen: 'true' }, { displayName: 'Injected\nSender' }, { signature: 'a'.repeat(2001) }, { language: '' }, { unknown: true }]) assert.throws(() => updatePreferences({}, patch), { status: 400 });
+  for (const patch of [{ theme: 'purple' }, { density: 'tight' }, { syncInterval: 1 }, { markReadOnOpen: 'true' }, { displayName: 'Injected\nSender' }, { signature: 'a'.repeat(12001) }, { language: '' }, { unknown: true }]) assert.throws(() => updatePreferences({}, patch), { status: 400 });
 });

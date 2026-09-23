@@ -197,8 +197,10 @@ final class AppModel: ObservableObject {
         guard !busy, compose == nil else { return }
         guard unsavedForms.isEmpty else { notice = "Save your current changes before opening a new draft."; return }
         var draft = value ?? Draft()
+        guard draft.replyToID.isEmpty || !draft.accountID.isEmpty else { error = "The reply’s mailbox is unavailable. Reopen the original message."; return }
         if draft.accountID.isEmpty { draft.accountID = combined ? accounts.first?.id ?? "demo" : account }
-        if value == nil, preferences["signature"].nonempty { draft.body = "\n\n" + preferences["signature"].string }
+        guard senderAccounts.contains(where: { $0.id == draft.accountID }) else { error = "Reconnect this message’s mailbox before replying or editing its draft."; return }
+        if draft.savedID.isEmpty, draft.footer.isNull { draft.footer = state["settings"]["footer"] }
         compose = draft
     }
     func settings(_ tab: String = "general") {

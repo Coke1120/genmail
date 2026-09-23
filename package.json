@@ -1,7 +1,47 @@
 {
   "name": "morrow-mail",
   "version": "0.3.0-alpha.1",
-  "description": "A private, open-source email and calendar workspace with your choice of AI model.",
+  "description": "An open-source native SwiftUI macOS email and calendar client with multiple accounts and bring-your-own AI.",
+  "homepage": "https://github.com/Coke1120/genmail#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Coke1120/genmail.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Coke1120/genmail/issues"
+  },
+  "keywords": [
+    "macos",
+    "swift",
+    "swiftui",
+    "email-client",
+    "ai-email",
+    "ai-assistant",
+    "gmail",
+    "outlook",
+    "imap",
+    "smtp",
+    "google-calendar",
+    "outlook-calendar",
+    "microsoft-graph",
+    "multi-account",
+    "ollama",
+    "openai-compatible",
+    "local-first",
+    "open-source",
+    "genmail",
+    "genspark"
+  ],
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/Coke1120"
+    },
+    {
+      "type": "buymeacoffee",
+      "url": "https://buymeacoffee.com/Coke1120"
+    }
+  ],
   "scripts": {
     "dev": "node scripts/dev.js",
     "build": "vite build",
@@ -17,6 +57,8 @@
   "type": "module",
   "dependencies": {
     "express": "^5.2.1",
+    "html-to-text": "10.0.1",
+    "htmlparser2": "10.1.0",
     "imapflow": "^2.0.5",
     "lucide-react": "^1.47.0",
     "mailparser": "^3.9.28",

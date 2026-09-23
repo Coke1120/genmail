@@ -1,3 +1,4 @@
+import { messageContent } from './footer.js';
 import { recipients } from './recipients.js';
 import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
@@ -67,7 +68,7 @@ export async function sendSmtpMessage(mail, message) {
   const transport = smtpTransport(mail);
   try {
     const result = await transport.sendMail({
-      from: { name: message.fromName || '', address: mail.email }, ...addresses, subject: message.subject, text: message.body,
+      from: { name: message.fromName || '', address: mail.email }, ...addresses, subject: message.subject, ...messageContent(message),
       inReplyTo: message.replyMessageId || undefined,
       references: message.replyMessageId || undefined,
       disableFileAccess: true, disableUrlAccess: true,

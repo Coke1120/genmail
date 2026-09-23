@@ -1,3 +1,4 @@
+import { messageContent } from './footer.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { simpleParser } from 'mailparser';
 import { recipients } from './recipients.js';
@@ -228,14 +229,14 @@ export async function fetchProviderMessages(mail) {
   return Promise.all((result.value || []).map(normalizeMicrosoftMessage));
 }
 
-export async function sendProviderMessage(mail, { to, cc = '', bcc = '', subject, body, replyMessageId, fromName }) {
+export async function sendProviderMessage(mail, { to, cc = '', bcc = '', subject, body, footer, replyMessageId, fromName }) {
   providerConfig(mail.provider);
   if (![mail.email].every(email => typeof email === 'string' && /^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(email))) throw new Error('A valid sender and recipient email address are required.');
   if (typeof subject !== 'string' || /[\r\n]/.test(subject) || typeof body !== 'string') throw new Error('Invalid email subject or body.');
   if (replyMessageId && (typeof replyMessageId !== 'string' || /[\r\n]/.test(replyMessageId))) throw new Error('Invalid reply message ID.');
   const addresses = recipients({ to, cc, bcc });
   const composed = new MailComposer({
-    from: { name: fromName || '', address: mail.email }, ...addresses, subject, text: body,
+    from: { name: fromName || '', address: mail.email }, ...addresses, subject, ...messageContent({ body, footer }),
     ...(replyMessageId ? { inReplyTo: replyMessageId, references: replyMessageId } : {}),
     disableFileAccess: true, disableUrlAccess: true,
   }).compile();

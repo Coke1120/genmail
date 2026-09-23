@@ -1,3 +1,4 @@
+import { preferencesFooter } from './footer.js';
 import { AI_BEHAVIORS, DEFAULT_POLICY, DEFAULT_PREFERENCES } from '../shared/features.js';
 
 function invalid(message, status = 400) { throw Object.assign(new Error(message), { status }); }
@@ -32,7 +33,7 @@ export function updatePolicy(current, patch) {
 export function updatePreferences(current, patch) {
   if (!object(patch)) invalid('Preferences must be an object.');
   const next = { ...DEFAULT_PREFERENCES, ...current };
-  const choices = { theme: ['system', 'light', 'dark'], density: ['comfortable', 'compact', 'spacious'], sort: ['newest', 'oldest', 'sender', 'subject', 'unread', 'starred'], replyTone: ['friendly', 'professional', 'concise', 'warm'], syncInterval: [0, 5, 15, 30] };
+  const choices = { signatureFormat: ['plain', 'html'], theme: ['system', 'light', 'dark'], density: ['comfortable', 'compact', 'spacious'], sort: ['newest', 'oldest', 'sender', 'subject', 'unread', 'starred'], replyTone: ['friendly', 'professional', 'concise', 'warm'], syncInterval: [0, 5, 15, 30] };
   for (const [key, value] of Object.entries(patch)) {
     if (!Object.hasOwn(DEFAULT_PREFERENCES, key)) invalid(`Unknown preference: ${key}.`);
     if (choices[key]) {
@@ -40,12 +41,14 @@ export function updatePreferences(current, patch) {
     } else if (key === 'markReadOnOpen') {
       if (typeof value !== 'boolean') invalid('Mark read on open must be true or false.');
     } else {
-      const max = key === 'signature' ? 2000 : key === 'language' ? 60 : 100;
+      const max = key === 'signature' ? 12000 : key === 'language' ? 60 : 100;
       if (typeof value !== 'string' || value.length > max || (key === 'language' && !value.trim())) invalid(`${key} must be text of at most ${max} characters.`);
       if (key === 'displayName' && /[\r\n]/.test(value)) invalid('Display name must be a single line.');
     }
     next[key] = value;
   }
+  const footer = preferencesFooter(next);
+  next.signature = next.signatureFormat === 'html' ? footer.html : footer.text;
   return next;
 }
 

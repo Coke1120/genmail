@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as integrations from './integrations.js';
 import * as providers from './providers.js';
+import { normalizeFooter, preferencesFooter } from './footer.js';
 import { recipients } from './recipients.js';
 import { AI_BEHAVIORS, DEFAULT_PREFERENCES, DEFAULT_SKILLS } from '../shared/features.js';
 import { resolvePolicy, updatePolicy, updatePreferences, requireBehavior, permittedMessages, redactMessage } from './policy.js';
@@ -134,7 +135,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
       settings: {
         mail: safeMail(mail),
         ai: { configured: !!(ai.baseUrl && ai.model), baseUrl: ai.baseUrl || 'http://127.0.0.1:11434/v1', model: ai.model || '', hasApiKey: !!ai.apiKey, temperature: ai.temperature ?? 0.3, maxTokens: ai.maxTokens ?? 1200 },
-        policy: resolvePolicy(config.policy), preferences, calendars: calendarState(config),
+        policy: resolvePolicy(config.policy), preferences, footer: preferencesFooter(preferences), calendars: calendarState(config),
       },
       workspace: workspace(view),
     };
@@ -237,6 +238,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     previews.clear();
     res.json(state(req.mailAccount));
   });
+  app.post('/api/signature/preview', (req, res) => res.json({ footer: preferencesFooter(req.body || {}) }));
   app.post('/api/settings/preferences', (req, res) => {
     store.setSettings({ preferences: updatePreferences(settings().preferences, req.body) });
     res.json(state(req.mailAccount));
@@ -350,7 +352,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const subject = text(input.subject ?? '', 'Subject', 500, true);
     if (/[\r\n]/.test(subject)) fail('Recipient and subject must be single lines.');
     const body = text(input.body ?? '', 'Message body', 100000, draft);
-    return { ...addresses, subject: draft ? subject : subject || '(No subject)', body };
+    return { ...addresses, subject: draft ? subject : subject || '(No subject)', body, ...(input.footer !== undefined ? { footer: normalizeFooter(input.footer) } : {}) };
   }
   function outgoing(account, value, extra = {}) {
     const address = account === 'demo' ? 'alex@genmail.example' : account;
@@ -378,7 +380,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const requestId = text(input.requestId, 'Send request ID', 100);
     if (!/^[a-zA-Z0-9-]{8,100}$/.test(requestId)) fail('Invalid send request ID.');
     if (input.retryUnconfirmed !== undefined && typeof input.retryUnconfirmed !== 'boolean') fail('Delivery review must be true or false.');
-    const fingerprint = message => createHash('sha256').update(JSON.stringify({ to: message.to, subject: message.subject, body: message.body, replyToId: message.replyToId || '', ...(message.cc ? { cc: message.cc } : {}), ...(message.bcc ? { bcc: message.bcc } : {}) })).digest('hex');
+    const fingerprint = message => createHash('sha256').update(JSON.stringify({ to: message.to, subject: message.subject, body: message.body, replyToId: message.replyToId || '', ...(message.cc ? { cc: message.cc } : {}), ...(message.bcc ? { bcc: message.bcc } : {}), ...(message.footer?.text || message.footer?.html ? { footer: message.footer } : {}) })).digest('hex');
     const payloadHash = fingerprint({ ...value, replyToId: input.replyToId });
     const sentId = `sent:${requestId}`;
     const sent = store.getMessage(account, sentId);
@@ -518,7 +520,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     }
     if (preview.plan.records.brain) next.brain = { ...preview.plan.records.brain, updatedAt: now, sourceMessageIds: preview.messages.map(message => message.id), simulated: true };
     for (const [index, draft] of (preview.plan.records.drafts || []).entries()) {
-      const value = content(draft, true);
+      const value = content({ ...draft, footer: preferencesFooter(settings().preferences || {}) }, true);
       store.upsertMessage(account, outgoing(account, value, { id: `mock-draft:${preview.id}:${index}`, folder: 'drafts', replyToId: draft.replyToId }));
     }
     next.activity = [{ id: preview.id, action: preview.action, title: preview.title, detail: preview.summary, createdAt: now, simulated: true }, ...current.activity].slice(0, 100);

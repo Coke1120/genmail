@@ -494,3 +494,46 @@ test('provider moves require explicit account and confirmation, isolate duplicat
   assert.equal(store.getMessage('first@example.com', 'imap:55:7').remoteId, 'imap:55:9');
   assert.equal(writes, 2);
 });
+
+test('HTML footer snapshots survive saves and uncertain retries while the reply stays with its receiving mailbox', async t => {
+  let calls = 0, delivered;
+  const { store, request, post, restart } = await workspace(t, {
+    sendSmtpMessage: async (mail, message) => {
+      delivered = { mail, message }; calls++;
+      if (calls === 1) throw new Error('Lost acknowledgement');
+      return '<footer-fixture@example.com>';
+    },
+  });
+  const owner = 'work@example.com', other = 'personal@example.com';
+  store.setSettings({ activeAccount: 'all', mailAccounts: Object.fromEntries([owner, other].map(email => [email, { ...mailConfig(email), provider: 'imap' }])) });
+  for (const account of [owner, other]) store.upsertMessage(account, { ...store.getMessage('demo', 'demo-1'), id: 'same-id', messageId: `<${account}>`, to: 'alias@example.com' });
+  const saved = await post('/api/settings/preferences', { signatureFormat: 'html', signature: '<b>Leo</b><br><a href="https://example.com">Team</a><img src="https://track.invalid">' });
+  assert.equal(saved.status, 200);
+  const footer = saved.data.settings.footer;
+  const preview = await post('/api/signature/preview', { signatureFormat: 'html', signature: '<b>Preview only</b>' });
+  assert.equal(preview.data.footer.text, 'Preview only');
+  assert.equal(store.getSettings().preferences.signature, footer.html);
+  const payload = { ...content, replyToId: 'same-id', footer, requestId: 'footer-owned-reply' };
+  const scoped = (path, body) => request(path, { method: 'POST', body, headers: { 'X-Genmail-Account': owner } });
+  for (const footer of [null, false, '', 0]) assert.equal((await scoped('/api/drafts', { ...payload, footer })).status, 400);
+  const draft = (await scoped('/api/drafts', payload)).data.message;
+  assert.equal(draft.accountId, owner);
+  assert.deepEqual(draft.footer, footer);
+  payload.draftId = draft.id;
+  const uncertain = await scoped('/api/send', payload);
+  assert.equal(uncertain.status, 502);
+  assert.equal(delivered.mail.email, owner);
+  assert.equal(delivered.message.replyMessageId, `<${owner}>`);
+  assert.deepEqual(uncertain.data.message.footer, footer);
+  await post('/api/settings/preferences', { signature: '<i>New signature</i>' });
+  restart();
+  assert.equal((await scoped('/api/send', { ...payload, retryUnconfirmed: true, footer: { html: '<b>Changed</b>' } })).status, 409);
+  const retried = await scoped('/api/send', { ...payload, retryUnconfirmed: true });
+  assert.equal(retried.status, 200);
+  assert.deepEqual(retried.data.message.footer, footer);
+  assert.deepEqual(delivered.message.footer, footer);
+  assert.equal(calls, 2);
+  assert.equal((await scoped('/api/send', payload)).status, 200);
+  assert.equal(calls, 2);
+  assert.equal(store.getMessage(other, 'sent:footer-owned-reply'), null);
+});

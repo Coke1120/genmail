@@ -54,9 +54,11 @@ struct Draft: Identifiable, Equatable {
     var savedID = ""
     var requestID = UUID().uuidString
     var to = "", cc = "", bcc = "", subject = "", body = "", replyToID = ""
+    var footer: JSON = .null
     var unconfirmed = false
     var payload: JSON {
         var value: [String: JSON] = ["to": .string(to), "cc": .string(cc), "bcc": .string(bcc), "subject": .string(subject), "body": .string(body)]
+        if !footer.isNull { value["footer"] = footer }
         if !savedID.isEmpty { value["id"] = .string(savedID) }
         if !replyToID.isEmpty { value["replyToId"] = .string(replyToID) }
         return .object(value)
@@ -65,12 +67,12 @@ struct Draft: Identifiable, Equatable {
     init(message: JSON, reply: Bool = false) {
         accountID = message["accountId"].string
         if reply {
-            to = message["fromEmail"].string
+            to = message["folder"].string == "sent" ? message["to"].string : message["fromEmail"].string
             subject = message["subject"].string.lowercased().hasPrefix("re:") ? message["subject"].string : "Re: " + message["subject"].string
             replyToID = message.id
         } else {
             savedID = message.id; to = message["to"].string; cc = message["cc"].string; bcc = message["bcc"].string
-            subject = message["subject"].string; body = message["body"].string
+            subject = message["subject"].string; body = message["body"].string; footer = message["footer"]
             replyToID = message["replyToId"].string
             unconfirmed = message["deliveryStatus"].string == "unconfirmed"
             if message["deliveryRequestId"].nonempty { requestID = message["deliveryRequestId"].string }

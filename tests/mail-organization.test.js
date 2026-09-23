@@ -10,6 +10,7 @@ import { oauthStart, canOrganizeMail, listProviderFolders, organizeProviderMessa
 
 const google = { provider: 'google', email: 'me@example.com', accessToken: 'fixture-token', grantedScopes: 'https://www.googleapis.com/auth/gmail.modify' };
 const microsoft = { ...google, provider: 'microsoft', grantedScopes: 'Mail.ReadWrite Mail.Send' };
+const footer = { html: '<b>Signature</b>', text: 'Signature' };
 const recipientsInput = { to: 'a@example.com; b@example.com', cc: 'A@example.com, c@example.com', bcc: 'hidden@example.com' };
 
 test('recipients validate every address, cap total, prevent header injection, and retain unfinished drafts', () => {
@@ -26,9 +27,11 @@ test('API MIME includes every To/Cc/Bcc recipient for Google and Microsoft deliv
     assert.deepEqual(parsed.to.value.map(item => item.address), ['a@example.com', 'b@example.com']);
     assert.deepEqual(parsed.cc.value.map(item => item.address), ['c@example.com']);
     assert.equal(parsed.bcc.value[0].address, 'hidden@example.com');
+    assert.equal(parsed.text.trim(), 'Hello\n\nSignature');
+    assert.match(parsed.html, /<b>Signature<\/b>/);
     return new Response(null, { status: 202 });
   });
-  for (const mail of [google, microsoft]) await sendProviderMessage(mail, { ...recipientsInput, subject: 'Private recipients', body: 'Hello' });
+  for (const mail of [google, microsoft]) await sendProviderMessage(mail, { ...recipientsInput, subject: 'Private recipients', body: 'Hello', footer });
 });
 
 test('SMTP envelope includes Bcc while message headers omit it; partial acceptance remains uncertain', async t => {
@@ -38,13 +41,16 @@ test('SMTP envelope includes Bcc while message headers omit it; partial acceptan
     async sendMail(options) {
       const mime = new MailComposer(options).compile();
       assert.deepEqual(mime.getEnvelope().to, ['a@example.com', 'b@example.com', 'c@example.com', 'hidden@example.com']);
-      assert.equal((await simpleParser(await mime.build())).bcc, undefined);
+      const parsed = await simpleParser(await mime.build());
+      assert.equal(parsed.bcc, undefined);
+      assert.equal(parsed.text.trim(), 'Text\n\nSignature');
+      assert.match(parsed.html, /<b>Signature<\/b>/);
       return { messageId: 'sent', accepted: partial ? ['a@example.com'] : mime.getEnvelope().to, rejected: partial ? ['b@example.com'] : [] };
     },
   }));
-  assert.equal(await sendSmtpMessage(google, { ...recipientsInput, subject: 'Hello', body: 'Text' }), 'sent');
+  assert.equal(await sendSmtpMessage(google, { ...recipientsInput, subject: 'Hello', body: 'Text', footer }), 'sent');
   partial = true;
-  await assert.rejects(sendSmtpMessage(google, { ...recipientsInput, subject: 'Hello', body: 'Text' }), /not confirmed/);
+  await assert.rejects(sendSmtpMessage(google, { ...recipientsInput, subject: 'Hello', body: 'Text', footer }), /not confirmed/);
   assert.equal(closed, 2);
 });
 

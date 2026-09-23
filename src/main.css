@@ -353,6 +353,34 @@ button svg { flex-shrink: 0; }
 .compose-field select { flex: 1; min-width: 0; color: inherit; background: transparent; border: 0; padding: 10px; }
 
 .list-meta { gap: 8px; flex-wrap: wrap; }
-.list-meta select { max-width: 135px; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px; }
+.list-meta select { max-width: 135px; font: inherit; color: inherit; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 4px; }
 [data-density="spacious"] .message-select { padding-top: 25px; padding-bottom: 25px; }
 [data-density="spacious"] .message-row-content p { -webkit-line-clamp: 4; display: -webkit-box; -webkit-box-orient: vertical; white-space: normal; }
+
+/* Account folders stay together, with independent keyboard-accessible disclosure. */
+.account-groups { min-height: 80px; overflow-y: auto; flex: 1; }
+.account-group { margin: 3px 0 10px; }
+.account-group summary { display: flex; align-items: center; gap: 8px; padding: 9px 7px; cursor: pointer; border-radius: 8px; list-style: none; }
+.account-group summary::-webkit-details-marker { display: none; }
+.account-group summary:hover { background: #ffffff0d; }
+.account-group summary > svg { flex-shrink: 0; transition: transform 140ms; }
+.account-group[open] summary > svg { transform: rotate(90deg); }
+.account-group summary > span:first-of-type { flex: 1; min-width: 0; }
+.account-group strong { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.account-group small { display: block; font-size: 10px; opacity: .65; margin-top: 3px; }
+.account-folders { margin-left: 12px; border-left: 1px solid var(--line); padding-left: 5px; }
+.account-folders .nav-item { min-height: 34px; padding-top: 7px; padding-bottom: 7px; font-size: 12px; }
+.sidebar-bottom { flex-shrink: 0; }
+.account-groups ~ .sidebar-bottom .local-card { display: none; }
+.reply-owner { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.draft-signature { border-top: 1px solid var(--line); padding: 12px 0; }
+.draft-signature header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.signature-preview { white-space: pre-wrap; max-height: 160px; overflow: auto; padding: 14px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.html-signature { white-space: normal; background: #fff; color: #222; border: 1px solid #ddd; border-radius: 8px; }
+.html-signature p { margin: 0 0 8px; }
+.html-signature a { color: #275e4f; text-decoration: underline; }
+.html-signature table { max-width: 100%; }
+.compose-footer { position: sticky; bottom: 0; background: var(--paper); z-index: 1; padding-block: 14px; }
+
+.account-group.current-account > summary { color: #edf5df; background: #ffffff0a; }
+.sidebar nav.account-groups { display: block; }

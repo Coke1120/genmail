@@ -2,15 +2,43 @@
 
 # Morrow Mail
 
-**v0.3.0-alpha.1** · [Download alpha](https://github.com/Coke1120/genmail/releases/tag/v0.3.0-alpha.1) · [GitHub](https://github.com/Coke1120/genmail) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
+**An open-source macOS email client with calendars and your choice of AI.**
 
-Experimental alpha for Apple silicon, macOS 13.5+. The download includes the local runtime; no Node installation is needed. Unzip and move **Morrow Mail.app** to Applications. The alpha is **ad-hoc signed, not Apple notarized**; macOS may block it. Review the source/checksum and use Apple's documented [opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac) process only if you trust the download. A Developer ID/notarized stable release and live-account acceptance are still pending.
+[![Checks](https://github.com/Coke1120/genmail/actions/workflows/check.yml/badge.svg)](https://github.com/Coke1120/genmail/actions/workflows/check.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![macOS 13.5+](https://img.shields.io/badge/macOS-13.5%2B-black.svg)](#native-macos-app)
+[![Alpha release](https://img.shields.io/github/v/release/Coke1120/genmail?include_prereleases&label=alpha)](https://github.com/Coke1120/genmail/releases)
 
-An independent, MIT-licensed, native macOS email workspace inspired by Genspark GenMail. Built for one person running it locally, with multiple Gmail, Outlook, and IMAP/SMTP accounts, connected Google and Microsoft calendars, a demo inbox, and your choice of AI model. The project stays in `~/Documents/Github/genmail`; its public name is **Morrow Mail**.
+[Download alpha](https://github.com/Coke1120/genmail/releases/tag/v0.3.0-alpha.1) · [Feature coverage](FEATURE_COVERAGE.md) · [Verification](VERIFICATION.md) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
 
-Read and search mail, move mail or manage Gmail labels with explicit review, save drafts, and use AI with explicit permissions. AI Studio covers 19 behaviors through model-backed assistance and clearly labeled local simulations. Sending always requires an explicit action; AI does not send email automatically.
+Morrow Mail is an independent, MIT-licensed alternative inspired by Genspark GenMail. It runs locally with a **fully native SwiftUI interface**, a bundled mail service, and an optional React development interface.
 
-This project is not affiliated with Genspark and does not claim complete parity. See [feature coverage](FEATURE_COVERAGE.md) for the exact implementation status, simulation limits, and primary product sources, and [verification](VERIFICATION.md) for completed checks and remaining release validation.
+- **Multiple mailboxes:** Gmail, Outlook / Microsoft 365, and IMAP / SMTP; combined or separate inboxes with collapsible account groups, sorting, and compact views.
+- **Mail and calendars together:** read, search, compose, reply, manage provider folders / Gmail labels, and connect Google Calendar and Outlook Calendar.
+- **Bring your own AI:** configure a custom base URL, model ID, and API key for an OpenAI-compatible endpoint or use Ollama. Enable individual AI behaviors and choose what context they can access.
+- **Native composition:** To / Cc / Bcc, multiple recipients, replies bound to the receiving account, HTML email footers, keyboard shortcuts, and standard macOS window controls.
+
+AI Studio covers 19 behaviors through model-backed assistance and clearly labeled local simulations. Sending always requires an explicit action; AI does not send email automatically. Local storage does not mean every operation stays offline: connected mail/calendar providers and your configured AI endpoint receive the data needed for enabled actions.
+
+This project is not affiliated with Genspark and does not claim complete parity. See [feature coverage](FEATURE_COVERAGE.md) for implementation status and simulation limits, and [verification](VERIFICATION.md) for completed checks and remaining release validation.
+
+## Screenshots
+
+Captured from the current development build using fictional messages and isolated provider fixtures. No private mail is shown. These screens include changes newer than the downloadable **v0.3.0-alpha.1** release.
+
+**Combined inbox with collapsible account groups and per-message mailbox labels**
+
+![Morrow Mail native macOS combined inbox, with separate collapsible personal and work accounts, inbox sorting, and a mail reader](docs/screenshots/macos-inbox.jpg)
+
+**Reply from the receiving account, with Cc / Bcc and an HTML footer**
+
+<img src="docs/screenshots/macos-reply.jpg" alt="Morrow Mail native reply composer with the work account locked as sender, To, Cc and Bcc fields, and a formatted HTML email footer" width="690">
+
+## Download the alpha
+
+**v0.3.0-alpha.1** is an experimental alpha for Apple silicon, macOS 13.5+. [Download the app and checksum](https://github.com/Coke1120/genmail/releases/tag/v0.3.0-alpha.1). The download includes the local runtime; no Node installation is needed. Unzip and move **Morrow Mail.app** to Applications.
+
+The alpha is **ad-hoc signed, not Apple notarized**; macOS may block it. Review the source/checksum and use Apple's documented [opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac) process only if you trust the download. A Developer ID/notarized stable release and live-account acceptance are still pending.
 
 ## Native macOS app
 
@@ -68,7 +96,7 @@ This deployment is a local, single-user process. Public hosting and shared acces
 
 Open **Settings → Mail** and select a provider. Connect as many mailboxes as you need, including multiple accounts from the same provider. Use **Add Another Account** for the next connection. Gmail and Outlook use your own OAuth app registration; there is no shared hosted OAuth service.
 
-The native sidebar includes **All accounts** with combined folders, then separate folders under each connected email address. The web sidebar offers the same combined and individual account choices above its folder list. Combined mail defaults to newest first and supports the selected sort order and shows each message’s mailbox. The sample **Demo workspace** stays separate and is never mixed into real mail.
+The native sidebar includes **All accounts** with combined folders, then separate folders under each connected email address. Both clients group folders under each account. All accounts, individual accounts and Demo can be collapsed independently; each client remembers its disclosure state. Combined mail defaults to newest first and supports the selected sort order and shows each message’s mailbox. The sample **Demo workspace** stays separate and is never mixed into real mail.
 
 **From** chooses the account for a new message. Replies, saved drafts, and uncertain deliveries stay with their original account. AI actions on a selected message use that message’s mailbox; choose an individual account for mailbox-wide AI Studio tools, skills, and Email Brain. No AI request combines account histories.
 
@@ -162,7 +190,12 @@ Summaries, replies, inbox questions, writing, rewriting, translation, briefings,
 
 Model settings, permissions, and general preferences are **global across accounts**, including demo. Mail, drafts, skills, and workflow records belong to an individual account. Folder permissions apply to locally cached messages; enabling Sent or Archive does not import those provider folders.
 
-General settings include your display name, signature, theme, density, mark-read-on-open behavior, reply tone, language, and sync interval. Timed mail sync runs only while the app is open. Review generated text before inserting it into a draft.
+General settings include your display name, plain-text or HTML signature, theme, density, mark-read-on-open behavior, reply tone, language, and sync interval. Timed mail sync runs only while the app is open. Review generated text before inserting it into a draft.
+
+In **Settings → General → Email footer**, choose Plain text or HTML, enter the signature, preview it, then save. One workspace signature applies to new messages, replies and AI-created drafts across your accounts. HTML allows bold/italic/underlined text, limited inline colors and font sizes, lists, tables, and HTTPS/mailto/tel links. Images, scripts, active content, remote resources and unsupported styling are removed. Each draft keeps its own footer snapshot, visible in the composer and removable before sending. Editing settings or replacing the body with an AI suggestion does not change that snapshot. Gmail, Outlook and SMTP send HTML footers as multipart mail with a generated plain-text alternative. Legacy saved drafts keep their original text without an extra footer.
+
+Replies, including AI replies and the native Reply shortcut, keep the account that owns the original message even in combined views or when the To address is an alias. Their From identity is locked; replying to a sent message uses its original recipients.
+
 
 ## AI Studio simulations
 
@@ -205,7 +238,7 @@ Normal startup, health, and backup diagnostics do not include credentials. Keep 
 
 - Each account sync imports the latest **50 inbox messages**, not the entire mailbox or all folders.
 - Read/unread, star, archive, and trash shortcuts are local. The explicit Move / Labels dialog writes to the provider after review; full provider folder synchronization is not implemented.
-- Emails and outgoing drafts are plain text. Real attachment handling and HTML mail rendering are not supported; Studio attachment examples are simulated.
+- Message bodies and incoming mail are plain text. Outgoing HTML footers are supported with a plain-text alternative; full HTML message editing, incoming HTML rendering and real attachments are not supported. Studio attachment examples are simulated.
 - Sending from the demo inbox is simulated. Connected accounts send through their configured provider only after you click Send.
 - No scheduled AI execution, unattended sending, or automatic replies. A morning briefing is generated on demand.
 - The Calendar page supports live event reading and explicit event creation without attendees. Editing/deleting existing events, invitations, and automatic scheduling are not implemented. AI Studio scheduling remains a local simulation.

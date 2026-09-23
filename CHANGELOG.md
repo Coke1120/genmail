@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Independently collapsible account groups in native and web sidebars, with saved disclosure states.
+- Account-owned replies across combined inbox, AI and keyboard paths; sent-message replies target original recipients.
+- Plain-text/HTML footer settings and previews, separate draft snapshots, and safe multipart delivery through all mail transports.
+- Scrollable native composer with fixed actions, clearer recipient labels and locked From identity, and filter recovery.
+- Native inbox and reply screenshots, clearer README presentation, and repository discovery metadata.
+
 ## 0.3.0-alpha.1 — 2026-09-23
 
 - First public Morrow Mail alpha: native SwiftUI macOS app, original icon, MIT license.

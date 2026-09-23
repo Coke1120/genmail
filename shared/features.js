@@ -29,7 +29,7 @@ export const DEFAULT_POLICY = {
 };
 
 export const DEFAULT_PREFERENCES = {
-  displayName: '', signature: '', theme: 'system', density: 'comfortable', sort: 'newest',
+  displayName: '', signature: '', signatureFormat: 'plain', theme: 'system', density: 'comfortable', sort: 'newest',
   markReadOnOpen: true, replyTone: 'friendly', language: 'English', syncInterval: 0,
 };
 

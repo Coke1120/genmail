@@ -136,7 +136,7 @@ export default function Studio({ state, selectedMessage, onUpdate, onCompose, on
   function useDraft() {
     const message = output.message;
     const reply = output.action === 'reply';
-    onCompose({ body: output.text, to: message && policy.content.sender ? (message.folder === 'sent' ? message.to : message.fromEmail) : '', subject: message && policy.content.subject ? (reply && !/^re:/i.test(message.subject) ? `Re: ${message.subject}` : message.subject) : '', ...(reply && message ? { replyToId: message.id } : {}) });
+    onCompose({ accountId: message?.accountId || state.account.id, body: output.text, to: message && policy.content.sender ? (message.folder === 'sent' ? message.to : message.fromEmail) : '', subject: message && policy.content.subject ? (reply && !/^re:/i.test(message.subject) ? `Re: ${message.subject}` : message.subject) : '', ...(reply && message ? { replyToId: message.id } : {}) });
   }
   function saveSkill(event) {
     event.preventDefault();

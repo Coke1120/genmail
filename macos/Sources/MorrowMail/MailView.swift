@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 
 struct MailWorkspace: View {
+    @AppStorage("collapsedMailAccounts") private var collapsedAccounts = "[]"
     @EnvironmentObject var model: AppModel
     @State private var search = ""
     @State private var unreadOnly = false
@@ -20,8 +21,9 @@ struct MailWorkspace: View {
             } else if model.state.isNull {
                 VStack { EmptyPane(title: "Morrow couldn’t start", detail: model.error, symbol: "exclamationmark.triangle"); Button("Try Again") { Task { await model.start() } }.padding(.bottom, 40) }
             } else {
+              VStack(spacing: 0) {
                 NavigationSplitView {
-                    sidebar.navigationSplitViewColumnWidth(min: 180, ideal: 205, max: 250)
+                    sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
                 } detail: {
                     if model.section == "studio" {
                         if model.combined {
@@ -41,11 +43,6 @@ struct MailWorkspace: View {
                         }
                     }
                 }
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if !model.error.isEmpty { statusBar(model.error, error: true) }
-                    else if !model.notice.isEmpty { statusBar(model.notice, error: false) }
-                    else if model.busy { HStack { ProgressView().controlSize(.small); Text("Working…").foregroundStyle(.secondary); Spacer() }.padding(9).background(.bar) }
-                }
                 .toolbar {
                     ToolbarItemGroup {
                         if model.busy { ProgressView().controlSize(.small) }
@@ -53,6 +50,10 @@ struct MailWorkspace: View {
                         Button { model.newDraft() } label: { Label("Compose", systemImage: "square.and.pencil") }.disabled(model.busy).help("New message (⌘N)")
                     }
                 }
+                    if !model.error.isEmpty { statusBar(model.error, error: true) }
+                    else if !model.notice.isEmpty { statusBar(model.notice, error: false) }
+                    else if model.busy { HStack { ProgressView().controlSize(.small); Text("Working…").foregroundStyle(.secondary); Spacer() }.padding(9).background(.bar) }
+              }
             }
         }
         .sheet(item: $model.compose) { draft in ComposeView(initial: draft).environmentObject(model) }
@@ -75,14 +76,12 @@ struct MailWorkspace: View {
                 } else { model.section = value }
             })) {
                 if !model.accounts.isEmpty {
-                    Section("All accounts") { folderRows("all") }
+                    accountGroup("all", title: "All accounts", subtitle: "Combined mail", symbol: "tray.2")
                     ForEach(model.accounts) { account in
-                        Section(account["email"].string) { folderRows(account.id) }
+                        accountGroup(account.id, title: account["email"].string, subtitle: account["provider"].string == "imap" ? "IMAP" : providerLabel(account["provider"].string), symbol: "envelope")
                     }
                 }
-                Section("Demo workspace") {
-                    folderRows("demo")
-                }
+                accountGroup("demo", title: "Demo workspace", subtitle: "Sample mail", symbol: "leaf")
                 Section("Workspace") {
                     Label("AI Studio", systemImage: "sparkles").tag("studio")
                     Label("Calendar", systemImage: "calendar").tag("calendar")
@@ -93,6 +92,25 @@ struct MailWorkspace: View {
             Button { model.settings() } label: { Label("Settings & connections", systemImage: "gearshape") }
                 .buttonStyle(.plain).disabled(model.busy).frame(maxWidth: .infinity, alignment: .leading).padding(18).fixedSize(horizontal: false, vertical: true)
         }
+    }
+    func accountGroup(_ account: String, title: String, subtitle: String, symbol: String) -> some View {
+        let collapsed = Set((try? JSONDecoder().decode([String].self, from: Data(collapsedAccounts.utf8))) ?? [])
+        return DisclosureGroup(isExpanded: Binding(get: { !collapsed.contains(account) }, set: { expanded in
+            var next = collapsed
+            if expanded { next.remove(account) } else { next.insert(account) }
+            if let data = try? JSONEncoder().encode(next.sorted()), let value = String(data: data, encoding: .utf8) { collapsedAccounts = value }
+        })) { folderRows(account) } label: {
+            HStack(spacing: 8) {
+                Image(systemName: symbol).foregroundStyle(morrowGreen)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    Text(subtitle).font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                let count = folderCount(account, "inbox")
+                if count > 0 { Text("\(count)").font(.caption2.monospacedDigit()).foregroundStyle(.secondary) }
+            }.padding(.vertical, 5).help(title)
+        }.accessibilityIdentifier("accountGroup.\(account)")
     }
     func folderRows(_ account: String) -> some View {
         ForEach(mailFolders, id: \.self) { folder in
@@ -125,7 +143,12 @@ struct MailWorkspace: View {
                 } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
             }.disabled(model.busy).padding(.horizontal, 14).padding(.bottom, 10)
             Divider()
-            if filtered.isEmpty { EmptyPane(title: "All clear", detail: search.isEmpty ? "There are no messages in this view." : "No messages match your search.", symbol: "tray") }
+            if filtered.isEmpty {
+                VStack {
+                    EmptyPane(title: search.isEmpty && !unreadOnly ? "All clear" : "No matching messages", detail: unreadOnly ? "Only unread messages are shown." : search.isEmpty ? "There are no messages in this view." : "Try another sender or keyword.", symbol: "tray")
+                    if !search.isEmpty || unreadOnly { Button("Clear Filters") { search = ""; unreadOnly = false }.padding(.bottom, 24) }
+                }
+            }
             else {
                 List(filtered, id: \.viewID, selection: $model.selectedMessage) { message in
                     VStack(alignment: .leading, spacing: 6) {
@@ -154,7 +177,7 @@ struct MailWorkspace: View {
                 }
             }
             Divider()
-            Text("\(filtered.count) messages · local cache").font(.caption2).foregroundStyle(.secondary).padding(10)
+            Text("\(filtered.count) messages · \(model.preferences["density"].string) · local cache").font(.caption2).foregroundStyle(.secondary).padding(10)
         }
     }
     func statusBar(_ text: String, error: Bool) -> some View {
@@ -200,6 +223,7 @@ struct MessageReader: View {
                     if !message["labels"].array.isEmpty { Text(message["labels"].array.map(\.string).joined(separator: " · ")).font(.caption).foregroundStyle(morrowGreen) }
                     Divider()
                     Text(message["body"].string).font(.system(size: 14)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    FooterPreview(footer: message["footer"])
                     Divider()
                     HStack {
                         ForEach(["summary", "reply", "translate"], id: \.self) { action in
@@ -291,24 +315,45 @@ struct ComposeView: View {
     init(initial: Draft) { self.initial = initial; _draft = State(initialValue: initial); _saved = State(initialValue: initial.payload) }
     var dirty: Bool { draft.payload != saved || (draft.savedID.isEmpty && (!draft.to.isEmpty || !draft.cc.isEmpty || !draft.bcc.isEmpty || !draft.subject.isEmpty || !draft.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Text(draft.savedID.isEmpty ? "New message" : "Your draft").font(.title2.bold()); Spacer(); Text(draft.accountID == "demo" ? "Simulated send" : draft.accountID).foregroundStyle(.secondary).font(.caption) }
-            Picker("From", selection: $draft.accountID) {
-                ForEach(model.senderAccounts) { account in Text(account["email"].string).tag(account.id) }
-            }.disabled(model.busy || !draft.savedID.isEmpty || !draft.replyToID.isEmpty || draft.unconfirmed)
-            .onChange(of: draft.accountID) { _ in aiResult = ""; draft.requestID = UUID().uuidString }
+        VStack(spacing: 0) {
+          ScrollView {
+           VStack(alignment: .leading, spacing: 16) {
+            HStack { Text(draft.savedID.isEmpty ? (draft.replyToID.isEmpty ? "New message" : "Reply") : "Your draft").font(.title2.bold()); Spacer(); Text(draft.accountID == "demo" ? "Simulated send" : draft.accountID).foregroundStyle(.secondary).font(.caption) }
+            if !draft.savedID.isEmpty || !draft.replyToID.isEmpty || draft.unconfirmed {
+                HStack {
+                    Text("From").frame(width: 36, alignment: .leading).foregroundStyle(.secondary)
+                    Text(draft.accountID == "demo" ? "Demo workspace (simulated)" : draft.accountID).textSelection(.enabled)
+                    Image(systemName: "lock.fill").font(.caption2).foregroundStyle(.secondary)
+                }.accessibilityElement(children: .combine)
+            } else {
+                Picker("From", selection: $draft.accountID) {
+                    ForEach(model.senderAccounts) { account in Text(account["email"].string).tag(account.id) }
+                }.disabled(model.busy)
+                .onChange(of: draft.accountID) { _ in aiResult = ""; draft.requestID = UUID().uuidString }
+            }
+            if !draft.replyToID.isEmpty { Label("Replying from the mailbox that owns this conversation", systemImage: "lock.fill").font(.caption).foregroundStyle(.secondary) }
             if draft.unconfirmed {
                 Label("Delivery was not confirmed. Check your provider’s Sent folder before retrying. Retrying may send a duplicate.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
                 Toggle("I checked Sent and want to retry this delivery", isOn: $reviewed).toggleStyle(.checkbox)
             }
             VStack(spacing: 12) {
-                TextField("To — email addresses, separated by commas", text: $draft.to).accessibilityLabel("To")
-                TextField("Cc — copy recipients", text: $draft.cc).accessibilityLabel("Cc")
-                TextField("Bcc — hidden recipients", text: $draft.bcc).accessibilityLabel("Bcc")
+                recipientField("To", text: $draft.to, placeholder: "Email addresses, separated by commas")
+                recipientField("Cc", text: $draft.cc, placeholder: "Copy recipients")
+                recipientField("Bcc", text: $draft.bcc, placeholder: "Hidden recipients")
                 Text("Use plain email addresses separated by commas or semicolons (100 recipients total). Bcc recipients are hidden from other recipients.").font(.caption).foregroundStyle(.secondary)
                 TextField("Subject", text: $draft.subject)
                 TextArea(title: "Message", text: $draft.body, height: 210)
             }.textFieldStyle(.roundedBorder).disabled(model.busy || draft.unconfirmed)
+            if draft.footer["text"].nonempty || draft.footer["html"].nonempty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Email footer", systemImage: "signature").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Remove") { draft.footer = .object(["text": .string(""), "html": .string("")]) }.buttonStyle(.borderless).disabled(model.busy || draft.unconfirmed)
+                    }
+                    FooterPreview(footer: draft.footer)
+                }.padding(12).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+            }
             if !draft.unconfirmed {
                 DisclosureGroup("Writing assistance") {
                     VStack(alignment: .leading, spacing: 12) {
@@ -327,6 +372,9 @@ struct ComposeView: View {
                 }
             }
             if !localError.isEmpty { Text(localError).foregroundStyle(.red).font(.callout).textSelection(.enabled) }
+           }.padding(24)
+          }
+          Divider()
             HStack {
                 Button(draft.unconfirmed ? "Close" : "Cancel") { close() }.keyboardShortcut(.cancelAction).disabled(model.busy)
                 Spacer()
@@ -334,8 +382,8 @@ struct ComposeView: View {
                 Button("Save Draft") { save() }.keyboardShortcut("s").disabled(model.busy || draft.unconfirmed)
                 Button(draft.unconfirmed ? "Review Retry" : "Review & Send") { confirmSend = true }
                     .keyboardShortcut("d", modifiers: [.command, .shift]).buttonStyle(.borderedProminent).disabled(model.busy || [draft.to, draft.cc, draft.bcc].allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty } || draft.body.isEmpty || (draft.unconfirmed && !reviewed))
-            }
-        }.padding(26).frame(width: 690).frame(minHeight: 490)
+            }.padding(20)
+        }.frame(width: 690, height: min(780, (NSScreen.main?.visibleFrame.height ?? 900) - 100))
         .interactiveDismissDisabled(dirty || model.busy)
         .onAppear { model.dirty("compose", dirty) }
         .onChange(of: draft) { _ in model.dirty("compose", dirty) }
@@ -343,7 +391,13 @@ struct ComposeView: View {
         .confirmationDialog(draft.accountID == "demo" ? "Simulate sending this message?" : "Send this message to the listed recipients?", isPresented: $confirmSend, titleVisibility: .visible) {
             Button(draft.accountID == "demo" ? "Simulate Send" : "Send Message") { send() }
             Button("Cancel", role: .cancel) {}
-        } message: { Text("From: \(draft.accountID)\nTo: \(draft.to)\nCc: \(draft.cc)\nBcc: \(draft.bcc)\nSubject: \(draft.subject.isEmpty ? "(No subject)" : draft.subject)\n\(draft.unconfirmed ? "This retry may create a duplicate." : "You are sending exactly the text in this draft.")") }
+        } message: { Text("From: \(draft.accountID)\nTo: \(draft.to)\nCc: \(draft.cc)\nBcc: \(draft.bcc)\nSubject: \(draft.subject.isEmpty ? "(No subject)" : draft.subject)\n\(draft.unconfirmed ? "This retry may create a duplicate." : "The message and displayed footer will be sent together.")") }
+    }
+    func recipientField(_ label: String, text: Binding<String>, placeholder: String) -> some View {
+        HStack {
+            Text(label).frame(width: 36, alignment: .leading).foregroundStyle(.secondary)
+            TextField(placeholder, text: text).accessibilityLabel(label)
+        }
     }
     func close() { if !dirty || draft.unconfirmed || model.confirmDiscard("Discard this draft’s unsaved changes?") { dismiss() } }
     func save() {

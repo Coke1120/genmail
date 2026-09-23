@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, CalendarDays, Info, LoaderCircle, Mail, Settings2, ShieldCheck, Sparkles } from 'lucide-react';
 import { AI_BEHAVIORS, DEFAULT_POLICY, DEFAULT_PREFERENCES } from '../shared/features';
 import Modal from './Modal';
+import FooterPreview from './FooterPreview';
 import './settings.css';
 import CalendarSettings from './CalendarSettings';
 
@@ -51,6 +52,8 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   const [preferences, setPreferences] = useState(() => ({ ...DEFAULT_PREFERENCES, ...state.settings.preferences }));
   const [policy, setPolicy] = useState(() => policyValues(state.settings.policy));
   const [testResult, setTestResult] = useState('');
+  const [footerPreview, setFooterPreview] = useState(null);
+  useEffect(() => setFooterPreview(null), [preferences.signature, preferences.signatureFormat]);
   const saved = useRef({ mail, model: ai, general: preferences, policy });
   const allowUnload = useRef(false);
   const dirty = Object.fromEntries(Object.entries({ mail, model: ai, general: preferences, policy }).map(([key, value]) => [key, JSON.stringify(value) !== JSON.stringify(saved.current[key])]));
@@ -90,6 +93,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         window.location.assign(result.url);
         return;
       }
+      if (label === 'footer') { setFooterPreview(result.footer); return; }
       if (label === 'test') {
         setTestResult(result.text || 'Your model is responding.');
         return;
@@ -167,10 +171,13 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
             <label className="settings-field">Display name
               <input maxLength={100} autoComplete="name" value={preferences.displayName} placeholder={state.account.name || 'Your name'} onChange={(event) => setPreferences({ ...preferences, displayName: event.target.value })} />
             </label>
-            <label className="settings-field">Email signature
-              <textarea rows={4} maxLength={2000} value={preferences.signature} placeholder="Your sign-off, just the way you like it." onChange={(event) => setPreferences({ ...preferences, signature: event.target.value })} />
-              <span className="settings-help">Added to new email drafts. You can edit it before sending.</span>
+            <label className="settings-field">Footer format<select value={preferences.signatureFormat} onChange={event => setPreferences({ ...preferences, signatureFormat: event.target.value })}><option value="plain">Plain text</option><option value="html">HTML</option></select></label>
+            <label className="settings-field">{preferences.signatureFormat === 'html' ? 'HTML signature source' : 'Email signature'}
+              <textarea rows={4} maxLength={12000} value={preferences.signature} placeholder="Your sign-off, just the way you like it." onChange={(event) => setPreferences({ ...preferences, signature: event.target.value })} />
+              <span className="settings-help">Added to new messages and replies across your accounts. Saved drafts keep their footer. HTML supports text styles, tables and links; images and active content are removed.</span>
             </label>
+            <button type="button" className="button secondary" onClick={() => save('signature/preview', { signature: preferences.signature, signatureFormat: preferences.signatureFormat }, 'footer')}>Preview footer</button>
+            {footerPreview && <FooterPreview footer={footerPreview} />}
             <div className="settings-columns">
               <label className="settings-field">Theme
                 <select value={preferences.theme} onChange={(event) => setPreferences({ ...preferences, theme: event.target.value })}>

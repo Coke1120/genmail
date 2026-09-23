@@ -62,3 +62,14 @@ let sortFixture: [JSON] = [
 for order in ["oldest", "subject", "unread", "starred"] { expectEqual(sortedMail(sortFixture, by: order).first?.id, "old") }
 for order in ["newest", "sender"] { expectEqual(sortedMail(sortFixture, by: order).first?.id, "new") }
 print("Native multi-recipient and six sorting checks passed.")
+
+var original: JSON = .object(["id": .string("same-provider-id"), "accountId": .string("receiver@example.com"), "fromEmail": .string("sender@example.com"), "to": .string("alias@example.com"), "subject": .string("Question"), "folder": .string("inbox")])
+let reply = Draft(message: original, reply: true)
+expectEqual(reply.accountID, "receiver@example.com")
+expectEqual(reply.to, "sender@example.com")
+expectEqual(reply.replyToID, "same-provider-id")
+original["folder"] = .string("sent")
+expectEqual(Draft(message: original, reply: true).to, "alias@example.com")
+original["footer"] = .object(["text": .string("Leo"), "html": .string("<b>Leo</b>")])
+expectEqual(Draft(message: original).payload["footer"], original["footer"])
+print("Native reply ownership and footer persistence checks passed.")

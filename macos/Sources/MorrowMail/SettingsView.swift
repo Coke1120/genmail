@@ -11,6 +11,7 @@ struct NativeSettingsView: View {
     @State private var calendarOAuth: JSON = .object([:])
     @State private var localError = ""
     @State private var status = ""
+    @State private var footerPreview: JSON = .null
     private let tabs = [("general", "General", "slider.horizontal.3"), ("mail", "Mail", "envelope"), ("model", "Model", "cpu"), ("permissions", "AI Permissions", "checkmark.shield"), ("calendar", "Calendar", "calendar"), ("about", "About", "info.circle")]
     var dirty: Bool { values != baseline || mailOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } || calendarOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } }
     var body: some View {
@@ -38,7 +39,7 @@ struct NativeSettingsView: View {
                 Text(localError.isEmpty ? status : localError).foregroundStyle(localError.isEmpty ? Color.secondary : Color.red).font(.callout).textSelection(.enabled)
                 Spacer()
             }.padding(14).frame(minHeight: 45)
-        }.frame(width: 900, height: 700)
+        }.frame(width: 900, height: min(700, (NSScreen.main?.visibleFrame.height ?? 850) - 100))
         .textFieldStyle(.roundedBorder)
         .interactiveDismissDisabled(dirty || model.busy)
         .onAppear { initialize() }
@@ -78,7 +79,22 @@ struct NativeSettingsView: View {
         Group {
             SectionHeading(title: "Make yourself at home", detail: "Choose how Morrow looks, writes, and keeps your inbox up to date.")
             field("Display name", "preferences", "displayName")
-            TextArea(title: "Signature", text: string("preferences", "signature"), height: 70)
+            GroupBox("Email footer") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Format", selection: string("preferences", "signatureFormat")) { Text("Plain text").tag("plain"); Text("HTML").tag("html") }
+                    TextArea(title: values["preferences"]["signatureFormat"].string == "html" ? "HTML source" : "Signature", text: string("preferences", "signature"), height: 95)
+                    Text("Added to new messages and replies across your accounts. Saved drafts keep their existing footer. HTML supports text styles, tables and links; images and active content are removed.").font(.caption).foregroundStyle(.secondary)
+                    Button("Preview Footer") {
+                        run {
+                            let result = try await model.request("/signature/preview", method: "POST", body: values["preferences"].picking(["signature", "signatureFormat"]))
+                            footerPreview = result["footer"]
+                        }
+                    }
+                    if !footerPreview.isNull { FooterPreview(footer: footerPreview) }
+                }.padding(8)
+                .onChange(of: values["preferences"]["signature"]) { _ in footerPreview = .null }
+                .onChange(of: values["preferences"]["signatureFormat"]) { _ in footerPreview = .null }
+            }
             HStack {
                 Picker("Appearance", selection: string("preferences", "theme")) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }
                 Picker("Density", selection: string("preferences", "density")) { Text("Comfortable").tag("comfortable"); Text("Compact").tag("compact"); Text("Spacious").tag("spacious") }
@@ -271,6 +287,7 @@ struct NativeSettingsView: View {
         run {
             let result = try await model.request("/settings/\(group)", method: "POST", body: values[group])
             model.state = result
+            if group == "preferences" { values[group] = result["settings"][group] }
             if group == "ai" { values[group]["apiKey"] = .string(""); values[group]["clearApiKey"] = .bool(false) }
             if group == "mail" { values[group]["password"] = .string("") }
             baseline[group] = values[group]; model.dirty("settings", dirty)

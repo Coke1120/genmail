@@ -73,8 +73,13 @@ struct NativeClientChecks {
         assert(duplicates.count == 2 && Set(duplicates.map(\.viewID)).count == 2)
         model.selectedMessage = duplicates[1].viewID
         assert(model.current?["accountId"] == duplicates[1]["accountId"])
+        model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["signatureFormat": .string("html"), "signature": .string("<b>Native signature</b>")]))
         model.newDraft(Draft(message: duplicates[1], reply: true))
         assert(model.compose?.accountID == duplicates[1]["accountId"].string)
+        assert(model.compose?.footer["html"].string == "<b>Native signature</b>")
+        let reply = model.compose!
+        let savedReply = try await model.request("/drafts", method: "POST", body: reply.payload, mailbox: reply.accountID)
+        assert(Draft(message: savedReply["message"]).footer == reply.footer)
         model.compose = nil
         model.newDraft()
         assert(model.compose?.accountID == model.accounts.first?.id)
