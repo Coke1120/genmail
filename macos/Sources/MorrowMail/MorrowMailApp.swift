@@ -18,7 +18,7 @@ struct MorrowMailApp: App {
                 .environmentObject(model)
                 .tint(morrowGreen)
                 .preferredColorScheme(model.colorScheme)
-                .frame(minWidth: 960, minHeight: 640)
+                .frame(minWidth: 1040, minHeight: 640)
                 .background(WindowGuard(model: model))
                 .task { delegate.model = model; await model.start() }
                 .onChange(of: scenePhase) { phase in if phase == .active { model.refreshWhenActive() } }
@@ -33,7 +33,7 @@ struct MorrowMailApp: App {
             }
             CommandGroup(after: .windowSize) {
                 Menu("Window Size") {
-                    Button("Compact · 960 × 640") { resizeWindow(width: 960, height: 640) }
+                    Button("Compact · 1040 × 700") { resizeWindow(width: 1040, height: 700) }
                     Button("Standard · 1220 × 800") { resizeWindow(width: 1220, height: 800) }
                     Button("Wide · 1440 × 900") { resizeWindow(width: 1440, height: 900) }
                 }

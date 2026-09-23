@@ -4,6 +4,8 @@ Artifact: `build/macos/Morrow Mail.app`, Apple silicon, minimum macOS 13.5 for t
 
 ## Passed
 
+GitHub Actions checks on macOS and Ubuntu with Node 22 passed for the initial public alpha source.
+
 - `npm run check`: **60 backend tests**, followed by a successful web production build.
 - `npm run macos:test`: **3 native model/recovery checks plus recipient persistence and all six sort modes**, SwiftUI compilation, and native-client integration against isolated provider fixtures.
 - Native-client integration: all **19 AI behaviors**, server-enforced permission denial, independent Google/Outlook calendar listing and creation, calendar request replay, draft persistence, uncertain send review, explicit retry, confirmed-send replay, legacy mailbox migration, multiple accounts, combined-view ID collisions, account-owned drafts, and disconnect isolation.
@@ -20,7 +22,7 @@ Artifact: `build/macos/Morrow Mail.app`, Apple silicon, minimum macOS 13.5 for t
 
 - Native isolated app: Compact removed previews; Oldest-first changed the message order; ⌘N opened the composer; To/Cc/Bcc appeared together in ⌘⇧D review; cancelling review then ⌘S saved the draft; ⌘F focused search.
 - ⌘⇧M from the combined inbox retained the selected account, loaded fixture folders, reviewed account/action/destination, and moved only that account's message after confirmation.
-- Standard close/minimize/full-screen controls and macOS Window menu were present; Compact window-size preset worked. Reader/list width limits were tightened after checking the smaller window.
+- Standard close/minimize/full-screen controls and macOS Window menu were present; Compact window-size preset worked. Reader/list widths and the minimum window width were adjusted after checking the smaller window. Restart restored density and sort choices. Test data was moved to a private temporary directory to avoid macOS Documents-folder permission prompts after re-signing the fixture app.
 - Web selectors persisted Compact and Subject sorting. Automated backend checks cover complete recipient persistence. Web acceptance of new recipient input and provider confirmation is not claimed: the embedded browser encountered a blocking JavaScript confirmation during testing.
 
 ## Alpha mail additions
