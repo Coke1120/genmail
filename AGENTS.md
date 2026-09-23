@@ -8,7 +8,7 @@
 
 This repository is `~/Documents/Github/genmail`. The product name is Morrow Mail.
 It is a local, single-user app with a fully native SwiftUI macOS interface and
-an optional React development interface. Preserve both clients when changing
+a React / Electron Windows desktop interface and an optional browser development interface. Preserve both clients when changing
 shared API contracts.
 
 - `macos/Sources/MorrowMail/`: SwiftUI views, native client, and local service lifecycle.
@@ -17,7 +17,8 @@ shared API contracts.
 - `server/providers.js`, `server/integrations.js`: provider integrations.
 - `server/calendar-*.js`: independent calendar connections and idempotent creation.
 - `server/policy.js`, `server/workflows.js`, `shared/features.js`: permissions and behavior catalog.
-- `src/`: React interface.
+- `src/`: shared Windows/browser React interface.
+- `desktop/`: isolated Electron Windows shell and restricted desktop bridge.
 - `tests/`, `macos/Checks/`: backend and native client checks.
 - `scripts/`: development, backup, build, and test commands.
 
@@ -66,6 +67,8 @@ npm ci                       # install pinned dependencies when needed
 npm run check                # backend tests and React production build
 npm run macos:test           # Swift model checks, UI compilation, native API integration
 npm run macos:build          # self-contained app in build/macos/Morrow Mail.app
+npm run windows:build        # Windows x64 host: self-contained Electron app
+npm run desktop:test -- --packaged  # Windows packaged smoke test
 codesign --verify --deep --strict 'build/macos/Morrow Mail.app'
 plutil -lint 'build/macos/Morrow Mail.app/Contents/Info.plist'
 ```
@@ -103,3 +106,13 @@ To/Cc/Bcc belong to the send fingerprint and uncertain draft; never drop Bcc fro
 the provider delivery submission or expose it in SMTP recipient-visible headers.
 Public alpha releases must explicitly disclose ad-hoc signing and missing live-account
 acceptance. Never publish runtime data, fixture workspaces, or secrets.
+
+## Paired release policy
+
+Keep package.json as the common version source. Every tagged alpha must build and pass
+checks on macOS and Windows before either download becomes public. Use the existing
+workflow and publisher; never replace published binaries or ship only one platform.
+Preserve SwiftUI on macOS and the shared React Windows/browser client. Desktop IPC
+must validate the main-frame sender, accept only narrow operations, and never expose
+Node, arbitrary filesystem access or private API tokens to the renderer. Calendar
+retry IDs and payloads must survive restart on both platforms.

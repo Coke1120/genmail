@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.0-alpha.1 — 2026-09-23
+
+- Windows x64 desktop app with an isolated Electron renderer and bundled private service.
+- Paired macOS/Windows builds, checksums and gated releases from one version tag.
+- Windows keyboard shortcuts, remembered window size, persistent disclosure and calendar recovery.
 
 - Independently collapsible account groups in native and web sidebars, with saved disclosure states.
 - Account-owned replies across combined inbox, AI and keyboard paths; sent-message replies target original recipients.

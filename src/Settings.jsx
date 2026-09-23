@@ -430,7 +430,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
       </section>
 
       <section id="settings-panel-about" role="tabpanel" aria-labelledby="settings-tab-about" hidden={tab !== 'about'}>
-        <div className="settings-about-brand"><img src="/brand/morrow-icon.svg" alt="" width="72" height="72" /><div><h2>Morrow Mail</h2><p>A little more room to think.</p></div></div>
+        <div className="settings-about-brand"><img src="/brand/morrow-icon.svg" alt="" width="72" height="72" /><div><h2>Morrow Mail</h2><p>Version {__APP_VERSION__} · A little more room to think.</p></div></div>
         <p><a href="https://github.com/Coke1120/genmail" target="_blank" rel="noreferrer">GitHub</a> · <a href="https://github.com/sponsors/Coke1120" target="_blank" rel="noreferrer">GitHub Sponsors</a> · <a href="https://buymeacoffee.com/Coke1120" target="_blank" rel="noreferrer">Buy Me a Coffee</a></p>
         <p className="settings-about-intro">An independent, open-source email workspace inspired by GenMail. Original design and code, MIT licensed, and built to keep your workspace on your computer.</p>
         <dl className="settings-about-status">

@@ -6,7 +6,7 @@ Artifact: `build/macos/Morrow Mail.app`, Apple silicon, minimum macOS 13.5 for t
 
 GitHub Actions checks on macOS and Ubuntu with Node 22 passed for the initial public alpha source.
 
-- `npm run check`: **63 backend tests**, followed by a successful web production build.
+- `npm run check`: **65 backend tests**, followed by a successful web production build.
 - `npm run macos:test`: **3 native model/recovery checks plus recipient/footer persistence, reply ownership and all six sort modes**, SwiftUI compilation, and native-client integration against isolated provider fixtures.
 - Native-client integration: all **19 AI behaviors**, server-enforced permission denial, independent Google/Outlook calendar listing and creation, calendar request replay, draft persistence, uncertain send review, explicit retry, confirmed-send replay, legacy mailbox migration, multiple accounts, combined-view ID collisions, account-owned drafts, and disconnect isolation.
 - Multi-account backend checks: preserved legacy credentials, multiple OAuth providers, case-insensitive reconnect, combined sorting, duplicate message IDs, per-account AI/send/workflow routing, view changes during AI requests, reconnected/disconnected-owner rejection, partial sync failure, and reconnecting retained cache.
@@ -30,7 +30,7 @@ GitHub Actions checks on macOS and Ubuntu with Node 22 passed for the initial pu
 - Recipient validation, empty-To/Bcc-only delivery, header injection rejection, recipient cap and duplicate removal, complete recipient-set replay identity, SMTP envelope/Bcc header handling, and partial SMTP acceptance recovery are covered by automated checks.
 - Opt-in provider organization scopes, Gmail label modification, Outlook nested folders and immutable IDs, hostile pagination rejection, IMAP capability/UID-validity guards, destination UID mapping, explicit account/confirmation checks, and post-move cache identity are covered by isolated provider fixtures.
 
-## UI and footer changes (unreleased)
+## UI and footer changes (0.4 alpha)
 
 - Backend tests cover HTML allowlisting, removal of scripts/images/remote resources, bounded inputs, escaped message bodies, and generated plain-text alternatives. MIME tests verify the footer in Gmail, Outlook and SMTP submissions while preserving Bcc behavior.
 - Draft/retry tests preserve the footer across settings changes and restart, reject altered retry content, and route a reply to its owning mailbox when provider IDs collide and To uses an alias.
@@ -46,3 +46,11 @@ GitHub Actions checks on macOS and Ubuntu with Node 22 passed for the initial pu
 - This local build is ad-hoc signed. The public alpha is explicitly unnotarized. Stable distribution requires Developer ID signing, Apple notarization, and provider app verification where applicable. No valid Developer ID identity was available on the build Mac.
 
 The implementation is intended for a private, single-user Mac workspace. It does not claim error-free operation or exhaustive GenMail parity. See FEATURE_COVERAGE.md for live features and explicit simulations.
+
+## Cross-platform release checks
+
+- Local: 65 backend checks, React build, SwiftUI compilation and native integration passed.
+- Electron shell smoke passed on macOS using an isolated demo profile: actual inbox rendering, authenticated API calls, denied unauthenticated access, no renderer Node API, and persisted disclosure state. This does not substitute for Windows execution.
+- Desktop-state tests cover persistence, invalid keys, oversized writes and corrupt-state rejection; backups retain Windows client recovery metadata.
+- Windows runner: packaging and packaged `.exe` startup verification are performed by the paired CI workflow. See the workflow result for the exact tagged release.
+- Windows manual UI acceptance, live providers and distribution signing remain pending. The alpha is not certified production-ready.

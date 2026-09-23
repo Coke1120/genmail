@@ -13,9 +13,11 @@ export function backupDatabase(dataDir, destination = resolve('backups', `morrow
     if (!source.prepare('SELECT value FROM settings WHERE id = 1').get()) throw new Error('The source mailbox has not been initialized.');
     const key = readFileSync(resolve(dataDir, 'encryption.key'));
     if (key.length !== 32) throw new Error('The source encryption key is invalid.');
-    let pendingCalendar;
-    try { pendingCalendar = readFileSync(resolve(dataDir, 'pending-calendar.json')); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const clientFiles = new Map();
+    for (const name of ['pending-calendar.json', 'client-state.json']) {
+      try { clientFiles.set(name, readFileSync(resolve(dataDir, name))); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
     mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
     mkdirSync(destination, { mode: 0o700 });
     created = true;
@@ -24,7 +26,7 @@ export function backupDatabase(dataDir, destination = resolve('backups', `morrow
     source.prepare('VACUUM INTO ?').run(databasePath);
     chmodSync(databasePath, 0o600);
     writeFileSync(resolve(destination, 'encryption.key'), key, { flag: 'wx', mode: 0o600, flush: true });
-    if (pendingCalendar) writeFileSync(resolve(destination, 'pending-calendar.json'), pendingCalendar, { flag: 'wx', mode: 0o600, flush: true });
+    for (const [name, contents] of clientFiles) writeFileSync(resolve(destination, name), contents, { flag: 'wx', mode: 0o600, flush: true });
     const snapshot = new DatabaseSync(databasePath, { readOnly: true });
     try {
       if (snapshot.prepare('PRAGMA integrity_check').get().integrity_check !== 'ok') throw new Error('Backup database integrity verification failed.');
@@ -33,7 +35,7 @@ export function backupDatabase(dataDir, destination = resolve('backups', `morrow
     try { restored.getSettings(); } finally { restored.close(); }
     // Windows cannot open directories for fsync; SQLite and the key files are flushed above.
     for (const path of process.platform === 'win32' ? [databasePath] : [databasePath, destination]) {
-      const descriptor = openSync(path, 'r');
+      const descriptor = openSync(path, process.platform === 'win32' ? 'r+' : 'r');
       try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
     }
     return destination;

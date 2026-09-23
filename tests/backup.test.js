@@ -10,6 +10,7 @@ test('online backup restores matching credentials and transactional message stat
   const directory = mkdtempSync(`${tmpdir()}/morrow-backup-`), dataDir = `${directory}/data`, destination = `${directory}/snapshot`;
   const store = createStore(dataDir);
   const pendingCalendar = JSON.stringify({ id: 'stable-retry-id', title: 'Unconfirmed event' });
+  writeFileSync(`${dataDir}/client-state.json`, JSON.stringify({ 'morrow.pendingCalendar': pendingCalendar }), { mode: 0o600 });
   writeFileSync(`${dataDir}/pending-calendar.json`, pendingCalendar, { mode: 0o600 });
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
   const mail = { email: 'saved@example.com', password: 'private-backup-password', refreshToken: 'private-refresh-token' };
@@ -54,6 +55,7 @@ test('online backup restores matching credentials and transactional message stat
   if (process.platform !== 'win32') assert.equal(statSync(destination).mode & 0o777, 0o700);
   if (process.platform !== 'win32') for (const file of ['genmail.sqlite', 'encryption.key', 'pending-calendar.json']) assert.equal(statSync(`${destination}/${file}`).mode & 0o777, 0o600);
   assert.equal(readFileSync(`${destination}/pending-calendar.json`, 'utf8'), pendingCalendar);
+  assert.equal(JSON.parse(readFileSync(`${destination}/client-state.json`, 'utf8'))['morrow.pendingCalendar'], pendingCalendar);
   assert.deepEqual(readFileSync(`${destination}/encryption.key`), readFileSync(`${dataDir}/encryption.key`));
   assert.equal(readFileSync(`${destination}/genmail.sqlite`).includes(mail.password), false);
   const before = readFileSync(`${destination}/genmail.sqlite`);

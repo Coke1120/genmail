@@ -2,16 +2,17 @@
 
 # Morrow Mail
 
-**An open-source macOS email client with calendars and your choice of AI.**
+**An open-source email client for macOS and Windows, with calendars and your choice of AI.**
 
 [![Checks](https://github.com/Coke1120/genmail/actions/workflows/check.yml/badge.svg)](https://github.com/Coke1120/genmail/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-blue.svg)](#windows-desktop-app)
 [![macOS 13.5+](https://img.shields.io/badge/macOS-13.5%2B-black.svg)](#native-macos-app)
 [![Alpha release](https://img.shields.io/github/v/release/Coke1120/genmail?include_prereleases&label=alpha)](https://github.com/Coke1120/genmail/releases)
 
-[Download alpha](https://github.com/Coke1120/genmail/releases/tag/v0.3.0-alpha.1) · [Feature coverage](FEATURE_COVERAGE.md) · [Verification](VERIFICATION.md) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
+[Download macOS / Windows alpha](https://github.com/Coke1120/genmail/releases) · [Feature coverage](FEATURE_COVERAGE.md) · [Verification](VERIFICATION.md) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
 
-Morrow Mail is an independent, MIT-licensed alternative inspired by Genspark GenMail. It runs locally with a **fully native SwiftUI interface**, a bundled mail service, and an optional React development interface.
+Morrow Mail is an independent, MIT-licensed alternative inspired by Genspark GenMail. It runs locally with a **fully native SwiftUI macOS interface** and a **React / Electron Windows desktop interface**. Both bundle the same mail service and use the same release version. The React interface also runs in a browser for development.
 
 - **Multiple mailboxes:** Gmail, Outlook / Microsoft 365, and IMAP / SMTP; combined or separate inboxes with collapsible account groups, sorting, and compact views.
 - **Mail and calendars together:** read, search, compose, reply, manage provider folders / Gmail labels, and connect Google Calendar and Outlook Calendar.
@@ -24,7 +25,7 @@ This project is not affiliated with Genspark and does not claim complete parity.
 
 ## Screenshots
 
-Captured from the current development build using fictional messages and isolated provider fixtures. No private mail is shown. These screens include changes newer than the downloadable **v0.3.0-alpha.1** release.
+Captured from the current development build using fictional messages and isolated provider fixtures. No private mail is shown. These macOS screens show the interface included in the 0.4 alpha line. Windows uses the React interface; it is not a SwiftUI port.
 
 **Combined inbox with collapsible account groups and per-message mailbox labels**
 
@@ -36,9 +37,16 @@ Captured from the current development build using fictional messages and isolate
 
 ## Download the alpha
 
-**v0.3.0-alpha.1** is an experimental alpha for Apple silicon, macOS 13.5+. [Download the app and checksum](https://github.com/Coke1120/genmail/releases/tag/v0.3.0-alpha.1). The download includes the local runtime; no Node installation is needed. Unzip and move **Morrow Mail.app** to Applications.
+[Download the latest paired alpha and checksums](https://github.com/Coke1120/genmail/releases). Starting with **v0.4.0-alpha.1**, each release contains both:
 
-The alpha is **ad-hoc signed, not Apple notarized**; macOS may block it. Review the source/checksum and use Apple's documented [opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac) process only if you trust the download. A Developer ID/notarized stable release and live-account acceptance are still pending.
+| Platform | Package | Interface |
+| --- | --- | --- |
+| macOS 13.5+, Apple silicon | `Morrow-Mail-<version>-macos-arm64.zip` | Native SwiftUI |
+| Windows 10/11, x64 | `Morrow-Mail-<version>-windows-x64.zip` | React in an isolated Electron window |
+
+Both include their runtimes; no Node installation is needed. On macOS, unzip and move **Morrow Mail.app** to Applications. On Windows, extract the **entire folder** and run **Morrow Mail.exe**; keep the accompanying files together.
+
+These are experimental alphas. macOS builds are **ad-hoc signed, not Apple notarized**; Windows builds are **unsigned** and may show SmartScreen warnings. Review the source and supplied SHA-256 checksum before opening. For macOS, see Apple's [opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac) instructions. Stable distribution signing and live-account acceptance remain pending.
 
 ## Native macOS app
 
@@ -67,6 +75,41 @@ The inbox's **View** menu selects Compact, Comfortable, or Spacious rows. **Sort
 Native **Settings → About → Back Up Workspace** creates a verified backup including any pending calendar request. Calendar creation persists its original request ID and details before writing to the provider, so a restart can recover an uncertain attempt. Review the provider's calendar before resolving a pending request.
 
 Builds are ad-hoc signed for local use. A stable public distribution requires your Apple Developer ID certificate, hardened-runtime signing and **Apple notarization**. The published alpha explicitly remains unnotarized. Set `MORROW_SIGNING_IDENTITY` to your Developer ID identity for signing; the script does not submit anything to Apple. The app is not App Store sandboxed. Live provider acceptance testing and signing/notarization are release requirements, not claims made by the local build.
+
+## Windows desktop app
+
+The Windows package reuses the React interface and the same provider, account-routing, AI-permission and calendar service as macOS. It has standard minimize/maximize/close controls, remembered window size, and an isolated renderer with no Node access. The bundled backend uses a fresh loopback port and private bearer token on every launch; credentials and the token are not exposed through the desktop bridge.
+
+Data lives in `%APPDATA%\Morrow Mail`. Sidebar disclosure and pending calendar requests persist across app restarts. Windows uses the current user's profile permissions; Unix file-mode checks do not represent Windows ACLs. Account data is local to each installation; paired releases do **not** synchronize mail caches, credentials or preferences between computers.
+
+OAuth opens the system browser. Use the callback displayed in Settings, then return and click **Refresh connections** in Mail or Calendar. Keyboard shortcuts include **Ctrl+N** compose, **Ctrl+F** search, **Ctrl+,** settings, **Ctrl+R** sync, **Ctrl+Shift+R** reply, **Ctrl+1/2/3** Inbox / AI Studio / Calendar, **Ctrl+S** save draft, and **Ctrl+Shift+D** send review.
+
+Build on Windows x64 with official Node.js 22.13+ and npm:
+
+```sh
+npm ci --ignore-scripts
+npm run check
+npm run windows:build
+npm run desktop:test -- --packaged
+node scripts/package-release.js
+```
+
+The runnable folder is `build/windows/Morrow Mail-win32-x64`; the distributable ZIP and SHA-256 checksum are in `build/release`. The packaged smoke test uses a fresh temporary demo workspace and sends no real mail. Desktop-shell development can be checked on a Mac with `npm run build` followed by `npm run desktop:test`; this does not replace Windows verification.
+
+For a Windows backup, quit Morrow Mail, open PowerShell inside the extracted app folder, and run:
+
+```powershell
+$env:DATA_DIR = Join-Path $env:APPDATA 'Morrow Mail'
+& '.\resources\app\runtime\node.exe' '.\resources\app\backend\scripts\backup.js' 'C:\path\to\new-backup-folder'
+```
+
+## Keeping platform releases aligned
+
+`package.json` is the version source for both apps and archive names. Pushes and pull requests run backend/web checks on Ubuntu, macOS and Windows. macOS also compiles and tests SwiftUI; Windows builds and launches its packaged `.exe`. Successful platform builds upload both packages as CI artifacts.
+
+To publish a new alpha, update the changelog and verification notes, bump the package version with `npm version <version>-alpha.<number> --no-git-tag-version`, commit, then push the matching `v<version>-alpha.<number>` tag. The workflow builds both platforms from that **same tag**. It verifies both archives and their checksums, uploads them to a draft release, and makes the release public only after every platform job succeeds. Failed builds publish no partial release; failed uploads leave a draft. Published assets are never overwritten.
+
+Every change is checked; versioned tags publish paired downloads. Unsigned automation currently accepts alpha versions only. Native UI differences remain explicit in [feature coverage](FEATURE_COVERAGE.md); API changes must preserve both clients.
 
 ## Web development interface
 
@@ -228,9 +271,9 @@ npm run backup
 npm run backup -- /path/to/new-backup-directory
 ```
 
-The default destination is `./backups/morrow-<timestamp>`. `DATA_DIR` selects the source directory, just as it does for the server. The backup command can run while Morrow is open: it creates a consistent SQLite snapshot, copies the matching encryption key, and verifies the result. Backup directories/files use owner-only permissions. Copy the resulting directory to your own protected backup storage.
+The default destination is `./backups/morrow-<timestamp>`. `DATA_DIR` selects the source directory, just as it does for the server. The backup command can run while Morrow is open: it creates a consistent SQLite snapshot, copies the matching encryption key, and verifies the result. Backup directories/files use owner-only modes on macOS/Linux; on Windows, choose a destination protected by your user ACLs. Copy the resulting directory to your own protected backup storage.
 
-To restore, quit the native app, or stop the web server with Ctrl+C, and wait for shutdown. Preserve the current data directory, then copy **both** `genmail.sqlite` and `encryption.key` from the same backup into a new private directory. Also restore `pending-calendar.json` if the backup contains it. Point the web server’s `DATA_DIR` or native app’s `MORROW_DATA_DIR` at it and restart. Verify your saved mail and settings; the web server also exposes `/api/health`. Never replace a key by itself. If taking a manual filesystem copy instead of using the backup command, stop the app first.
+To restore, quit the native app, or stop the web server with Ctrl+C, and wait for shutdown. Preserve the current data directory, then copy **both** `genmail.sqlite` and `encryption.key` from the same backup into a new private directory. Also restore `pending-calendar.json` and `client-state.json` if the backup contains them. Point the web server’s `DATA_DIR` or native app’s `MORROW_DATA_DIR` at it and restart. Verify your saved mail and settings; the web server also exposes `/api/health`. Never replace a key by itself. If taking a manual filesystem copy instead of using the backup command, stop the app first.
 
 Normal startup, health, and backup diagnostics do not include credentials. Keep API keys, tokens, and OAuth callback URLs out of shared issue reports.
 
@@ -243,7 +286,7 @@ Normal startup, health, and backup diagnostics do not include credentials. Keep 
 - No scheduled AI execution, unattended sending, or automatic replies. A morning briefing is generated on demand.
 - The Calendar page supports live event reading and explicit event creation without attendees. Editing/deleting existing events, invitations, and automatic scheduling are not implemented. AI Studio scheduling remains a local simulation.
 - Calendar reads are bounded to 500 calendars and 1,000 events per request. Use a smaller date range for a busy calendar.
-- macOS has a native SwiftUI app; the responsive web interface remains available for development. Windows, iOS, and Android native apps are not implemented.
+- macOS uses SwiftUI; Windows uses React / Electron. Core features share the same backend, while native controls and layouts differ. iOS and Android apps are not implemented. Windows manual UI acceptance remains pending.
 - Provider and model integrations have automated checks with mocks. Authenticated mail, Google/Microsoft Calendar, and remote-model use still require your credentials and consent; they are not claimed as live-account verified or error-free.
 
 ## Support development
