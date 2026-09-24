@@ -3,6 +3,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, symlinkSync, existsSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, sign, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -63,12 +64,12 @@ globalThis.fetch = async url => {
   const owner = join(directory, 'owner.mjs');
   writeFileSync(owner, `import {spawn} from 'node:child_process'; import {once} from 'node:events'; import {createInterface} from 'node:readline'; import {setTimeout as delay} from 'node:timers/promises'; import assert from 'node:assert/strict';
 const token='a'.repeat(64), updateToken='b'.repeat(64);
-const child=spawn(process.execPath,['--import',${JSON.stringify(loader)},${JSON.stringify(join(backend, 'server/native.js'))}],{stdio:['pipe','pipe','pipe']});
-child.stderr.on('data',()=>{}); const exited=once(child,'exit');
+const child=spawn(process.execPath,['--import',${JSON.stringify(pathToFileURL(loader).href)},${JSON.stringify(join(backend, 'server/native.js'))}],{stdio:['pipe','pipe','pipe']});
+child.stderr.pipe(process.stderr); const exited=once(child,'exit');
 try {
   const lines=createInterface({input:child.stdout}), ready=once(lines,'line');
   child.stdin.write(JSON.stringify({token,updateToken,parentPID:process.pid,dataDirectory:${JSON.stringify(workspace)}})+'\\n');
-  const [line]=await ready, base='http://127.0.0.1:'+JSON.parse(line).port;
+  const [line]=await Promise.race([ready,exited.then(([code])=>{throw Error('Fixture service exited before startup: '+code);})]), base='http://127.0.0.1:'+JSON.parse(line).port;
   const request=(path,body,extra={})=>fetch(base+'/api/updates/'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',...extra},...(body?{body:JSON.stringify(body)}:{})});
   assert.equal((await (await request('status')).json()).supported,true);
   assert.equal((await request('install',{})).status,403);
