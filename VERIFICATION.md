@@ -118,3 +118,12 @@ No real provider messages/calendar events were created and no paid model was con
 - `npm run macos:build`, strict/deep signature verification and Info.plist validation passed. The bundled backend reports `0.5.0-alpha.1`; the app remains ad-hoc signed and unnotarized.
 - The paired GitHub workflow must pass Ubuntu, macOS packaging and Windows packaged launch checks before its publisher makes either download public. See the tag's Actions run for the resulting CI evidence.
 - Earlier checkpoints above describe pre-release work and their test counts at that time. Their native Settings GUI, Windows manual UI and live-provider/model acceptance limitations still apply; this alpha does not establish production readiness.
+
+## Published v0.5.0-alpha.1 — 2026-09-24
+
+- [Release](https://github.com/Coke1120/genmail/releases/tag/v0.5.0-alpha.1), published as a prerelease at 06:26 UTC, contains both platform ZIPs and their two checksum files. Both packages come from commit `924a1950b6e775ee54e59f474e174d8fa2bc7ca4`.
+- [Candidate CI](https://github.com/Coke1120/genmail/actions/runs/35963991934) and [tagged release CI](https://github.com/Coke1120/genmail/actions/runs/35964230460) passed on Ubuntu, macOS arm64 and Windows x64. Windows passed the packaged executable smoke test; macOS passed native compilation, fixture integration and app packaging. The publisher waited for all three jobs before publishing.
+- Downloaded both public ZIPs and verified their SHA-256 checksums: macOS `b0014dca97ba9cbdf4ff5626c1f650e9d8e0b652c9fda23ae93f43bdc71c9975`; Windows `0d02abe6c216bce15b3752a87a58c660d00788c0d3b1f638b834f084be48fe86`.
+- The downloaded Mac app passed strict/deep signature verification and Info.plist validation, and its bundled backend reports `0.5.0-alpha.1`. This is ad-hoc signing, not notarization.
+- Live, read-only GitHub update checks found `0.5.0-alpha.1`: an installed `0.4.0-alpha.1` reports an available update; the current version reports no update. These checks included prereleases and did not access mail, calendars or a model.
+- The release notes retain the native Settings GUI tool failure, pending Windows manual UI/live-account acceptance, unsigned/unnotarized distribution, and documented feature limits. Publication does not resolve those limitations.
