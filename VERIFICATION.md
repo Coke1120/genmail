@@ -153,3 +153,12 @@ No real provider messages/calendar events were created and no paid model was con
 - Promotes the built-in Google sign-in and browser callback changes above to a paired beta. The release publisher now accepts matching numbered alpha/beta tags, still rejects stable/mismatched tags, and retains both-platform, checksum and draft-publication guards.
 - Local `npm run check`: **91 tests passed** and the React production build passed. Tests cover the publisher’s version gate and alpha-to-beta update ordering. Tagged CI must run backend/React checks on all three hosts, native macOS tests/build, and Windows build/packaged smoke before publishing either platform.
 - Beta naming does not resolve the documented live-account, Google verification, native Settings GUI, manual Windows UI or distribution-signing limitations. See the tagged Actions run and release notes for publication evidence.
+
+## Published v0.5.0-beta.1 — 2026-09-24
+
+- [Beta release](https://github.com/Coke1120/genmail/releases/tag/v0.5.0-beta.1) published at 08:40 UTC as a prerelease, with macOS arm64 and Windows x64 ZIPs plus both SHA-256 files. Both packages use commit `575662a108fe878694870943cf5d6aef1926680f`.
+- [Main CI](https://github.com/Coke1120/genmail/actions/runs/35976296548) and [tagged release CI](https://github.com/Coke1120/genmail/actions/runs/35976296570) passed on Ubuntu, macOS and Windows. Checks include 91 backend tests/React build, native Swift compilation/API integration, both desktop builds, and Windows packaged executable smoke. Publication waited for all platform jobs.
+- Downloaded both public ZIPs and verified their supplied SHA-256 checksums: macOS `502015ef8bc1c8dcb45cb6740a47ae17fed6bbcf06c658b9d4a307f77206b149`; Windows `cb0f3e61160a5ea816207050d6b827527b8c16762f27cd5e105db6c09cf1ee04`. Both bundled package versions report `0.5.0-beta.1`; both contain the intended publisher Desktop OAuth registration with only the required client fields.
+- The downloaded Mac app passed strict/deep signature verification and Info.plist lint. It remains ad-hoc signed and unnotarized; Windows remains unsigned.
+- Live, read-only GitHub update checks return `0.5.0-beta.1`: `0.5.0-alpha.1` reports an available update and `0.5.0-beta.1` reports no update. No mailbox, calendar or model was accessed.
+- Release notes retain Google test-user/API/verification requirements, native Settings GUI and live-account acceptance gaps, and existing feature limitations. Beta publication does not establish production readiness; existing alpha assets were not replaced.
