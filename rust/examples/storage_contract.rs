@@ -24,6 +24,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     } else {
         let store = Store::open(Path::new(request["directory"].as_str().unwrap()))?;
+        if request["crash"] == true {
+            store.conn.execute_batch("PRAGMA cache_size=1")?;
+            store.transaction(|db| {
+                db.set_settings(&json!({"deliveryAttempts":[],"crashMarker":"uncommitted"}))?;
+                db.update(
+                    "fixture@example.invalid",
+                    "pending-draft",
+                    &json!({"body":"uncommitted replacement","bcc":""}),
+                )?;
+                db.upsert(
+                    "fixture@example.invalid",
+                    &json!({"id":"uncommitted-new","body":"never commit"}),
+                )?;
+                // Abrupt process exit deliberately skips all Rust/SQLite destructors.
+                std::process::exit(77);
+            })?;
+        }
         let before = store.settings()?;
         store.set_settings(&json!({"rustRoundTrip":true}))?;
         store.upsert("fixture@example.invalid", &json!({"id":"rust-owned", "subject":"發票", "body":"Rust writes preserve the existing index triggers.", "folder":"inbox"}))?;

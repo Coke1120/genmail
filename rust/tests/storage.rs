@@ -171,6 +171,21 @@ fn partial_index_keeps_all_metadata_pages_consistent_during_backfill() {
     }
     assert_eq!(db.backfill_batch().unwrap(), 0);
     assert_eq!(pages::stats(&db, &owners).unwrap(), stats);
+    db.conn
+        .execute_batch("DELETE FROM search_documents; DELETE FROM search_meta;")
+        .unwrap();
+    assert_eq!(pages::stats(&db, &owners).unwrap(), stats);
+    for (i, sort) in sorts.iter().enumerate() {
+        assert_eq!(
+            pages::page(&db, &owners, &json!({"sort":sort}), &[0; 32]).unwrap()["messages"],
+            expected[i]
+        );
+    }
+    db.update(&owners[0], "same-1", &json!({"read":true}))
+        .unwrap();
+    assert_eq!(pages::stats(&db, &owners).unwrap()[&owners[0]]["unread"], 2);
+    assert_eq!(db.backfill_batch().unwrap(), 0);
+    assert_eq!(pages::stats(&db, &owners).unwrap()[&owners[0]]["unread"], 2);
     drop(db);
     fs::remove_dir_all(root).unwrap();
 }

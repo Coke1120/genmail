@@ -18,6 +18,6 @@ mkdirSync(new URL('../rust/resources/', import.meta.url), { recursive: true });
 for (const [name, value] of Object.entries(files)) {
   const path = new URL('../rust/resources/' + name, import.meta.url), content = JSON.stringify(value) + '\n';
   if (process.argv.includes('--check')) {
-    if (readFileSync(path, 'utf8') !== content) throw Error('Rust resources are stale. Run node scripts/rust-resources.js.');
+    if (readFileSync(path, 'utf8') !== content) throw Error(`Rust resource ${name} is stale. Run node scripts/rust-resources.js.`);
   } else writeFileSync(path, content);
 }

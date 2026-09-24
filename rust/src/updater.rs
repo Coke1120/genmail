@@ -572,12 +572,14 @@ fn ps_command(script: &str) -> Command {
     command
 }
 fn private_directory(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder.create(path)?;
     Ok(())
 }
@@ -711,7 +713,16 @@ async fn extract(
         )
         .await?;
     } else {
-        command_output_cancellable(ps_command("$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath $env:MORROW_UPDATE_ZIP -DestinationPath $env:MORROW_UPDATE_DEST").env("MORROW_UPDATE_ZIP",path).env("MORROW_UPDATE_DEST",&extraction),120,cancel).await?;
+        // Keep the verified canonical paths internally. Legacy Windows PowerShell
+        // archive APIs do not consistently accept Rust's \\?\ verbatim prefix;
+        // these fixed relative names resolve inside the owned staging directory.
+        command_output_cancellable(
+            ps_command("$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath 'update.zip' -DestinationPath 'extracted'")
+                .current_dir(directory),
+            120,
+            cancel,
+        )
+        .await?;
     }
     Ok(extraction.join(root))
 }
@@ -1450,6 +1461,39 @@ mod download_tests {
     use std::sync::atomic::AtomicU8;
     use tokio_rustls::{TlsAcceptor, rustls};
 
+    // Fixture tools contain only generated test data. Preserve bounded diagnostics
+    // here without exposing subprocess output through the production update API.
+    async fn fixture_command(step: &str, command: &mut Command, seconds: u64) {
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("{step}: could not start fixture command: {error}"));
+        let mut stdout = child.stdout.take().unwrap().take(65537);
+        let mut stderr = child.stderr.take().unwrap().take(65537);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = tokio::time::timeout(Duration::from_secs(seconds), async {
+            tokio::try_join!(
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+                child.wait()
+            )
+        })
+        .await;
+        if !matches!(&result, Ok(Ok((_, _, status))) if status.success())
+            || out.len() > 65536
+            || err.len() > 65536
+        {
+            let _ = child.kill().await;
+            panic!(
+                "{step}: fixture command failed ({result:?}); stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&out),
+                String::from_utf8_lossy(&err)
+            );
+        }
+    }
+
     struct Fixture {
         root: PathBuf,
         task: JoinHandle<()>,
@@ -1505,7 +1549,8 @@ mod download_tests {
         if platform == "macos-arm64" {
             let source = root.join("fixture.swift");
             fs::write(&source,format!("import Foundation\ntry! (ProcessInfo.processInfo.environment[\"MORROW_DATA_DIR\"] ?? \"missing workspace\").write(toFile: {}, atomically: true, encoding: .utf8)\n",serde_json::to_string(&marker.to_string_lossy()).unwrap())).unwrap();
-            command_output(
+            fixture_command(
+                "compile macOS restart fixture",
                 clean_command("/usr/bin/swiftc")
                     .args(["-target", "arm64-apple-macosx13.5"])
                     .arg(&source)
@@ -1513,37 +1558,57 @@ mod download_tests {
                     .arg(&executable),
                 60,
             )
-            .await
-            .unwrap();
+            .await;
             fs::write(incoming.join("Contents/Info.plist"),r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.morrowmail.rust-updater-fixture</string><key>CFBundleExecutable</key><string>MorrowMail</string><key>CFBundleVersion</key><string>99.0.0</string><key>LSMinimumSystemVersion</key><string>13.5</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#).unwrap();
-            command_output(
+            fixture_command(
+                "sign macOS restart fixture",
                 clean_command("/usr/bin/codesign")
                     .args(["--force", "--sign", "-"])
                     .arg(&incoming),
                 30,
             )
-            .await
-            .unwrap();
+            .await;
         } else {
-            let code = format!(
-                "public class Restart {{ public static void Main() {{ System.IO.File.WriteAllText({}, System.Environment.GetEnvironmentVariable(\"MORROW_DATA_DIR\") ?? \"missing workspace\"); }} }}",
-                serde_json::to_string(&marker.to_string_lossy()).unwrap()
-            );
-            command_output(ps_command("$ErrorActionPreference='Stop'; Add-Type -TypeDefinition $env:MORROW_FIXTURE_CODE -OutputAssembly $env:MORROW_FIXTURE_EXE -OutputType WindowsApplication").env("MORROW_FIXTURE_CODE",code).env("MORROW_FIXTURE_EXE",&executable),60).await.unwrap();
+            let source = root.join("restart_fixture.rs");
+            fs::write(
+                &source,
+                format!(
+                    "#![windows_subsystem = \"windows\"]\nfn main() {{ std::fs::write({:?}, std::env::var(\"MORROW_DATA_DIR\").expect(\"missing fixture workspace\")).unwrap(); }}\n",
+                    marker.to_string_lossy()
+                ),
+            )
+            .unwrap();
+            fixture_command(
+                "compile Windows restart fixture",
+                clean_command(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+                    .args(["--edition=2024", "--crate-name", "restart_fixture"])
+                    .arg(&source)
+                    .arg("-o")
+                    .arg(&executable),
+                60,
+            )
+            .await;
         }
         let archive = root.join("update.zip");
         if platform == "macos-arm64" {
-            command_output(
+            fixture_command(
+                "archive macOS restart fixture",
                 clean_command("/usr/bin/ditto")
                     .args(["-c", "-k", "--keepParent"])
                     .arg(&incoming)
                     .arg(&archive),
                 30,
             )
-            .await
-            .unwrap();
+            .await;
         } else {
-            command_output(ps_command("$ErrorActionPreference='Stop'; Compress-Archive -LiteralPath $env:MORROW_FIXTURE_APP -DestinationPath $env:MORROW_FIXTURE_ZIP").env("MORROW_FIXTURE_APP",&incoming).env("MORROW_FIXTURE_ZIP",&archive),30).await.unwrap();
+            fixture_command(
+                "archive Windows restart fixture",
+                ps_command("$ErrorActionPreference='Stop'; Compress-Archive -LiteralPath $env:MORROW_FIXTURE_APP -DestinationPath 'update.zip'")
+                    .current_dir(&root)
+                    .env("MORROW_FIXTURE_APP", Path::new("incoming").join(archive_root)),
+                30,
+            )
+            .await;
         }
         let zip = fs::read(&archive).unwrap();
         let digest = hash_file(&archive).unwrap();
@@ -1563,7 +1628,12 @@ mod download_tests {
             .args(["--input-type=module", "-e", script])
             .arg(&incoming)
             .arg(platform);
-        command_output(&mut node, 60).await.unwrap();
+        fixture_command(
+            "validate fixture with the original Node updater",
+            &mut node,
+            60,
+        )
+        .await;
         let certificate = rcgen::generate_simple_self_signed(vec![
             "github.com".into(),
             "api.github.com".into(),
@@ -1806,13 +1876,15 @@ mod download_tests {
         {
             // Staging and downloaded content must inherit only owner/SYSTEM access,
             // even when the installation's parent grants other local users access.
-            command_output(
-                ps_command("$ErrorActionPreference='Stop'; $d=Get-Acl -LiteralPath $env:MORROW_FIXTURE_STAGE; if (!$d.AreAccessRulesProtected) { throw 'Staging DACL is not protected' }; $owner=$d.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; foreach ($path in @($env:MORROW_FIXTURE_STAGE,(Join-Path $env:MORROW_FIXTURE_STAGE 'update.zip'))) { $a=Get-Acl -LiteralPath $path; $rules=$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); if (!$rules.Count) { throw 'Missing staging access rules' }; foreach ($rule in $rules) { if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin @($owner,'S-1-5-18')) { throw 'Staging grants another principal access' } } }")
-                    .env("MORROW_FIXTURE_STAGE", &directory),
+            // Store uses SDDL OW (S-1-3-4, Owner Rights), which remains a special
+            // trustee rather than being rewritten to the owner's concrete SID.
+            fixture_command(
+                "verify private Windows staging ACL",
+                ps_command("$ErrorActionPreference='Stop'; $d=Get-Acl -LiteralPath '.'; if (!$d.AreAccessRulesProtected) { throw 'Staging DACL is not protected' }; $owner=$d.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; foreach ($path in @('.','update.zip')) { $a=Get-Acl -LiteralPath $path; $rules=$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); $hasOwner=$false; $hasSystem=$false; foreach ($rule in $rules) { if ($rule.AccessControlType -eq 'Allow') { $sid=$rule.IdentityReference.Value; if ($sid -in @($owner,'S-1-3-4')) { $hasOwner=$true } elseif ($sid -eq 'S-1-5-18') { $hasSystem=$true } else { throw 'Staging grants another principal access' } } }; if (!$hasOwner -or !$hasSystem) { throw 'Missing owner or SYSTEM access' } }")
+                    .current_dir(&directory),
                 30,
             )
-            .await
-            .unwrap();
+            .await;
         }
         let sleeper = || {
             let mut command = if cfg!(windows) {

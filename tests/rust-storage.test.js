@@ -15,6 +15,24 @@ if (process.env.MORROW_TEST_RUST && !available) throw Error('Build the Rust stor
 const options = { skip: !available && 'Run npm run rust:test.' };
 const call = request => JSON.parse(execFileSync(executable, { input: JSON.stringify(request), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
 
+test('Abrupt Rust process death rolls back settings and draft writes together', options, t => {
+  const root = mkdtempSync(join(tmpdir(), 'morrow-crash-storage-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = createStore(root);
+  const attempts = [{ account: 'fixture@example.invalid', requestId: 'keep-request', draftId: 'pending-draft', payloadHash: 'keep-exact-review' }];
+  const draft = { id: 'pending-draft', folder: 'drafts', body: 'Confirmed saved content', to: 'to@example.invalid', cc: 'cc@example.invalid', bcc: 'bcc@example.invalid', deliveryStatus: 'unconfirmed', deliveryRequestId: 'keep-request' };
+  source.setSettings({ deliveryAttempts: attempts }); source.upsertMessage('fixture@example.invalid', draft); source.close();
+  assert.throws(() => call({ directory: root, crash: true }), error => error.status === 77);
+  assert(existsSync(join(root, 'genmail.sqlite-journal')), 'fixture must leave an on-disk rollback journal');
+  const reopened = createStore(root);
+  try {
+    assert.deepEqual(reopened.getSettings().deliveryAttempts, attempts);
+    assert.equal(reopened.getSettings().crashMarker, undefined);
+    assert.deepEqual(reopened.getMessage('fixture@example.invalid', 'pending-draft'), draft);
+    assert.equal(reopened.getMessage('fixture@example.invalid', 'uncommitted-new'), null);
+  } finally { reopened.close(); }
+});
+
 test('Rust and Node share encrypted settings, index normalization, recovery files and backward-compatible writes', options, t => {
   const root = mkdtempSync(join(tmpdir(), 'morrow-cross-storage-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

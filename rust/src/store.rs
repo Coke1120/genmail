@@ -307,6 +307,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS messages(account TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(account,id));
             CREATE INDEX IF NOT EXISTS mail_remote ON messages(account,COALESCE(NULLIF(json_extract(data,'$.remoteId'),''),id));
+            CREATE INDEX IF NOT EXISTS mail_metadata ON messages(account,COALESCE(json_extract(data,'$.folder'),''),COALESCE(json_extract(data,'$.date'),'') DESC,id,NOT COALESCE(json_extract(data,'$.read'),0),COALESCE(json_extract(data,'$.starred'),0),COALESCE(json_extract(data,'$.category'),''));
             CREATE INDEX IF NOT EXISTS mail_message_id ON messages(account,json_extract(data,'$.messageId'));")?;
         store.transaction(|store| {
             create_index(&store.conn)?;

@@ -1,6 +1,7 @@
 # Morrow Mail — Rust 遷移計劃
 
-日期：2026-09-24  
+日期：2026-09-24
+
 狀態：2026-09-25 已實作 M0 量測工具、M1 分頁介面、M2 唯讀試點及 M3–M5 完整 Rust service 候選版本。預設正式套件仍使用 Node，待跨平台驗收與明確切換確認；M6 依本計劃的 M5 穩定條件另行評估。詳見 [相容性清單](RUST_MIGRATION_INVENTORY.md) 與 [實際驗證記錄](../VERIFICATION.md)。
 
 本計劃保留 macOS 原生 SwiftUI 介面，逐步將共用 Node.js 服務遷移至 Rust。Windows 先保留 React / Electron，待 Rust 後端穩定後，另行評估 React / Tauri。Node.js 仍可用於 React 建置；「移除 Node.js」指最終桌面產品不再需要捆綁或啟動 Node.js runtime。

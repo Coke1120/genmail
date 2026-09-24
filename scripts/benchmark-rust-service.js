@@ -2,6 +2,9 @@
 // Run after cargo build --manifest-path rust/Cargo.toml --release --locked.
 // Optional queue investigation: --sizes=50000 --idleSeconds=0 --probeRevision=true
 // Compare --rebuildMode=state (default) against --rebuildMode=revision.
+// --missingRows=N removes 1..size derived rows (default min(size,1000)); explicitly
+// requesting the full fixture size removes all derived documents, including demo.
+// Rebuild observation has a fixed 180-second limit.
 // --profileDir=test-results/rust-service-profile enables macOS native stack sampling;
 // --binary=/absolute/path/to/release/morrow-service selects a preserved release build.
 import assert from 'node:assert/strict';
@@ -19,6 +22,7 @@ import { createStore } from '../server/store.js';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const args = Object.fromEntries(process.argv.slice(2).map(arg => arg.replace(/^--/, '').split('=')));
 const accounts = ['alpha@example.invalid', 'beta@example.invalid'];
+const rebuildTimeoutMs = 180000;
 const clock = () => performance.now();
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 async function within(promise, ms, message) {
@@ -63,10 +67,10 @@ async function start(executable, directory) {
   const startupMs = clock() - started;
   return {
     pid: child.pid, startupMs,
-    async request(path, body) {
+    async request(path, body, timeoutMs = 60000) {
       const at = clock();
       const response = await fetch(`http://127.0.0.1:${port}/api${path}`, {
-        method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(60000),
+        method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(timeoutMs),
         headers: { Authorization: `Bearer ${token}`, 'X-Genmail-Account': 'all', 'X-Morrow-View': 'paged', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
@@ -121,6 +125,9 @@ async function idle(service, seconds, rssSamples) {
 }
 async function run(size) {
   const directory = mkdtempSync(join(tmpdir(), 'morrow-rust-benchmark-')), rssSamples = [];
+  const requestedMissingRows = args.missingRows === undefined ? Math.min(size, 1000) : Number(args.missingRows);
+  const fullIndexLoss = args.missingRows !== undefined && requestedMissingRows === size;
+  assert(Number.isInteger(requestedMissingRows) && requestedMissingRows >= 1 && requestedMissingRows <= size, '--missingRows must be an integer between 1 and every fixture size');
   let store, service;
   try {
     let at = clock(); store = createStore(directory); const nodeEmptyOpenMs = clock() - at;
@@ -162,27 +169,39 @@ async function run(size) {
     // Simulate an interrupted derived-index rebuild, never alter messages/settings.
     // This connection exists only while the Rust process is fully stopped.
     const db = new DatabaseSync(join(directory, 'genmail.sqlite'));
-    let removed;
+    let removed, removedTotal;
     try {
       db.exec('BEGIN IMMEDIATE');
-      removed = Number(db.prepare('DELETE FROM search_documents WHERE rowid IN (SELECT rowid FROM search_documents WHERE account IN (?,?) ORDER BY rowid LIMIT ?)').run(...accounts, Math.min(size, 1000)).changes);
+      assert.equal(Number(db.prepare('SELECT count(*) AS n FROM search_documents WHERE account IN (?,?)').get(...accounts).n), size);
+      if (fullIndexLoss) {
+        removedTotal = Number(db.prepare('DELETE FROM search_documents').run().changes);
+        removed = size;
+        assert(removedTotal >= size);
+        assert.equal(Number(db.prepare('SELECT count(*) AS n FROM search_documents').get().n), 0);
+      } else {
+        removed = removedTotal = Number(db.prepare('DELETE FROM search_documents WHERE rowid IN (SELECT rowid FROM search_documents WHERE account IN (?,?) ORDER BY rowid LIMIT ?)').run(...accounts, requestedMissingRows).changes);
+      }
+      assert.equal(removed, requestedMissingRows);
       db.exec('DELETE FROM search_meta; COMMIT');
     } finally { db.close(); }
     service = await start(args.executable, directory); const rebuildStartupMs = service.startupMs, trace = [], rebuildStart = clock();
+    const requestBudget = () => Math.max(1, Math.min(60000, Math.ceil(rebuildTimeoutMs - (clock() - rebuildStart))));
     const eventLoop = monitorEventLoopDelay({ resolution: 10 }); eventLoop.enable();
     const revisionProbes = [], foregroundPath = args.rebuildMode === 'revision' ? '/state/revision' : '/state';
     let probing = args.probeRevision === 'true', probeFailure;
     const probes = (async () => {
-      while (probing) {
-        const startedMs = clock() - rebuildStart, result = await service.request('/state/revision');
+      while (probing && clock() - rebuildStart < rebuildTimeoutMs) {
+        const startedMs = clock() - rebuildStart, result = await service.request('/state/revision', undefined, requestBudget());
         assert.equal(result.data.accountId, 'all'); assert.equal(typeof result.data.revision, 'string');
+        assert(!Object.hasOwn(result.data, 'messages'));
         revisionProbes.push({ startedMs, completedMs: clock() - rebuildStart, ms: result.ms, bytes: result.bytes, phases: result.phases });
         if (probing) await delay(25);
       }
-    })().catch(error => { probing = false; probeFailure = error; });
+    })().catch(error => { probing = false; if (!(error.name === 'TimeoutError' && clock() - rebuildStart >= rebuildTimeoutMs)) probeFailure = error; });
     // Optional native stack sampling profiles only this fictional service process.
     // It adds profiler overhead and is intentionally excluded from default benchmarks.
-    let sampler, rebuildMs, profilePath;
+    let sampler, rebuildMs, profilePath, rebuildComplete = false, phase = 'starting';
+    let previousCoverage = size - removed, previousMatches = 0;
     try {
     if (args.profileDir) {
       assert.equal(process.platform, 'darwin', '--profileDir requires macOS sample');
@@ -193,22 +212,34 @@ async function run(size) {
         child.once('error', reject); child.once('exit', code => code === 0 ? resolve(path) : reject(Error(`Native sample failed (${code})`)));
       }).then(path => ({ path }), error => ({ error }));
     }
-    while (true) {
+    while (clock() - rebuildStart < rebuildTimeoutMs) {
       const startedMs = clock() - rebuildStart, before = processSample(service.pid);
-      const state = await service.request(foregroundPath);
+      phase = foregroundPath;
+      const state = await service.request(foregroundPath, undefined, requestBudget());
       if (foregroundPath === '/state') verifyRows(state.data, size, 50);
       else { assert.equal(state.data.accountId, 'all'); assert.equal(typeof state.data.revision, 'string'); }
       const foregroundCompletedMs = clock() - rebuildStart;
-      const result = await service.request('/search', { query: '发票', scope: 'all' });
+      if (clock() - rebuildStart >= rebuildTimeoutMs) break;
+      phase = '/search';
+      const result = await service.request('/search', { query: '发票', scope: 'all' }, requestBudget());
       assert(result.data.total <= Math.ceil(size / 10)); verifyRows(result.data, result.data.total, 30);
       const coverage = result.data.coverage.reduce((sum, row) => sum + row.count, 0), process = processSample(service.pid); rssSamples.push(process.rssBytes);
+      assert(coverage >= previousCoverage && coverage <= size, 'Index coverage regressed or exceeded the fixture');
+      assert(result.data.total >= previousMatches, 'Search progress regressed during backfill');
+      for (const message of result.data.messages) {
+        assert.equal(message.accountId, accounts[0]);
+        const match = /^fixture-(\d+)$/.exec(message.id); assert(match && Number(match[1]) * 2 < size && Number(match[1]) % 5 === 0, 'Unexpected invoice search identity');
+      }
+      previousCoverage = coverage; previousMatches = result.data.total;
       trace.push({ startedMs, foregroundCompletedMs, elapsedMs: clock() - rebuildStart, foregroundPath, foregroundMs: state.ms, ...(foregroundPath === '/state' ? { stateMs: state.ms, stateBytes: state.bytes } : {}), foregroundPhases: state.phases, searchMs: result.ms, searchPhases: result.phases, indexedMessages: coverage, invoiceMatches: result.data.total, warning: result.data.warning, cpuDeltaMs: Math.max(0, process.cpuMs - before.cpuMs), ...process });
-      if (coverage === size) { assert.equal(result.data.total, Math.ceil(size / 10)); break; }
-      assert(clock() - rebuildStart < 60000, 'Background indexing did not finish');
-      await delay(100);
+      if (coverage === size) { assert.equal(result.data.total, Math.ceil(size / 10)); rebuildComplete = true; break; }
+      phase = 'between requests';
+      await delay(Math.max(0, Math.min(100, rebuildTimeoutMs - (clock() - rebuildStart))));
     }
-    rebuildMs = clock() - rebuildStart;
+    } catch (error) {
+      if (!(error.name === 'TimeoutError' && clock() - rebuildStart >= rebuildTimeoutMs)) throw error;
     } finally {
+      rebuildMs = clock() - rebuildStart;
       probing = false; eventLoop.disable(); await probes;
       if (sampler) { const result = await sampler; if (result.error) throw result.error; profilePath = result.path; }
       if (probeFailure) throw probeFailure;
@@ -218,7 +249,7 @@ async function run(size) {
       migrationStartupMs, migrationFirstStateMs: firstAfterMigration.ms, migrationFirstStateBytes: firstAfterMigration.bytes, migrationStopMs, restartStartupMs,
       state, revision, search, page, sender, idle: quiet, stopMs, serviceInitialRSSBytes: initialProcess.rssBytes, serviceSampledMaxRSSBytes: Math.max(...rssSamples),
       driver: { pid: process.pid, rssBytes: process.memoryUsage().rss, note: 'Fixture writer + HTTP driver; excluded from all service RSS/CPU measurements.' },
-      interruptedDerivedIndex: { removedRows: removed, startupMs: rebuildStartupMs, completionMsAfterReadiness: rebuildMs, foregroundPath, concurrentRevisionProbes: args.probeRevision === 'true', driverEventLoop: { resolutionMs: 10, meanDelayMs: eventLoop.mean / 1e6, p99DelayMs: eventLoop.percentile(99) / 1e6, maxDelayMs: eventLoop.max / 1e6 }, trace, ...(revisionProbes.length ? { revisionProbes } : {}), ...(profilePath ? { nativeSamplePath: profilePath } : {}) }, checks: { counts: true, senderOrder: true, boundedMetadata: true, distinctOwnersAndCursorPages: true, noDualWriter: true } };
+      interruptedDerivedIndex: { requestedMissingRows, removedRows: removed, removedTotalDerivedRows: removedTotal, retainedFixtureRows: size - removed, fullIndexLoss, status: rebuildComplete ? 'complete' : 'timed_out', timeoutMs: rebuildTimeoutMs, ...(rebuildComplete ? { completionMsAfterReadiness: rebuildMs } : { elapsedMsAfterReadiness: rebuildMs, timeoutPhase: phase }), startupMs: rebuildStartupMs, foregroundPath, concurrentRevisionProbes: args.probeRevision === 'true', driverEventLoop: { resolutionMs: 10, meanDelayMs: eventLoop.mean / 1e6, p99DelayMs: eventLoop.percentile(99) / 1e6, maxDelayMs: eventLoop.max / 1e6 }, trace, ...(revisionProbes.length ? { revisionProbes } : {}), ...(profilePath ? { nativeSamplePath: profilePath } : {}) }, checks: { counts: true, senderOrder: true, boundedMetadata: true, distinctOwnersAndCursorPages: true, noDualWriter: true, indexProgressMonotonic: true, exactInvoiceIdentities: true, indexRebuildCompleted: rebuildComplete } };
   } finally {
     if (service) await service.stop();
     store?.close(); rmSync(directory, { recursive: true, force: true });
@@ -231,6 +262,7 @@ if (args.child) {
   const sizes = (args.sizes || '1000,10000,50000').split(',').map(Number), idleSeconds = Number(args.idleSeconds ?? 30);
   assert(sizes.length && sizes.every(size => Number.isInteger(size) && size >= 100 && size <= 50000));
   assert(Number.isFinite(idleSeconds) && idleSeconds >= 0 && idleSeconds <= 60);
+  assert(args.missingRows === undefined || (Number.isInteger(Number(args.missingRows)) && Number(args.missingRows) >= 1 && sizes.every(size => Number(args.missingRows) <= size)), '--missingRows must be an integer between 1 and every fixture size');
   assert(!args.rebuildMode || ['state', 'revision'].includes(args.rebuildMode));
   assert(!args.probeRevision || ['true', 'false'].includes(args.probeRevision));
   const source = resolve(args.binary || join(root, 'rust/target/release/morrow-service' + (process.platform === 'win32' ? '.exe' : '')));
@@ -244,7 +276,7 @@ if (args.child) {
     for (const size of sizes) {
       process.stderr.write(`Rust service benchmark: ${size} fictional messages\n`);
       results.push(await new Promise((resolve, reject) => {
-        const child = fork(fileURLToPath(import.meta.url), [`--child=${size}`, `--idleSeconds=${idleSeconds}`, `--executable=${executable}`, `--rebuildMode=${args.rebuildMode || 'state'}`, `--probeRevision=${args.probeRevision || 'false'}`, ...(profileDirectory ? [`--profileDir=${profileDirectory}`] : [])], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+        const child = fork(fileURLToPath(import.meta.url), [`--child=${size}`, `--idleSeconds=${idleSeconds}`, `--executable=${executable}`, `--rebuildMode=${args.rebuildMode || 'state'}`, `--probeRevision=${args.probeRevision || 'false'}`, ...(args.missingRows === undefined ? [] : [`--missingRows=${args.missingRows}`]), ...(profileDirectory ? [`--profileDir=${profileDirectory}`] : [])], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
         let result;
         child.on('message', value => { result = value; }); child.once('error', reject);
         child.once('exit', code => code === 0 && result ? resolve(result) : reject(Error(`Rust benchmark fixture failed (${code})`)));
@@ -254,9 +286,10 @@ if (args.child) {
     const report = { measuredAt: new Date().toISOString(), commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), dirty: !!execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim(), binary,
       platform: platform(), os: release(), architecture: process.arch, cpu: cpus()[0]?.model, logicalCPUs: cpus().length, totalMemoryBytes: totalmem(), freeMemoryBytesAtEnd: freemem(), driverNode: process.version,
       fixture: 'Same mail-v1 corpus as benchmark-mail.js: two fictional accounts, colliding IDs, mixed Chinese/English, 1024-code-unit bodies (UTF-8 sizes reported); no providers or models.',
-      method: 'Node writer closes before Rust starts. An immutable copy of the actual release executable starts through its private stdin pipe. Migration startup includes backup/schema open of the Node-produced current index; restart uses that migrated workspace. Each operation records first request plus five warm requests; nearest-rank p50/p95 uses warm samples only. RSS and cumulative CPU are sampled from the Rust service PID, excluding the Node fixture/HTTP driver. Idle samples issue no HTTP requests. A stopped-process fixture mutation removes at most 1000 derived rows, then verifies mailbox reads during Rust background backfill; the 50000-message case retains 49000 indexed real messages.',
+      method: `Node writer closes before Rust starts. An immutable copy of the actual release executable starts through its private stdin pipe. Migration startup includes backup/schema open of the Node-produced current index; restart uses that migrated workspace. Each operation records first request plus five warm requests; nearest-rank p50/p95 uses warm samples only. RSS and cumulative CPU are sampled from the Rust service PID, excluding the Node fixture/HTTP driver. Idle samples issue no HTTP requests. A stopped-process fixture mutation removes ${args.missingRows === undefined ? 'min(size,1000)' : Number(args.missingRows)} selected-account derived rows. An explicit --missingRows equal to the fixture size deletes all derived documents, including any other accounts; the default preserves other accounts. Each result reports removed and retained counts and whether this is full index loss. Rebuild observation is bounded to 180 seconds; a timeout preserves progress in this report and exits unsuccessfully. Mailbox metadata and monotonically increasing search coverage/expected invoice identities are verified throughout.`,
       profiling: { rebuildForeground: args.rebuildMode || 'state', concurrentRevisionProbes: args.probeRevision === 'true', nativeSampling: !!args.profileDir, note: 'Header timing includes client scheduling, network, server execution and DB queue; it does not by itself isolate server phases. Concurrent revision probes share the service DB queue. Optional macOS sampling and probes change workload and can add overhead.' },
-      limitations: 'No UI, whole-app, real-account, external-model, or OS cold-cache claims. The partial rebuild trace does not establish performance for total index loss or larger message bodies. Sampled RSS is not a guaranteed peak. CPU timer resolution is OS-dependent; zero small deltas can mean below-resolution work. Five warm samples provide a smoke benchmark, not a latency-distribution acceptance study. Concurrent developer activity and shared filesystem cache can affect timings.', results };
+      limitations: 'No UI, whole-app, real-account, external-model, or OS cold-cache claims. Rebuild results apply only to the reported missing-row counts and body sizes; partial rebuild cases do not establish full-index-loss performance. Sampled RSS is not a guaranteed peak. CPU timer resolution is OS-dependent; zero small deltas can mean below-resolution work. Five warm samples provide a smoke benchmark, not a latency-distribution acceptance study. Concurrent developer activity and shared filesystem cache can affect timings.', results };
     const output = resolve(args.output || join(root, 'test-results/migration-rust-service.json')); mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, JSON.stringify(report, null, 2) + '\n'); process.stdout.write(`Saved ${output}\n`);
+    if (results.some(result => !result.checks.indexRebuildCompleted)) { process.stderr.write('Background indexing exceeded the 180-second limit; progress was saved.\n'); process.exitCode = 1; }
   } finally { rmSync(snapshotDirectory, { recursive: true, force: true }); }
 }

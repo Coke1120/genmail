@@ -83,11 +83,11 @@ fn index_ready(store: &Store) -> Result<bool> {
 }
 fn documents(store: &Store) -> Result<String> {
     let indexed = index_ready(store)?;
-    // Legacy mail remains readable while the background worker rebuilds derived FTS data.
+    // The metadata expression index stays complete even when derived FTS data is lost.
     Ok(if indexed {
         "SELECT * FROM search_documents".into()
     } else {
-        "WITH missing AS MATERIALIZED (SELECT m.rowid FROM messages m WHERE NOT EXISTS(SELECT 1 FROM search_documents d WHERE d.account=m.account AND d.id=m.id)) SELECT rowid,account,id,date,folder,unread,starred,category FROM search_documents UNION ALL SELECT m.rowid,m.account,m.id,COALESCE(json_extract(m.data,'$.date'),''),COALESCE(json_extract(m.data,'$.folder'),''),NOT COALESCE(json_extract(m.data,'$.read'),0),COALESCE(json_extract(m.data,'$.starred'),0),COALESCE(json_extract(m.data,'$.category'),'') FROM missing p JOIN messages m ON m.rowid=p.rowid".into()
+        "SELECT rowid,account,id,COALESCE(json_extract(data,'$.date'),'') AS date,COALESCE(json_extract(data,'$.folder'),'') AS folder,NOT COALESCE(json_extract(data,'$.read'),0) AS unread,COALESCE(json_extract(data,'$.starred'),0) AS starred,COALESCE(json_extract(data,'$.category'),'') AS category FROM messages INDEXED BY mail_metadata".into()
     })
 }
 pub fn stats(store: &Store, accounts: &[String]) -> Result<Value> {
@@ -99,23 +99,13 @@ pub fn stats(store: &Store, accounts: &[String]) -> Result<Value> {
         }
         result[account] = json!({"unread":0,"total":0,"counts":counts});
     }
-    // Aggregate the indexed rows on the covering counts index before combining
-    // missing rows. Sorting the whole mixed projection spills to disk during rebuilds.
     let scope = placeholders(accounts.len());
-    let indexed = format!(
-        "SELECT account,folder,count(*),sum(unread),sum(starred) FROM search_documents WHERE account IN ({scope}) GROUP BY account,folder"
+    let sql = format!(
+        "WITH d AS NOT MATERIALIZED ({}) SELECT account,folder,count(*),sum(unread),sum(starred) FROM d WHERE account IN ({scope}) GROUP BY account,folder",
+        documents(store)?
     );
-    let mut params = accounts.to_vec();
-    let sql = if index_ready(store)? {
-        indexed
-    } else {
-        params.extend_from_slice(accounts);
-        format!(
-            "WITH missing AS MATERIALIZED (SELECT m.rowid FROM messages m WHERE NOT EXISTS(SELECT 1 FROM search_documents d WHERE d.account=m.account AND d.id=m.id)) {indexed} UNION ALL SELECT m.account,COALESCE(json_extract(m.data,'$.folder'),''),count(*),sum(NOT COALESCE(json_extract(m.data,'$.read'),0)),sum(COALESCE(json_extract(m.data,'$.starred'),0)) FROM missing p JOIN messages m ON m.rowid=p.rowid WHERE m.account IN ({scope}) GROUP BY m.account,COALESCE(json_extract(m.data,'$.folder'),'')"
-        )
-    };
     let mut statement = store.conn.prepare(&sql)?;
-    let mut rows = statement.query(params_from_iter(&params))?;
+    let mut rows = statement.query(params_from_iter(accounts))?;
     while let Some(row) = rows.next()? {
         let account: String = row.get(0)?;
         let folder: String = row.get(1)?;
