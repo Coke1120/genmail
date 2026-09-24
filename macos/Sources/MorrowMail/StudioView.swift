@@ -40,10 +40,11 @@ struct StudioView: View {
                 if brainDirty && !model.confirmDiscard("Discard unsaved Brain notes?") { return }
                 voice = savedVoice; notes = savedNotes; tab = value
             })) {
-                Text("All Tools").tag("tools"); Text("Email Brain").tag("brain"); Text("My Skills").tag("skills"); Text("Local Activity").tag("activity")
+                Text("All Tools").tag("tools"); Text("Summaries").tag("summaries"); Text("Email Brain").tag("brain"); Text("My Skills").tag("skills"); Text("Local Activity").tag("activity")
             }.pickerStyle(.segmented)
             if !model.policy["enabled"].bool { Label("AI is paused in your saved permissions. Manual mail and calendars still work.", systemImage: "pause.circle").foregroundStyle(.secondary) }
             switch tab {
+            case "summaries": summariesPage
             case "brain": brainPage
             case "skills": skillsPage
             case "activity": activityPage
@@ -66,6 +67,30 @@ struct StudioView: View {
         .onChange(of: notes) { _ in model.dirty("brain", brainDirty) }
         .onDisappear { model.dirty("brain", false) }
         .sheet(item: $skillEditor) { skill in SkillEditor(initial: skill.value).environmentObject(model) }
+    }
+    var summariesPage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    SectionHeading(title: "Scheduled & new-mail summaries", detail: "Latest 20 jobs for this account. P0 emergency · P1 due today · P2 action · P3 information · P4 bulk. Review AI priorities.")
+                    Button("Refresh") { model.perform { try await model.reload() } }.disabled(model.busy)
+                }
+                Text("Configure triggers in Settings → AI Permissions. Summaries use cached mail and saved permissions. Results are hidden if the model, language, permissions, connection or source scope changes.").font(.callout).foregroundStyle(.secondary)
+                if workspace["summaryOverflow"].number > 0 { Text("\(Int(workspace["summaryOverflow"].number)) jobs exceeded the queue limit. Use a manual summary for those messages.").foregroundStyle(.orange) }
+                ForEach(model.state["syncErrors"].array) { item in Text(item["accountId"].string + ": " + item["error"].string).foregroundStyle(.orange) }
+                if workspace["summaries"].array.isEmpty { Text("No summaries yet. Enable a trigger and wait for a scheduled time or newly synced mail.").foregroundStyle(.secondary) }
+                ForEach(workspace["summaries"].array) { report in
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text((report["kind"].string == "arrival" ? "New mail" : "Scheduled summary") + " · " + report["status"].string.capitalized).font(.headline)
+                            Text(dateLabel(report["createdAt"].string) + " · \(report["messageIds"].array.count) messages" + (report["source"].string == "demo" ? " · Illustrative demo" : "")).font(.caption).foregroundStyle(.secondary)
+                            if report["text"].nonempty { Text(report["text"].string).textSelection(.enabled).lineSpacing(5) }
+                            if report["error"].nonempty { Text(report["error"].string).foregroundStyle(.orange) }
+                        }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }.padding(20)
+        }
     }
     var toolsPage: some View {
         HSplitView {

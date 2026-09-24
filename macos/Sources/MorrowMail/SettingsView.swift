@@ -6,24 +6,32 @@ struct NativeSettingsView: View {
     @Environment(\.dismiss) var dismiss
     @State private var values: JSON = .null
     @State private var baseline: JSON = .null
+    @State private var learningDirty = false
+    @State private var importSettings: JSON = .object(["months": .number(3), "inbox": .bool(true), "sent": .bool(true)])
     @State private var provider = "google"
     @State private var mailOAuth: JSON = .object([:])
     @State private var calendarOAuth: JSON = .object([:])
     @State private var localError = ""
     @State private var status = ""
     @State private var footerPreview: JSON = .null
-    private let tabs = [("general", "General", "slider.horizontal.3"), ("mail", "Mail", "envelope"), ("model", "Model", "cpu"), ("permissions", "AI Permissions", "checkmark.shield"), ("calendar", "Calendar", "calendar"), ("about", "About", "info.circle")]
-    var dirty: Bool { values != baseline || mailOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } || calendarOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } }
+    @State private var updateResult: JSON = .null
+    @State private var includePrereleases = (Bundle.main.object(forInfoDictionaryKey: "MorrowReleaseVersion") as? String ?? "").contains("-")
+    private let tabs = [("general", "General", "slider.horizontal.3"), ("mail", "Mail", "envelope"), ("learning", "Learning", "text.badge.star"), ("model", "Model", "cpu"), ("permissions", "AI Permissions", "checkmark.shield"), ("calendar", "Calendar", "calendar"), ("about", "About", "info.circle")]
+    var dirty: Bool { learningDirty || values != baseline || mailOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } || calendarOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } }
     var body: some View {
         VStack(spacing: 0) {
             HStack { Text("Your workspace").font(.title2.bold()); Spacer(); if dirty { Text("Unsaved changes").font(.caption).foregroundStyle(.secondary) }; Button("Done") { close() }.keyboardShortcut(.cancelAction).disabled(model.busy) }.padding(22)
             Divider()
             HStack(spacing: 0) {
-                List(tabs, id: \.0, selection: $model.settingsTab) { tab in Label(tab.1, systemImage: tab.2).tag(tab.0) }.listStyle(.sidebar).frame(width: 165)
+                List(tabs, id: \.0, selection: Binding(get: { model.settingsTab }, set: { next in
+                    if learningDirty && !model.confirmDiscard("Discard unsaved learning settings or style edits?") { return }
+                    model.settingsTab = next
+                })) { tab in Label(tab.1, systemImage: tab.2).tag(tab.0) }.listStyle(.sidebar).frame(width: 165)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         switch model.settingsTab {
                         case "mail": mailPage
+                        case "learning": StyleLearningView(dirty: $learningDirty)
                         case "model": modelPage
                         case "permissions": permissionsPage
                         case "calendar": calendarPage
@@ -43,6 +51,7 @@ struct NativeSettingsView: View {
         .textFieldStyle(.roundedBorder)
         .interactiveDismissDisabled(dirty || model.busy)
         .onAppear { initialize() }
+        .onChange(of: learningDirty) { _ in model.dirty("settings", dirty) }
         .onChange(of: values) { _ in model.dirty("settings", dirty) }
         .onChange(of: mailOAuth) { _ in model.dirty("settings", dirty) }
         .onChange(of: calendarOAuth) { _ in model.dirty("settings", dirty) }
@@ -101,8 +110,10 @@ struct NativeSettingsView: View {
             }
             Toggle("Mark messages read when opened", isOn: boolean("preferences", "markReadOnOpen")).toggleStyle(.checkbox)
             Picker("Reply tone", selection: string("preferences", "replyTone")) { ForEach(["friendly", "professional", "concise", "warm"], id: \.self) { Text($0.capitalized).tag($0) } }
-            field("Preferred language", "preferences", "language")
-            Picker("Sync while Morrow is open", selection: number("preferences", "syncInterval")) { Text("Manually").tag(0); ForEach([5, 15, 30], id: \.self) { Text("Every \($0) minutes").tag($0) } }
+            field("Preferred AI response language", "preferences", "language")
+            field("Target translation language (blank uses preferred language)", "preferences", "translationLanguage")
+            Text("These control AI output, not the app’s interface language.").font(.caption).foregroundStyle(.secondary)
+            Picker("Sync all accounts while Morrow is open", selection: number("preferences", "syncInterval")) { Text("Manually").tag(0); ForEach([1, 5, 15, 30], id: \.self) { Text("Every \($0) minutes").tag($0) } }
             Button("Save Preferences") { save("preferences") }.buttonStyle(.borderedProminent)
         }
     }
@@ -137,6 +148,19 @@ struct NativeSettingsView: View {
         Group {
             SectionHeading(title: "Your assistant. Your boundaries.", detail: "These controls are enforced for every AI action and simulation. Manual mail and live calendar actions remain available.")
             Toggle("Enable AI assistance", isOn: boolean("policy", "enabled")).font(.headline).toggleStyle(.checkbox)
+            GroupBox("When assistance starts") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Summarize when I open a message", isOn: nestedBool("triggers", "onOpen")).toggleStyle(.checkbox)
+                    Toggle("Suggest text when I start a reply", isOn: nestedBool("triggers", "onReply")).toggleStyle(.checkbox)
+                    Toggle("Summarize newly synced messages", isOn: nestedBool("triggers", "onArrival")).toggleStyle(.checkbox)
+                    Toggle("Generate scheduled inbox summaries", isOn: nestedBool("triggers", "scheduledSummary")).toggleStyle(.checkbox)
+                    Toggle("Only messages in Inbox", isOn: nestedBool("triggers", "inboxOnly")).toggleStyle(.checkbox)
+                    Toggle("Only starred messages", isOn: nestedBool("triggers", "starredOnly")).toggleStyle(.checkbox)
+                    Text("All triggers default to off. Checked filters must all match, for each connected account separately. Drafts and Trash are excluded. Your model may charge per request. Suggestions never send, create events or replace drafts automatically.").font(.caption).foregroundStyle(.secondary)
+                    Text("New-mail summaries start after sync discovers a new message; initial account imports are excluded. Enable automatic sync in General for regular checks. This is polling, not instant provider push.").font(.caption).foregroundStyle(.secondary)
+                }.padding(8)
+            }
+            summarySchedule
             Divider()
             Text("What your assistant can do").font(.title3.bold())
             ForEach(model.features) { feature in
@@ -151,16 +175,42 @@ struct NativeSettingsView: View {
             Divider()
             Text("Which information it can see").font(.title3.bold())
             ForEach([("subject", "Subject lines"), ("body", "Message bodies"), ("sender", "Senders and recipients"), ("contacts", "Local contact notes"), ("calendar", "Simulated calendar context"), ("attachments", "Sample attachment fixtures")], id: \.0) { item in Toggle(item.1, isOn: nestedBool("content", item.0)).toggleStyle(.checkbox) }
-            Stepper("Maximum messages per request: \(Int(values["policy"]["maxMessages"].number))", value: number("policy", "maxMessages"), in: 1...25)
+            Stepper("Maximum messages per request: \(Int(values["policy"]["maxMessages"].number))", value: number("policy", "maxMessages"), in: 1...50)
             Text("Calendar and attachment scopes here control simulations. AI never reads your connected Google or Outlook calendar.").font(.caption).foregroundStyle(.secondary)
             Button("Save Permissions") { save("policy") }.buttonStyle(.borderedProminent)
         }
     }
+    var summarySchedule: some View {
+        GroupBox("Summary schedule · P0–P4") {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Repeat", selection: Binding(get: { values["policy"]["summarySchedule"]["cadence"].string }, set: { values["policy"]["summarySchedule"]["cadence"] = .string($0) })) {
+                    Text("Daily at a set time").tag("daily"); Text("Every few hours").tag("interval")
+                }
+                if values["policy"]["summarySchedule"]["cadence"].string == "daily" {
+                    TextField("Time (24-hour HH:mm)", text: Binding(get: { values["policy"]["summarySchedule"]["time"].string }, set: { values["policy"]["summarySchedule"]["time"] = .string($0) }))
+                    TextField("Time zone, e.g. Asia/Hong_Kong", text: Binding(get: { values["policy"]["summarySchedule"]["timeZone"].string }, set: { values["policy"]["summarySchedule"]["timeZone"] = .string($0) }))
+                } else {
+                    Stepper("Every \(Int(values["policy"]["summarySchedule"]["everyHours"].number)) hours", value: Binding(get: { Int(values["policy"]["summarySchedule"]["everyHours"].number) }, set: { values["policy"]["summarySchedule"]["everyHours"] = .number(Double($0)) }), in: 1...168)
+                }
+                Text("Runs while Morrow is open, using up to your maximum permitted messages from the cached inbox. Results appear in AI Studio → Summaries. Missed daily runs catch up once when reopened; interval timing starts when enabled. Failed or interrupted jobs are not retried automatically.").font(.caption).foregroundStyle(.secondary)
+                Text("P0 emergency · P1 due today · P2 action/follow-up · P3 information · P4 bulk/promotional. AI priorities need your review. Email Brain and writing style still require explicit review and saving.").font(.caption).foregroundStyle(.secondary)
+            }.padding(8)
+        }
+    }
     var mailPage: some View {
         Group {
-            SectionHeading(title: "Bring your inbox along", detail: "Connect multiple Gmail, Outlook, or IMAP accounts. View them separately or together. Sync imports the latest 50 inbox messages per account.")
+            SectionHeading(title: "Bring your inbox along", detail: "Connect multiple Gmail, Outlook, or IMAP accounts. View them separately or together. Choose a history range and folders. Imports continue while Morrow is open, without AI calls.")
+            GroupBox("Import history for new connections or Start Import below") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("History range", selection: Binding(get: { Int(importSettings["months"].number) }, set: { importSettings["months"] = .number(Double($0)) })) { ForEach([1, 3, 6, 12], id: \.self) { Text("Last \($0) month(s)").tag($0) } }
+                    ForEach(["inbox", "sent"], id: \.self) { folder in Toggle(folder.capitalized, isOn: Binding(get: { importSettings[folder].bool }, set: { importSettings[folder] = .bool($0) })).toggleStyle(.checkbox) }
+                    Text("Choose at least one folder. Cached mail is retained when choosing a shorter range. IMAP Sent requires the provider’s Sent special-use folder. Style learning is a separate opt-in in Learning.").font(.caption).foregroundStyle(.secondary)
+                    Button("Refresh Import Progress") { run { try await model.reload() } }
+                }.padding(8)
+            }
             ForEach(model.accounts) { account in
                 GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         VStack(alignment: .leading) { Text(account["provider"].string.uppercased()).font(.caption).foregroundStyle(.secondary); Text(account["email"].string).font(.headline) }
                         Spacer()
@@ -176,6 +226,17 @@ struct NativeSettingsView: View {
                             guard model.confirm("Disconnect \(account["email"].string)?", detail: "Only this account’s credentials will be removed. Cached mail and drafts remain on this Mac.") else { return }
                             run { model.state = try await model.request("/account/disconnect", method: "POST", body: .object([:]), mailbox: account.id); model.selectedMessage = nil; status = "Mailbox disconnected." }
                         }
+                    }
+                    if !account["import"].isNull {
+                        Text("Import: \(account["import"]["status"].string) · \(Int(account["import"]["imported"].number)) new messages · \(Int(account["import"]["options"]["months"].number)) months").font(.caption)
+                        if account["import"]["error"].nonempty { Text(account["import"]["error"].string).font(.caption).foregroundStyle(.orange) }
+                    }
+                    HStack {
+                        Button("Start Import with Chosen Range") { importAction("start", account: account.id) }.disabled(!importSettings["inbox"].bool && !importSettings["sent"].bool)
+                        if !account["import"].isNull && account["import"]["status"].string != "complete" {
+                            Button(account["import"]["status"].string == "running" ? "Pause" : "Resume") { importAction(account["import"]["status"].string == "running" ? "pause" : "resume", account: account.id) }
+                        }
+                    }
                     }.padding(6)
                 }
             }
@@ -251,7 +312,9 @@ struct NativeSettingsView: View {
                 Button("Connect \(providerLabel(id))\(calendar ? " Calendar" : " Mail")") {
                     run {
                         let path = calendar ? "/calendars/\(id)/connect" : "/oauth/\(id)/start"
-                        let result = try await model.request(path, method: "POST", body: credentials.wrappedValue)
+                        var body = credentials.wrappedValue
+                        if !calendar { body["importOptions"] = importSettings }
+                        let result = try await model.request(path, method: "POST", body: body)
                         try model.openOAuth(result, provider: id, calendar: calendar)
                         credentials.wrappedValue = .object([:]); status = "Complete sign-in in your browser, then return here."
                     }
@@ -273,6 +336,22 @@ struct NativeSettingsView: View {
             }
             Text("An independent, MIT-licensed alternative inspired by GenMail. A native SwiftUI interface with a private local mail service.")
             Text("19 AI behaviors: model-backed assistance and explicitly labeled local simulations. Nothing sends automatically. Provider setup and consent are required for real accounts.")
+            GroupBox("App updates") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Include alpha and beta releases", isOn: $includePrereleases).toggleStyle(.checkbox)
+                        .onChange(of: includePrereleases) { _ in updateResult = .null }
+                    Button("Check for Updates") {
+                        updateResult = .null
+                        run { updateResult = try await model.request("/updates?includePrereleases=\(includePrereleases)") }
+                    }
+                    Text("Checks public releases on GitHub. No mail or credentials are shared. Download and installation are manual; results are cached for one minute.").font(.caption).foregroundStyle(.secondary)
+                    if !updateResult.isNull {
+                        Text(updateResult["updateAvailable"].bool ? "Update available: \(updateResult["latestVersion"].string)" : "You’re up to date for this channel.").font(.headline)
+                        Text("Installed: \(updateResult["currentVersion"].string) · Latest: \(updateResult["latestVersion"].string)\nChecked: \(dateLabel(updateResult["checkedAt"].string))").font(.caption)
+                        if let url = URL(string: updateResult["url"].string) { Link("View Release & Downloads", destination: url) }
+                    }
+                }.padding(8)
+            }
             Divider()
             Text("Data on this Mac").font(.headline)
             Text(model.dataDirectory.path).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
@@ -283,9 +362,12 @@ struct NativeSettingsView: View {
             Text("Version \(Bundle.main.object(forInfoDictionaryKey: "MorrowReleaseVersion") as? String ?? "development") · macOS \(Bundle.main.object(forInfoDictionaryKey: "LSMinimumSystemVersion") as? String ?? "13.5") or later · MIT license").font(.caption).foregroundStyle(.secondary)
         }
     }
+    func importAction(_ action: String, account: String) {
+        run { model.state = try await model.request("/imports/\(action)", method: "POST", body: action == "start" ? importSettings : .object([:]), mailbox: account) }
+    }
     func save(_ group: String) {
         run {
-            let result = try await model.request("/settings/\(group)", method: "POST", body: values[group])
+            let result = try await model.request("/settings/\(group)", method: "POST", body: group == "mail" ? .object(values[group].object.merging(["importOptions": importSettings]) { _, new in new }) : values[group])
             model.state = result
             if group == "preferences" { values[group] = result["settings"][group] }
             if group == "ai" { values[group]["apiKey"] = .string(""); values[group]["clearApiKey"] = .bool(false) }

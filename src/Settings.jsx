@@ -1,3 +1,4 @@
+import StyleLearning from './StyleLearning';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, CalendarDays, Info, LoaderCircle, Mail, Settings2, ShieldCheck, Sparkles } from 'lucide-react';
 import { AI_BEHAVIORS, DEFAULT_POLICY, DEFAULT_PREFERENCES } from '../shared/features';
@@ -6,7 +7,7 @@ import FooterPreview from './FooterPreview';
 import './settings.css';
 import CalendarSettings from './CalendarSettings';
 
-const TABS = [['general', Settings2, 'General'], ['mail', Mail, 'Mail'], ['calendar', CalendarDays, 'Calendar'], ['model', Sparkles, 'Model'], ['policy', ShieldCheck, 'AI permissions'], ['about', Info, 'About']];
+const TABS = [['general', Settings2, 'General'], ['mail', Mail, 'Mail'], ['learning', Sparkles, 'Learning'], ['calendar', CalendarDays, 'Calendar'], ['model', Sparkles, 'Model'], ['policy', ShieldCheck, 'AI permissions'], ['about', Info, 'About']];
 const CONTENT_LABELS = {
   subject: ['Email subjects', 'Subject lines used for context and search.'],
   body: ['Email & draft text', 'The written content of permitted messages and drafts.'],
@@ -25,7 +26,7 @@ function modelValues(ai) {
 }
 
 function policyValues(policy = {}) {
-  return { ...DEFAULT_POLICY, ...policy, behaviors: { ...DEFAULT_POLICY.behaviors, ...policy.behaviors }, folders: { ...DEFAULT_POLICY.folders, ...policy.folders }, content: { ...DEFAULT_POLICY.content, ...policy.content } };
+  return { ...DEFAULT_POLICY, ...policy, summarySchedule: { ...DEFAULT_POLICY.summarySchedule, ...policy.summarySchedule }, triggers: { ...DEFAULT_POLICY.triggers, ...policy.triggers }, behaviors: { ...DEFAULT_POLICY.behaviors, ...policy.behaviors }, folders: { ...DEFAULT_POLICY.folders, ...policy.folders }, content: { ...DEFAULT_POLICY.content, ...policy.content } };
 }
 
 function Permission({ checked, onChange, title, description, simulated = false }) {
@@ -43,9 +44,12 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   const [provider, setProvider] = useState(savedMail.configured ? savedMail.provider || 'imap' : 'google');
   const [oauth, setOauth] = useState({ google: { clientId: '', clientSecret: '' }, microsoft: { clientId: '' } });
   const [busy, setBusy] = useState('');
+  const [importOptions, setImportOptions] = useState({ months: 3, inbox: true, sent: true });
+  const [learningDirty, setLearningDirty] = useState(false);
+  const [learningBusy, setLearningBusy] = useState(false);
   const [calendarDirty, setCalendarDirty] = useState(false);
   const [calendarBusy, setCalendarBusy] = useState(false);
-  const operationBusy = !!busy || calendarBusy;
+  const operationBusy = !!busy || calendarBusy || learningBusy;
   const [error, setError] = useState('');
   const [mail, setMail] = useState(() => mailValues({}));
   const [ai, setAi] = useState(() => modelValues(savedAi));
@@ -53,12 +57,15 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   const [policy, setPolicy] = useState(() => policyValues(state.settings.policy));
   const [testResult, setTestResult] = useState('');
   const [footerPreview, setFooterPreview] = useState(null);
+  const [updateResult, setUpdateResult] = useState(null);
+  const [includePrereleases, setIncludePrereleases] = useState(__APP_VERSION__.includes('-'));
   useEffect(() => setFooterPreview(null), [preferences.signature, preferences.signatureFormat]);
   const saved = useRef({ mail, model: ai, general: preferences, policy });
   const allowUnload = useRef(false);
   const dirty = Object.fromEntries(Object.entries({ mail, model: ai, general: preferences, policy }).map(([key, value]) => [key, JSON.stringify(value) !== JSON.stringify(saved.current[key])]));
   dirty.mail ||= Object.values(oauth).some(credentials => Object.values(credentials).some(Boolean));
   dirty.calendar = calendarDirty;
+  dirty.learning = learningDirty;
   const isDirty = Object.values(dirty).some(Boolean);
 
   useEffect(() => { onDirtyChange?.(isDirty); }, [isDirty, onDirtyChange]);
@@ -75,8 +82,21 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
     onClose();
   }
 
+  async function checkUpdates() {
+    if (operationBusy) return;
+    setBusy('updates'); setError(''); setUpdateResult(null);
+    try {
+      const response = await fetch(`/api/updates?includePrereleases=${includePrereleases}`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not check for updates.');
+      setUpdateResult(result);
+    } catch (cause) { setError(cause.message); }
+    finally { setBusy(''); }
+  }
+
   async function save(path, body, label, message, accountId = state.account.id) {
     if (operationBusy) return;
+    if (['select', 'disconnect'].includes(label) && learningDirty && !window.confirm('Discard unsaved learning settings or style edits before changing account?')) return;
     if (label === 'oauth' && (dirty.general || dirty.model || dirty.policy || JSON.stringify(mail) !== JSON.stringify(saved.current.mail)) && !window.confirm('Continue to sign-in and discard your other unsaved settings?')) return;
     setBusy(label);
     setError('');
@@ -205,15 +225,19 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
                   <option value="friendly">Friendly</option><option value="professional">Professional</option><option value="concise">Concise</option><option value="warm">Warm</option>
                 </select>
               </label>
-              <label className="settings-field">AI response language
+              <label className="settings-field">Preferred AI response language
                 <input required maxLength={60} value={preferences.language} onChange={(event) => setPreferences({ ...preferences, language: event.target.value })} />
               </label>
             </div>
-            <label className="settings-field">Refresh your inbox
+            <label className="settings-field">Target translation language
+              <input maxLength={60} value={preferences.translationLanguage} placeholder="Blank uses preferred language" onChange={event => setPreferences({ ...preferences, translationLanguage: event.target.value })} />
+              <span className="settings-help">These control AI output, not the app’s interface language.</span>
+            </label>
+            <label className="settings-field">Refresh all connected inboxes
               <select value={preferences.syncInterval} onChange={(event) => setPreferences({ ...preferences, syncInterval: Number(event.target.value) })}>
-                <option value={0}>Manually</option><option value={5}>Every 5 minutes</option><option value={15}>Every 15 minutes</option><option value={30}>Every 30 minutes</option>
+                <option value={0}>Manually</option><option value={1}>Every minute</option><option value={5}>Every 5 minutes</option><option value={15}>Every 15 minutes</option><option value={30}>Every 30 minutes</option>
               </select>
-              <span className="settings-help">Automatic refresh runs only while Morrow is open. It never triggers AI.</span>
+              <span className="settings-help">Runs while Morrow is open. New mail triggers AI only if enabled in AI permissions.</span>
             </label>
             <Permission checked={preferences.markReadOnOpen} onChange={(checked) => setPreferences({ ...preferences, markReadOnOpen: checked })} title="Mark emails as read when opened" description="Updates read status locally in Morrow." />
             <div className="settings-actions">
@@ -224,9 +248,19 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         </form>
       </section>
 
+      <div id="settings-panel-learning" role="tabpanel" aria-labelledby="settings-tab-learning" hidden={tab !== 'learning'}><StyleLearning key={state.account.id} state={state} onUpdate={onUpdate} onDirtyChange={setLearningDirty} onBusyChange={setLearningBusy} disabled={!!busy || calendarBusy} /></div>
       <section id="settings-panel-mail" role="tabpanel" aria-labelledby="settings-tab-mail" hidden={tab !== 'mail'}>
+        <fieldset className="settings-fields" disabled={operationBusy}>
+          <h2>Import history</h2><p className="settings-help">Applies when connecting or starting an import below. Downloads mail locally without AI calls. Cached mail is retained when you choose a shorter range.</p>
+          <label className="settings-field">History range<select value={importOptions.months} onChange={e => setImportOptions({ ...importOptions, months: Number(e.target.value) })}>{[1, 3, 6, 12].map(n => <option key={n} value={n}>Last {n} month{n > 1 ? 's' : ''}</option>)}</select></label>
+          {['inbox', 'sent'].map(folder => <label className="settings-permission" key={folder}><input type="checkbox" checked={importOptions[folder]} onChange={e => setImportOptions({ ...importOptions, [folder]: e.target.checked })} /><span>{folder === 'inbox' ? 'Inbox' : 'Sent — for optional writing-style learning'}</span></label>)}
+          <p className="settings-help">Choose at least one folder. IMAP Sent requires the server’s Sent special-use folder. Configure style learning separately in Learning.</p>
+          <button className="button secondary" onClick={async () => { setBusy('refresh'); setError(''); try { const response = await fetch('/api/state', { headers: { 'X-Genmail-Account': state.account.id } }); const next = await response.json(); if (!response.ok) throw new Error(next.error); onUpdate(next); } catch (error) { setError(error.message); } finally { setBusy(''); } }}>Refresh progress</button>
+        </fieldset>
         {(state.accounts || []).map(account => <div className="settings-connected" key={account.id}>
-          <div><strong>{account.email}</strong><p>{account.provider.toUpperCase()} · Disconnect removes only this account’s credentials. Cached mail and drafts stay on this computer.</p></div>
+          <div><strong>{account.email}</strong><p>{account.provider.toUpperCase()} · Disconnect removes only this account’s credentials. Cached mail and drafts stay on this computer.</p>{account.import && <p role="status">Import: {account.import.status} · {account.import.imported} new messages · {account.import.options.months} months{account.import.error && ` · ${account.import.error}`}</p>}
+          <div className="settings-actions"><button className="button secondary" disabled={operationBusy || (!importOptions.inbox && !importOptions.sent)} onClick={() => save('imports/start', importOptions, 'import', 'Import started.', account.id)}>Start chosen import</button>
+          {account.import && account.import.status !== 'complete' && <button className="button secondary" disabled={operationBusy} onClick={() => save(`imports/${account.import.status === 'running' ? 'pause' : 'resume'}`, {}, 'import', 'Import updated.', account.id)}>{account.import.status === 'running' ? 'Pause' : 'Resume'}</button>}</div></div>
           <button type="button" className="button secondary" disabled={operationBusy} onClick={() => save('account/select', { accountId: account.id }, 'select', 'Mailbox selected.')}>Use mailbox</button>
           {account.provider === 'imap' && <button type="button" className="button secondary" disabled={operationBusy} onClick={() => { if (dirty.mail && !window.confirm('Discard unsaved mail settings?')) return; const value = mailValues(account.settings); saved.current.mail = value; setMail(value); setProvider('imap'); }}>Edit</button>}
           <button type="button" className="button secondary" disabled={operationBusy} onClick={() => {
@@ -245,11 +279,11 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         </div>
         {provider !== 'imap' ? <form onSubmit={(event) => {
           event.preventDefault();
-          save(`oauth/${provider}/start`, oauth[provider], 'oauth');
+          save(`oauth/${provider}/start`, { ...oauth[provider], importOptions }, 'oauth');
         }}>
           <fieldset className="settings-fields" disabled={operationBusy}>
             <legend className="settings-section-title">Connect {provider === 'google' ? 'your Gmail' : 'your Microsoft mailbox'}.</legend>
-            <p className="settings-intro">Sign in securely with {provider === 'google' ? 'Google' : 'Microsoft'}. Morrow imports your latest 50 inbox messages.</p>
+            <p className="settings-intro">Sign in securely with {provider === 'google' ? 'Google' : 'Microsoft'}. Morrow imports your chosen history in the background.</p>
             <div className="settings-oauth-setup">
               <strong>Register your own OAuth app first</strong>
               <p>{provider === 'google'
@@ -279,11 +313,11 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
           </fieldset>
         </form> : <form onSubmit={(event) => {
           event.preventDefault();
-          save('settings/mail', { ...mail, password: mail.password || undefined, imapPort: Number(mail.imapPort), smtpPort: Number(mail.smtpPort) }, 'mail', 'Mailbox connected and inbox synced.');
+          save('settings/mail', { ...mail, importOptions, password: mail.password || undefined, imapPort: Number(mail.imapPort), smtpPort: Number(mail.smtpPort) }, 'mail', 'Mailbox connected. Historical import will continue while Morrow is open.');
         }}>
           <fieldset className="settings-fields" disabled={operationBusy}>
             <legend className="settings-section-title">Bring your inbox along.</legend>
-            <p className="settings-intro">Connect with IMAP and SMTP. Your latest 50 inbox messages will appear here.</p>
+            <p className="settings-intro">Connect with IMAP and SMTP. Your chosen history will import while Morrow is open.</p>
             <label className="settings-field">Email address
               <input type="email" autoComplete="email" required placeholder="you@example.com" value={mail.email}
                 onChange={(event) => setMail({ ...mail, email: event.target.value })} />
@@ -316,7 +350,6 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
                 </select>
               </label>
             </div>
-            <label className="settings-permission"><input type="checkbox" checked={!!oauth[provider].organize} onChange={event => setOauth({ ...oauth, [provider]: { ...oauth[provider], organize: event.target.checked } })} /><span>Allow moving mail and managing labels (Gmail modify / Outlook Mail.ReadWrite). Reconnect existing accounts to enable.</span></label>
             <p className="settings-help settings-scope">Read, star, archive, and trash shortcuts stay local. Move / Labels applies reviewed provider changes. Sending uses SMTP only when you click Send. Live email supports plain text, without attachments.</p>
             <div className="settings-actions">
               <span><ShieldCheck size={15} /> Credentials encrypted on disk</span>
@@ -369,7 +402,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
             <div className="settings-privacy">
               <ShieldCheck size={19} />
               <div><strong>You choose what your AI sees.</strong>
-                <p>Only the selected email or relevant inbox context goes to your model when you ask for help. AI drafts stay yours to review and send.</p>
+                <p>Permitted context goes to your model when you ask for help or enable an automatic trigger. AI drafts stay yours to review and send.</p>
               </div>
             </div>
             <p className="settings-help">Test connection sends a fixed test prompt, without any email content. It does not save your settings.</p>
@@ -395,6 +428,20 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
             <div className="settings-master-permission">
               <Permission checked={policy.enabled} onChange={(checked) => setPolicy({ ...policy, enabled: checked })} title="Enable AI assistance" description="Turn off to block all AI and simulated workflows. Manual reading, composing, and sending still work." />
             </div>
+            <h3 className="settings-group-title">When assistance starts</h3>
+            <p className="settings-help">All triggers default to off. Checked filters must all match, for each account separately. Drafts and Trash are excluded. Your model may charge per request. Suggestions never send, create events or replace drafts automatically.</p>
+            <div className="settings-permissions-grid">
+              {Object.entries({ onOpen: 'Summarize when I open a message', onReply: 'Suggest text when I start a reply', onArrival: 'Summarize newly synced messages', scheduledSummary: 'Generate scheduled inbox summaries', inboxOnly: 'Only messages in Inbox', starredOnly: 'Only starred messages' }).map(([key, title]) => <Permission key={key} checked={policy.triggers[key]} onChange={checked => setPolicy({ ...policy, triggers: { ...policy.triggers, [key]: checked } })} title={title} />)}
+            </div>
+            <p className="settings-help">New-mail summaries start after sync discovers a new message; initial imports are excluded. Enable automatic sync in General for regular checks. This is polling, not instant provider push.</p>
+            <h3 className="settings-group-title">Summary schedule · P0–P4</h3>
+            <label className="settings-field">Repeat<select value={policy.summarySchedule.cadence} onChange={event => setPolicy({ ...policy, summarySchedule: { ...policy.summarySchedule, cadence: event.target.value } })}><option value="daily">Daily at a set time</option><option value="interval">Every few hours</option></select></label>
+            {policy.summarySchedule.cadence === 'daily' ? <div className="settings-columns">
+              <label className="settings-field">Time<input type="time" required value={policy.summarySchedule.time} onChange={event => setPolicy({ ...policy, summarySchedule: { ...policy.summarySchedule, time: event.target.value } })} /></label>
+              <label className="settings-field">Time zone<input required maxLength={100} placeholder="Asia/Hong_Kong" value={policy.summarySchedule.timeZone} onChange={event => setPolicy({ ...policy, summarySchedule: { ...policy.summarySchedule, timeZone: event.target.value } })} /></label>
+            </div> : <label className="settings-field">Every N hours<input type="number" min="1" max="168" step="1" required value={policy.summarySchedule.everyHours} onChange={event => setPolicy({ ...policy, summarySchedule: { ...policy.summarySchedule, everyHours: Number(event.target.value) } })} /></label>}
+            <p className="settings-help">Runs while Morrow is open, using up to your maximum permitted messages from cached mail. Find results in AI Studio → Summaries. Missed daily runs catch up once when reopened; interval timing starts when enabled. Failed or interrupted jobs are not retried automatically.</p>
+            <p className="settings-help">P0 emergency · P1 due today · P2 action/follow-up · P3 information · P4 bulk/promotional. AI priorities need your review. Email Brain and writing style still require explicit review and saving.</p>
             <h3 className="settings-group-title">What your assistant can do</h3>
             <div className="settings-permissions-grid">
               {AI_BEHAVIORS.map((feature) => <Permission key={feature.id} checked={policy.behaviors[feature.id]} onChange={(checked) => setPolicy({ ...policy, behaviors: { ...policy.behaviors, [feature.id]: checked } })} title={feature.label} description={feature.description} simulated={!!feature.mock} />)}
@@ -409,8 +456,8 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
               {Object.keys(DEFAULT_POLICY.content).map((scope) => <Permission key={scope} checked={policy.content[scope]} onChange={(checked) => setPolicy({ ...policy, content: { ...policy.content, [scope]: checked } })} title={CONTENT_LABELS[scope][0]} description={CONTENT_LABELS[scope][1]} />)}
             </div>
             <label className="settings-field settings-limit">Maximum messages per request
-              <input type="number" min="1" max="25" required value={policy.maxMessages} onChange={(event) => setPolicy({ ...policy, maxMessages: event.target.value })} />
-              <span className="settings-help">Between 1 and 25 permitted messages. Smaller limits share less context.</span>
+              <input type="number" min="1" max="50" required value={policy.maxMessages} onChange={(event) => setPolicy({ ...policy, maxMessages: event.target.value })} />
+              <span className="settings-help">Between 1 and 50 permitted messages. Smaller limits share less context.</span>
             </label>
             <div className="settings-privacy"><ShieldCheck size={19} /><div><strong>Permission is never permission to send.</strong><p>Review AI drafts before sending. Simulated workflows only change local Morrow data after you review and apply their preview. Calendar and attachment demos have no external access.</p></div></div>
             <div className="settings-actions">
@@ -431,12 +478,19 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
 
       <section id="settings-panel-about" role="tabpanel" aria-labelledby="settings-tab-about" hidden={tab !== 'about'}>
         <div className="settings-about-brand"><img src="/brand/morrow-icon.svg" alt="" width="72" height="72" /><div><h2>Morrow Mail</h2><p>Version {__APP_VERSION__} · A little more room to think.</p></div></div>
+        <fieldset className="settings-fields" disabled={operationBusy}>
+          <legend>App updates</legend>
+          <Permission title="Include alpha and beta releases" checked={includePrereleases} onChange={value => { setIncludePrereleases(value); setUpdateResult(null); }} />
+          <p className="settings-help">Checks public GitHub releases without sharing mail or credentials. Download and installation are manual. Results are cached for one minute.</p>
+          <button type="button" className="button secondary" onClick={checkUpdates}>{busy === 'updates' ? 'Checking…' : 'Check for updates'}</button>
+          {updateResult && <div role="status" className="settings-test-result"><strong>{updateResult.updateAvailable ? `Update available: ${updateResult.latestVersion}` : 'You’re up to date for this channel.'}</strong><p>Installed: {updateResult.currentVersion} · Latest: {updateResult.latestVersion}<br />Checked: {new Date(updateResult.checkedAt).toLocaleString()}</p><a href={updateResult.url} target="_blank" rel="noreferrer">View release & downloads</a></div>}
+        </fieldset>
         <p><a href="https://github.com/Coke1120/genmail" target="_blank" rel="noreferrer">GitHub</a> · <a href="https://github.com/sponsors/Coke1120" target="_blank" rel="noreferrer">GitHub Sponsors</a> · <a href="https://buymeacoffee.com/Coke1120" target="_blank" rel="noreferrer">Buy Me a Coffee</a></p>
         <p className="settings-about-intro">An independent, open-source email workspace inspired by GenMail. Original design and code, MIT licensed, and built to keep your workspace on your computer.</p>
         <dl className="settings-about-status">
           <div><dt>Mailbox</dt><dd>{state.account.mode === 'demo' ? 'Demo inbox · sample emails and simulated sends' : `${({ google: 'Gmail API', microsoft: 'Microsoft Graph', imap: 'IMAP / SMTP' })[state.account.provider || savedMail.provider] || 'Live provider'} · ${state.account.email}`}</dd></div>
           <div><dt>Model</dt><dd>{savedAi.configured ? `${savedAi.model} · ${savedAi.baseUrl}` : 'Not configured · illustrative demo responses only'}</dd></div>
-          <div><dt>AI assistance</dt><dd>{state.settings.policy?.enabled === false ? 'Disabled in your saved permissions' : 'Runs only when you ask, using saved permissions'}</dd></div>
+          <div><dt>AI assistance</dt><dd>{state.settings.policy?.enabled === false ? 'Disabled in your saved permissions' : 'Manual actions and opt-in triggers, using saved permissions'}</dd></div>
           <div><dt>Simulated features</dt><dd>AI Studio scheduling, attachment discovery, research, unsubscribe, Email Brain, and other marked workflows use local previews. The separate Calendar page connects to real Google and Outlook calendars.</dd></div>
           <div><dt>Your data</dt><dd>Mail and workspace data stay in your local database. Credentials are encrypted on disk. Explicit sending contacts your mail provider; AI actions share only permitted context with your chosen model.</dd></div>
           <div><dt>Documentation</dt><dd>README.md in the project folder includes setup, provider instructions, and feature coverage.</dd></div>

@@ -54,3 +54,67 @@ The implementation is intended for a private, single-user Mac workspace. It does
 - Desktop-state tests cover persistence, invalid keys, oversized writes and corrupt-state rejection; backups retain Windows client recovery metadata.
 - [Paired CI run 35875758706](https://github.com/Coke1120/genmail/actions/runs/35875758706) passed on Ubuntu, macOS arm64 and Windows x64 with Node 22. Windows built and launched the packaged `.exe`, checked backend/app version agreement, loaded the demo inbox and verified private API access. macOS passed SwiftUI integration and app packaging. Tagged releases repeat these checks before publication.
 - Windows manual UI acceptance, live providers and distribution signing remain pending. The alpha is not certified production-ready.
+
+## Published macOS walkthrough — 23 September 2026, 23:12–23:17 HKT
+
+Tested the downloaded `v0.4.0-alpha.1` macOS arm64 release in a fresh, isolated demo workspace. The ZIP matched the published SHA-256 (`c4ad4a5857c9501ffa8977c3db8c7bea09f098f5e04ecc52fbe6b72cc2a866c8`) and its original signature verified. The test copy changed only the bundle identity/name and `MORROW_DATA_DIR` launch environment, then received a local ad-hoc signature; the published application code and bundled backend were unchanged. No real mailbox or calendar was connected.
+
+| Check | This session's result |
+| --- | --- |
+| Launch the published SwiftUI app | Passed; 12 demo inbox messages and the three-column layout rendered. |
+| Open a message | Passed; reader displayed the selected sender, recipient and body, and unread count decreased from 4 to 3. |
+| Compact mode | Passed; previews disappeared and the list footer reported `compact`. |
+| Sorting | All six choices were visible; selecting Sender A–Z reordered the list. |
+| Search shortcut | Passed; Command-F focused the search field. |
+| Search results | `Northstar` returned 3 messages; an unmatched term returned 0, an explanatory empty state and Clear Filters. |
+| Settings shortcut and further UI walkthrough | Blocked: after Clear Filters and Command-comma, the automation tool returned `Sky Computer Use native pipe closed before response`. Screenshot, session reset and reconnect attempts failed with the same error. The Settings screen itself was not observed. |
+| Source regression checks | Passed: all 65 backend tests and React production build; Swift model/recovery, recipients, six sorting modes, reply ownership, footer persistence, SwiftUI compilation and native API integration. |
+| Native integration fixtures | Passed: 19 AI behaviors, permission denial, Google/Outlook calendars, request replay, uncertain-send recovery, multi-account ownership, duplicate provider IDs and disconnect isolation. These are API/client checks, not UI or live-provider acceptance. |
+
+The application and bundled Node process remained running after the tool failure. A one-second process sample showed the main thread waiting in the normal AppKit event loop; no Morrow crash report was found. This does not establish that Settings works visually or identify the automation failure's cause.
+
+This walkthrough is **partial**, not a complete acceptance pass. Settings, HTML footer editing/preview, AI checkboxes, composing/replying, multi-account disclosure, calendar editing and window-control interaction still require a resumed UI pass for this release. Earlier sessions above remain separate evidence. No application defect was confirmed, no product code was changed, and no new release was published. Local diagnostic evidence is under the ignored `test-results/macos-walkthrough-0.4.0/` directory.
+
+## Update checks and AI triggers — 24 September 2026
+
+Local source changes, not a newly published release:
+
+- `npm run check`: **70 tests passed**, followed by the React production build. New coverage includes release channels and semantic version ordering, drafts/invalid tags, rate limits/offline/malformed responses, route caching/retry behavior, default-off AI triggers, filter intersection, redaction, duplicate IDs across accounts, invalid trigger requests, overlapping-request coalescing and in-flight permission/model changes.
+- `npm run macos:test`: SwiftUI compilation and all native checks passed, including decoding an available-update response and default-off/enabled summary and reply trigger requests. Provider/model traffic in these integration checks uses fixtures.
+- `npm run macos:build`, strict/deep code-signature verification and Info.plist validation passed. The local app remains ad-hoc signed.
+- `npm run desktop:test`: Electron smoke passed on macOS. This is not Windows packaged acceptance.
+- A real public GitHub check returned installed/latest `0.4.0-alpha.1`, no update available, and the correct release page. No credentials or mail were sent to GitHub.
+- Isolated React UI: clicked Check for updates and verified installed/latest version, timestamp and download link; excluding prereleases displayed an explicit no-release error. Verified both AI triggers default off, saved both triggers plus starred-only, and observed a labeled demo summary only for a starred message. Starting a reply displayed suggested text while the body stayed empty; clicking Use suggested reply filled the body, retained the recipient and saved as a draft without sending. Reload retained the checkboxes. Turning both triggers off removed automatic assistance while reading remained available.
+- Native UI: the isolated rebuilt app launched and Settings → Mail opened. Switching to About again returned `Sky Computer Use native pipe closed before response`, preventing native visual acceptance of the new controls. Native build/API evidence above does not substitute for this missing visual pass.
+- Final React trigger check: with summaries enabled, returning to the default first-message preview did not run AI; explicitly selecting that message displayed the summary. This avoids new requests from default selection changes during launch/sync. React production build passed after this adjustment.
+
+No real provider messages/calendar events were created and no paid model was contacted. Windows executable testing and the remaining macOS Settings visual pass remain pending; no paired release was published for these source changes.
+
+## Scheduled summaries and languages — 24 September 2026 (local, unreleased)
+
+- The shared service now owns all-account periodic mail sync and opt-in AI jobs. Both clients expose daily time/time-zone or 1–168-hour summaries, newly synced mail summaries, P0–P4 reports, preferred AI language and an independent translation target. At that checkpoint, Email Brain/style updates remained manual simulations/edits; see the later historical-import and learning checkpoint below.
+- `npm run check`: 78 backend tests and React production build passed. New checks cover schedule validation, time zones/DST, clock rollback, persisted interval anchors, no daily replay after restart, initial-import exclusion, repeat-sync deduplication, duplicate IDs across accounts, redacted model context, language separation, P0–P4 response completeness, in-flight policy/model/connection/content invalidation, crash/failure no-retry, and queue/history bounds. Fixtures do not contact live providers/models.
+- `npm run macos:test`: SwiftUI compilation, native model checks and actual native-client integration passed, including round-tripping both language settings and the new trigger/schedule values. Existing 19 behaviors, calendar, recipient/footer, send-recovery and account-isolation checks passed.
+- Browser UI against a separate temporary demo workspace: saved and reopened 繁體中文 / 日本語 preferences; enabled new-mail and scheduled-summary checkboxes; selected one-minute sync; saved daily `00:00` in `Asia/Hong_Kong`; observed a completed eight-message, P0–P4 illustrative summary in AI Studio → Summaries; changed to every two hours and confirmed persistence after reload. No actual priority/language quality is claimed from demo responses.
+- `npm run desktop:test`: Electron development smoke passed on macOS (authenticated renderer, demo inbox, sandbox and private API). Windows packaged execution for these changes remains pending.
+- The rebuilt native app launched in an isolated `MORROW_DATA_DIR`. Clicking Settings again caused the computer-use tool to return `Sky Computer Use native pipe closed before response`; the app and bundled service remained running. The new native Settings/summary screens have compilation/API coverage but visual acceptance is still blocked by that tool failure.
+- `npm run macos:build`, `codesign --verify --deep --strict`, and Info.plist lint passed for the rebuilt local arm64 app; signing remains ad-hoc.
+- No new release was published. Scheduling is best-effort while the service runs, uses bounded cached context, and is not Gmail/Outlook push or an operating-system background service. Real-account/model acceptance and signed/notarized distribution remain outstanding.
+
+## Historical import and writing-style learning — 2026-09-24 (local, unreleased)
+
+- Both clients now expose 1/3/6/12-month Inbox/Sent import choices, account-specific progress, pause/resume, and separate opt-in Learning settings. History downloads do not invoke AI. The writing-style flow previews the exact cleaned bodies and a conservative token estimate, analyzes at most 50 samples intersected with the global context limit, and requires an edited/reviewed Save before using a style. Optional weekly analysis only proposes updates from new cached Sent mail.
+- `npm run check`: **87 tests passed**, plus the React production build. Coverage includes calendar-month clamping, checkpoint/restart/pause/reconnect behavior, pagination loops, IMAP folder-specific IDs and changed UIDVALIDITY, matching imported Sent copies to local delivery records without changing their retry fingerprints, Graph bearer-safe page URLs, account/header guards, initial-history arrival suppression, ownership/date/automatic-mail filtering, deduplication and body-only model context, budget/context caps, review/apply/replay controls, permission/source changes, interrupted calls, weekly opt-in and incremental selection.
+- `npm run macos:test`: model checks, SwiftUI compilation and native API integration passed, including history controls and the style preview → analyze → approve → delete flow. Tests use temporary fixture workspaces and a fixture model; no live email/calendar/model request is made.
+- Browser UI acceptance in an isolated fixture workspace passed: IMAP Settings opens, default 3-month Inbox/Sent choices are visible, an import pauses/resumes and reaches complete, Learning starts off, preview shows three cleaned samples and token estimate, quoted text is absent, analysis exposes provider-reported usage, and edited approved style becomes active. This walkthrough found and fixed a pre-existing IMAP Settings crash caused by an OAuth-only checkbox; a runnable React rendering regression covers all three provider forms.
+- `npm run desktop:test` passed the Electron development smoke check on this Mac. It is **not** Windows packaged acceptance. The macOS app was rebuilt locally and its ad-hoc signature and Info.plist verified.
+- Native GUI acceptance remains **blocked by the computer-use tool**: it reports “Sky Computer Use native pipe closed before response” when clicking Settings. The isolated app process remains running. This is not evidence that the native Settings page passed visual/interaction acceptance, nor a confirmed app crash.
+- Limits: no authenticated Gmail, Microsoft or IMAP acceptance; no live custom-model billing validation; quote/signature removal is heuristic; latest-50 periodic folder refresh is not continuous provider delta sync; very large caches still need UI pagination/performance work. No new public release was created.
+
+## v0.5.0-alpha.1 release candidate — 2026-09-24
+
+- `npm run check`: **88 tests passed** and the React production build passed. The additional regression verifies that renewed weekly-learning consent excludes messages from the paused period and that an invalidated preview cannot permanently block later weekly proposals.
+- `npm run macos:test`: native model checks, SwiftUI compilation and fixture-backed native API integration passed, including update checks, language/schedule settings, import controls, and the reviewed writing-style lifecycle.
+- `npm run macos:build`, strict/deep signature verification and Info.plist validation passed. The bundled backend reports `0.5.0-alpha.1`; the app remains ad-hoc signed and unnotarized.
+- The paired GitHub workflow must pass Ubuntu, macOS packaging and Windows packaged launch checks before its publisher makes either download public. See the tag's Actions run for the resulting CI evidence.
+- Earlier checkpoints above describe pre-release work and their test counts at that time. Their native Settings GUI, Windows manual UI and live-provider/model acceptance limitations still apply; this alpha does not establish production readiness.

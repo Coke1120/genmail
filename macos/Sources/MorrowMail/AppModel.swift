@@ -107,15 +107,11 @@ final class AppModel: ObservableObject {
             try await reload()
             starting = false
             periodic = Task { [weak self] in
-                var lastSync = Date()
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 30_000_000_000)
                     guard !Task.isCancelled, let self else { return }
-                    let minutes = self.preferences["syncInterval"].number
-                    if minutes > 0 && Date().timeIntervalSince(lastSync) >= minutes * 60 && self.canNavigate && self.account != "demo" {
-                        lastSync = Date()
-                        self.perform { try await self.sync() }
-                    }
+                    // The service syncs all accounts and schedules AI; this only refreshes visible state.
+                    if self.canNavigate { self.perform { try await self.reload() } }
                 }
             }
         } catch {

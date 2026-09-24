@@ -8,10 +8,11 @@ import { createStore } from './store.js';
 
 const input = createInterface({ input: process.stdin });
 const timeout = setTimeout(() => process.exit(1), 10_000);
-let server, store, stopping = false;
+let server, store, app, stopping = false;
 function shutdown() {
   if (stopping) return;
   stopping = true;
+  app?.locals.automation.stop();
   clearTimeout(timeout);
   if (!server) return process.exit(0);
   server.close(() => { store?.close(); process.exit(0); });
@@ -27,7 +28,9 @@ input.once('line', line => {
     server.on('error', () => { console.error('Morrow could not start its private service.'); store.close(); process.exit(1); });
     server.listen(port, '127.0.0.1', () => {
       const actualPort = server.address().port;
-      server.on('request', createApp({ store, port: actualPort, nativeToken: token }));
+      app = createApp({ store, port: actualPort, nativeToken: token });
+      server.on('request', app);
+      app.locals.automation.start();
       server.requestTimeout = 60_000;
       server.headersTimeout = 15_000;
       clearTimeout(timeout);

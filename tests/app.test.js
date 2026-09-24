@@ -10,7 +10,9 @@ async function workspace(t, services = {}) {
   const directory = mkdtempSync(`${tmpdir()}/genmail-api-`);
   const store = createStore(directory);
   const server = createServer();
+  let app;
   t.after(async () => {
+    app?.locals.automation.stop();
     await new Promise(resolve => server.close(resolve));
     store.close();
     rmSync(directory, { recursive: true, force: true });
@@ -24,12 +26,13 @@ async function workspace(t, services = {}) {
     oauthFinish: unexpected, refreshMail: unexpected, fetchProviderMessages: unexpected,
     sendProviderMessage: unexpected, runModel: unexpected, ...services,
   } });
-  server.on('request', application());
+  app = application();
+  server.on('request', app);
   async function request(path, { method = 'GET', body, headers = {} } = {}) {
     return new Promise((resolve, reject) => {
       const outgoing = httpRequest(`${origin}${path}`, {
         method,
-        headers: Object.fromEntries(Object.entries({ Origin: origin, 'X-Genmail-Account': store.getSettings().activeAccount, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }).filter(([, value]) => value !== undefined)),
+        headers: Object.fromEntries(Object.entries({ Origin: origin, 'X-Genmail-Account': store.getSettings().activeAccount, ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(JSON.stringify(body)) }), ...headers }).filter(([, value]) => value !== undefined)),
       }, response => {
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk));
@@ -45,11 +48,96 @@ async function workspace(t, services = {}) {
     });
   }
   const post = (path, body = {}) => request(path, { method: 'POST', body });
-  return { store, request, post, port, origin, restart: () => { server.removeAllListeners('request'); server.on('request', application()); } };
+  return { store, request, post, port, origin, server, get automation() { return app.locals.automation; }, restart: () => { app.locals.automation.stop(); server.removeAllListeners('request'); app = application(); server.on('request', app); } };
 }
 
 const mailConfig = email => ({ email, password: 'private-mail-password', imapHost: 'imap.example.com', smtpHost: 'smtp.example.com' });
 const content = { to: 'friend@example.com', subject: 'A good day', body: 'Hello from Genmail.' };
+
+test('update endpoint validates channels, coalesces checks, and retries failures without claiming success', async t => {
+  let calls = 0;
+  const { request } = await workspace(t, { checkUpdates: async ({ includePrereleases }) => {
+    calls++;
+    if (!includePrereleases) throw Object.assign(Error('No stable release'), { status: 404 });
+    return { currentVersion: '0.4.0-alpha.1', latestVersion: '0.4.0-alpha.2', updateAvailable: true };
+  } });
+  assert.equal((await request('/api/updates?includePrereleases=wrong')).status, 400);
+  assert.equal(calls, 0);
+  const results = await Promise.all([request('/api/updates?includePrereleases=true'), request('/api/updates?includePrereleases=true')]);
+  assert.ok(results.every(result => result.status === 200 && result.data.updateAvailable));
+  assert.equal(calls, 1);
+  assert.equal((await request('/api/updates')).status, 404);
+  assert.equal((await request('/api/updates')).status, 404);
+  assert.equal(calls, 3);
+  assert.equal((await request('/api/updates', { headers: { Origin: 'https://untrusted.invalid' } })).status, 403);
+});
+
+test('automatic AI triggers are opt-in, filtered, redacted and owned by the selected message account', async t => {
+  const seen = [];
+  const { store, request, post } = await workspace(t, { runModel: async (config, action, messages) => { seen.push({ action, messages }); return 'Suggested text'; } });
+  store.setSettings({ ai: { baseUrl: 'https://model.invalid/v1', model: 'fixture' }, mailAccounts: {
+    'a@example.com': { email: 'a@example.com', connectionId: 'first' },
+    'b@example.com': { email: 'b@example.com', connectionId: 'second' },
+  }, activeAccount: 'all' });
+  for (const account of ['a@example.com', 'b@example.com']) store.upsertMessage(account, { ...store.getMessage('demo', 'demo-1'), id: 'shared', body: account, subject: account, starred: false });
+  const trigger = (account, extra = {}) => request('/api/ai', { method: 'POST', headers: { 'X-Genmail-Account': account }, body: { action: 'summary', trigger: 'onOpen', messageId: 'shared', ...extra } });
+  assert.equal((await trigger('a@example.com')).data.skipped, true);
+  assert.equal((await trigger('all')).status, 409);
+  await post('/api/settings/policy', { triggers: { onOpen: true, onReply: true, starredOnly: true }, content: { body: false } });
+  assert.equal((await trigger('a@example.com')).data.skipped, true);
+  store.updateMessage('a@example.com', 'shared', { starred: true });
+  assert.equal((await trigger('a@example.com')).data.text, 'Suggested text');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].messages[0].subject, 'a@example.com');
+  assert.equal(seen[0].messages[0].body, '');
+  assert.equal((await trigger('b@example.com')).data.skipped, true);
+  assert.equal((await trigger('a@example.com', { action: 'reply', trigger: 'onReply' })).status, 200);
+  assert.equal(seen[1].action, 'reply');
+  for (const extra of [{ trigger: 'onSync' }, { trigger: ['onOpen'] }, { action: 'write' }, { prompt: 'bypass' }, { draftText: 'bypass' }]) assert.equal((await trigger('a@example.com', extra)).status, 400);
+  store.updateMessage('a@example.com', 'shared', { folder: 'archive' });
+  assert.equal((await trigger('a@example.com')).data.skipped, true);
+  await post('/api/settings/policy', { triggers: { inboxOnly: false }, folders: { archive: true } });
+  assert.equal((await trigger('a@example.com')).status, 200);
+  for (const patch of [{ enabled: false }, { enabled: true, behaviors: { summary: false } }, { behaviors: { summary: true }, folders: { archive: false } }]) {
+    await post('/api/settings/policy', patch);
+    assert.equal((await trigger('a@example.com')).data.skipped, true);
+  }
+  for (const folder of ['drafts', 'trash']) {
+    await post('/api/settings/policy', { folders: { [folder]: true } });
+    store.updateMessage('a@example.com', 'shared', { folder });
+    assert.equal((await trigger('a@example.com')).data.skipped, true);
+  }
+  assert.equal(seen.length, 3);
+  assert.equal(store.listMessages('a@example.com').length, 1); // No draft or send side effects.
+  const policy = store.getSettings().policy;
+  assert.equal(policy.triggers.onReply, true);
+});
+
+test('overlapping automatic requests coalesce and discard results after permission or model changes', async t => {
+  let complete, started, calls = 0;
+  let ready = new Promise(resolve => { started = resolve; });
+  const { store, post, server } = await workspace(t, { runModel: async () => { calls++; started(); return new Promise(resolve => { complete = resolve; }); } });
+  const ai = { baseUrl: 'https://model.invalid/v1', model: 'fixture' };
+  store.setSettings({ ai });
+  await post('/api/settings/policy', { triggers: { onOpen: true } });
+  const body = { action: 'summary', trigger: 'onOpen', messageId: 'demo-1' };
+  const first = post('/api/ai', body);
+  await ready;
+  const arrived = new Promise(resolve => server.once('request', resolve));
+  const duplicate = post('/api/ai', body);
+  await arrived;
+  await post('/api/settings/policy', { triggers: { onOpen: false } });
+  complete('Must be discarded');
+  assert.deepEqual((await Promise.all([first, duplicate])).map(result => result.status), [409, 409]);
+  assert.equal(calls, 1);
+  await post('/api/settings/policy', { triggers: { onOpen: true } });
+  ready = new Promise(resolve => { started = resolve; });
+  const changed = post('/api/ai', body);
+  await ready;
+  store.setSettings({ ai: { ...ai, model: 'replacement' } });
+  complete('Old model output');
+  assert.equal((await changed).status, 409);
+});
 
 test('demo draft lifecycle preserves failed drafts and makes send retries idempotent', async t => {
   const { store, request, post } = await workspace(t);
@@ -536,4 +624,102 @@ test('HTML footer snapshots survive saves and uncertain retries while the reply 
   assert.equal((await scoped('/api/send', payload)).status, 200);
   assert.equal(calls, 2);
   assert.equal(store.getMessage(other, 'sent:footer-owned-reply'), null);
+});
+
+test('new-mail summaries skip initial import, classify only newly synced mail, and persist per account', async t => {
+  const seen = []; let arrivals = false, now = Date.parse('2026-09-24T02:00:00Z');
+  const f = await workspace(t, {
+    now: () => now, verifySmtp: async () => {},
+    fetchImapMessages: async mail => ['existing', ...(arrivals ? ['new'] : [])].map(id => ({ id, subject: mail.email, body: 'Private body', fromEmail: 'private@example.com', date: '2026-09-24T00:00:00Z', folder: 'inbox', labels: [], starred: false })),
+    runModel: async (ai, action, messages, prompt, options) => {
+      seen.push({ action, messages, options });
+      return JSON.stringify({ items: messages.map(message => ({ messageId: message.id, priority: 'P2', summary: message.subject })) });
+    },
+  });
+  await f.post('/api/settings/ai', { baseUrl: 'https://model.invalid/v1', model: 'fixture' });
+  await f.post('/api/settings/preferences', { language: '繁體中文', translationLanguage: '日本語' });
+  await f.post('/api/settings/policy', { triggers: { onArrival: true }, content: { body: false, sender: false } });
+  for (const account of ['a@example.com', 'b@example.com']) assert.equal((await f.post('/api/settings/mail', mailConfig(account))).status, 200);
+  await f.automation.tick(); assert.equal(seen.length, 0);
+  await f.post('/api/account/select', { accountId: 'all' });
+  arrivals = true;
+  await f.post('/api/sync'); await f.automation.tick();
+  // The response is deliberately nonblocking; the queued tick may own the current run.
+  for (let n = 0; n < 20 && f.automation.reports('b@example.com')[0]?.status !== 'completed'; n++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(seen.length, 2);
+  for (const call of seen) {
+    assert.equal(call.messages.length, 1); assert.equal(call.messages[0].id, 'new');
+    assert.equal(call.messages[0].body, ''); assert.equal(call.messages[0].fromEmail, '');
+    assert.equal(call.options.structuredSummary, true);
+    assert.equal(call.options.preferences.language, '繁體中文'); assert.equal(call.options.preferences.translationLanguage, '日本語');
+  }
+  const combined = (await f.request('/api/state')).data;
+  assert.deepEqual(combined.workspace.summaries, []);
+  for (const account of ['a@example.com', 'b@example.com']) {
+    const messages = combined.messages.filter(message => message.accountId === account);
+    assert.equal(messages.find(message => message.id === 'new').aiSummary.items[0].summary, account);
+    assert.equal(messages.find(message => message.id === 'existing').aiSummary, null);
+  }
+  await f.post('/api/sync'); await f.automation.tick(); assert.equal(seen.length, 2);
+  f.restart(); await f.automation.tick(); assert.equal(seen.length, 2);
+  await f.post('/api/settings/policy', { triggers: { scheduledSummary: true }, maxMessages: 1, summarySchedule: { cadence: 'interval', everyHours: 1, timeZone: 'Asia/Hong_Kong' } });
+  await f.automation.tick(); assert.equal(seen.length, 2);
+  now += 3600000; await f.automation.tick(); assert.equal(seen.length, 4);
+  assert.equal(seen[2].action, 'briefing'); assert.equal(seen[2].messages.length, 1);
+  const scoped = (await f.request('/api/state', { headers: { 'X-Genmail-Account': 'a@example.com' } })).data;
+  assert.equal(scoped.workspace.summaries[0].status, 'completed');
+  await f.post('/api/settings/policy', { enabled: false });
+  const hidden = (await f.request('/api/state')).data;
+  assert.ok(hidden.messages.every(message => !message.aiSummary));
+});
+
+test('first import is account-bound, keeps folder IDs separate, resumes, and never triggers arrival AI for history', async t => {
+  let calls = 0;
+  const f = await workspace(t, { verifySmtp: async () => {}, fetchImapPage: async (mail, { folder }) => { calls++; return { messages: [{ id: folder === 'sent' ? 'imap-folder:U2VudA:7:1' : 'imap:7:1', remoteId: 'imap:7:1', providerFolderId: folder === 'sent' ? 'Sent' : 'INBOX', messageId: folder === 'sent' ? '<already-sent@fixture>' : '', fromEmail: mail.email, to: 'friend@example.com', date: '2026-09-23T12:00:00.000Z', body: 'This is a sent or received history sample of useful length.', folder }], nextCursor: null }; }, now: () => Date.parse('2026-09-24T12:00:00Z') });
+  const a = 'import@example.com';
+  let result = await f.post('/api/settings/mail', { ...mailConfig(a), importOptions: { months: 3, inbox: true, sent: true } });
+  assert.equal(result.status, 200); assert.equal(result.data.accounts[0].import.status, 'running'); assert.equal(result.data.messages.length, 0);
+  f.store.upsertMessage(a, { id: 'sent:local', messageId: '<already-sent@fixture>', fromEmail: a, folder: 'sent', body: 'Original locally sent copy', date: '2026-09-23T12:00:00.000Z' });
+  await f.post('/api/settings/policy', { triggers: { onArrival: true } });
+  for (const path of ['/api/imports/start', '/api/imports/pause', '/api/style/settings', '/api/style/preview', '/api/style/generate']) {
+    assert.equal((await f.request(path, { method: 'POST', body: {}, headers: { 'X-Genmail-Account': 'all' } })).status, 409);
+    assert.equal((await f.request(path, { method: 'POST', body: {}, headers: { 'X-Genmail-Account': undefined } })).status, 409);
+  }
+  await f.automation.tick();
+  await f.post('/api/imports/pause'); await f.automation.tick(); assert.equal(calls, 2);
+  f.restart(); await f.post('/api/imports/resume'); await f.automation.tick();
+  result = await f.request('/api/state');
+  assert.equal(result.data.accounts[0].import.status, 'complete');
+  assert.equal(result.data.messages.length, 2);
+  assert.equal(new Set(result.data.messages.map(message => message.viewId)).size, 2);
+  assert.equal(result.data.workspace.summaries.length, 0);
+  assert.equal(f.store.getMessage(a, 'sent:local').body, 'Original locally sent copy');
+  assert.equal(f.store.getMessage(a, 'sent:local').remoteId, 'imap:7:1');
+  assert.equal(f.store.getMessage(a, 'sent:local').providerFolderId, 'Sent');
+  await f.post('/api/imports/start', { months: 1, inbox: false, sent: true }); await f.automation.tick();
+  assert.equal(f.store.listMessages(a).length, 2); // Shorter imports retain cache and do not duplicate Sent.
+  assert.equal((await f.post('/api/imports/start', { months: 2 })).status, 400);
+});
+
+test('style API requires review, redacts to Sent bodies, honors account ownership and supplies only approved voice to replies', async t => {
+  const calls = [], f = await workspace(t, { runModel: async (ai, action, messages, prompt, options) => { calls.push({ action, messages, options }); return action === 'style' ? { text: 'Use short paragraphs.', usage: { total_tokens: 90 } } : 'A draft.'; } });
+  const a = 'writer@example.com';
+  f.store.setSettings({ activeAccount: a, mailAccounts: { [a]: { email: a, connectionId: 'stable' } }, ai: { baseUrl: 'http://localhost:11434/v1', model: 'fixture' } });
+  f.store.upsertMessage(a, { id: 'sent', fromEmail: a, to: 'private@example.com', subject: 'Private title', folder: 'sent', body: 'Please let me know your thoughts when you have a moment. Thank you for considering this request.', date: new Date(Date.now() - 3600000).toISOString() });
+  await f.post('/api/settings/policy', { folders: { sent: true }, content: { body: true, contacts: false, sender: false, subject: false } });
+  assert.equal((await f.post('/api/style/preview')).status, 403);
+  await f.post('/api/style/settings', { enabled: true });
+  let result = await f.post('/api/style/preview');
+  const id = result.data.workspace.styleLearning.preview.id;
+  assert.equal(calls.length, 0);
+  assert.equal((await f.post('/api/style/apply', { previewId: id, voice: 'Unanalyzed' })).status, 409);
+  result = await f.post('/api/style/generate', { previewId: id }); assert.equal(result.status, 200);
+  assert.equal(result.data.workspace.styleLearning.preview.usage.total_tokens, 90);
+  assert.deepEqual(Object.keys(calls[0].messages[0]), ['body']);
+  await f.post('/api/style/apply', { previewId: id, voice: 'Reviewed short paragraphs.' });
+  await f.post('/api/ai', { action: 'reply', messageId: 'sent' });
+  assert.equal(calls.at(-1).options.styleVoice, 'Reviewed short paragraphs.'); assert.equal(calls.at(-1).options.brain, null);
+  await f.request('/api/style/profile', { method: 'DELETE', body: {} });
+  await f.post('/api/ai', { action: 'reply', messageId: 'sent' });
+  assert.equal(calls.at(-1).options.styleVoice, '');
 });

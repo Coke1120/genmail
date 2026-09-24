@@ -46,7 +46,7 @@ struct MailWorkspace: View {
                 .toolbar {
                     ToolbarItemGroup {
                         if model.busy { ProgressView().controlSize(.small) }
-                        Button { model.perform { try await model.sync() } } label: { Label("Sync Mail", systemImage: "arrow.clockwise") }.disabled(!model.canNavigate).help("Sync latest 50 inbox messages")
+                        Button { model.perform { try await model.sync() } } label: { Label("Sync Mail", systemImage: "arrow.clockwise") }.disabled(!model.canNavigate).help("Sync latest 50 messages per selected import folder")
                         Button { model.newDraft() } label: { Label("Compose", systemImage: "square.and.pencil") }.disabled(model.busy).help("New message (⌘N)")
                     }
                 }
@@ -221,6 +221,17 @@ struct MessageReader: View {
                         Text(dateLabel(message["date"].string)).font(.caption).foregroundStyle(.secondary)
                     }.textSelection(.enabled)
                     if !message["labels"].array.isEmpty { Text(message["labels"].array.map(\.string).joined(separator: " · ")).font(.caption).foregroundStyle(morrowGreen) }
+                    if !message["aiSummary"].isNull {
+                        GroupBox(message["aiSummary"]["source"].string == "demo" ? "Illustrative demo summary" : "New-mail AI summary") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(message["aiSummary"]["items"].array.enumerated()), id: \.offset) { _, item in
+                                    Text(item["priority"].string).font(.headline)
+                                    Text(item["summary"].string).textSelection(.enabled)
+                                }
+                                Text(dateLabel(message["aiSummary"]["completedAt"].string) + " · Review AI priorities.").font(.caption).foregroundStyle(.secondary)
+                            }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    } else { AutomaticAssistance(messageID: message.id, account: message["accountId"].string, trigger: "onOpen") }
                     Divider()
                     Text(message["body"].string).font(.system(size: 14)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                     FooterPreview(footer: message["footer"])
@@ -236,6 +247,42 @@ struct MessageReader: View {
                 }.padding(30)
             }
         }
+    }
+}
+
+struct AutomaticAssistance: View {
+    @EnvironmentObject var model: AppModel
+    let messageID: String
+    let account: String
+    let trigger: String
+    var use: ((String) -> Void)? = nil
+    @State private var result: JSON = .null
+    @State private var loading = false
+    @State private var error = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if loading { ProgressView(trigger == "onOpen" ? "Preparing automatic summary…" : "Preparing reply suggestion…") }
+            if result["text"].nonempty {
+                Text(result["source"].string == "demo" ? "Automatic assistance · Illustrative demo" : "Automatic assistance · Review before using").font(.caption).foregroundStyle(.secondary)
+                Text(result["text"].string).textSelection(.enabled)
+                if let use { Button("Use Suggested Reply") { use(result["text"].string) }.disabled(model.busy) }
+            }
+            if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.secondary) }
+        }
+        .task(id: account + "\n" + messageID + "\n" + trigger) {
+            result = .null; error = ""; loading = false
+            let action = trigger == "onOpen" ? "summary" : "reply", policy = model.policy, ai = model.state["settings"]["ai"], preferences = model.preferences
+            guard policy["triggers"][trigger].bool, model.allowed(action) else { return }
+            loading = true
+            do {
+                let next = try await model.request("/ai", method: "POST", body: .object(["action": .string(action), "trigger": .string(trigger), "messageId": .string(messageID)]), mailbox: account)
+                if !Task.isCancelled && policy == model.policy && ai == model.state["settings"]["ai"] && preferences == model.preferences { result = next }
+            } catch { if !Task.isCancelled { self.error = "Automatic assistance: " + error.localizedDescription } }
+            if !Task.isCancelled { loading = false }
+        }
+        .onChange(of: model.policy) { _ in result = .null; error = "" }
+        .onChange(of: model.state["settings"]["ai"]) { _ in result = .null; error = "" }
+        .onChange(of: model.preferences) { _ in result = .null; error = "" }
     }
 }
 
@@ -332,6 +379,11 @@ struct ComposeView: View {
                 .onChange(of: draft.accountID) { _ in aiResult = ""; draft.requestID = UUID().uuidString }
             }
             if !draft.replyToID.isEmpty { Label("Replying from the mailbox that owns this conversation", systemImage: "lock.fill").font(.caption).foregroundStyle(.secondary) }
+            if !initial.replyToID.isEmpty && initial.savedID.isEmpty && initial.body.isEmpty && !draft.unconfirmed {
+                AutomaticAssistance(messageID: initial.replyToID, account: initial.accountID, trigger: "onReply") { text in
+                    if draft.body.isEmpty || model.confirm("Replace this draft’s text?", detail: "Your current text will be replaced with the suggestion. Recipients and footer stay the same.") { draft.body = text }
+                }
+            }
             if draft.unconfirmed {
                 Label("Delivery was not confirmed. Check your provider’s Sent folder before retrying. Retrying may send a duplicate.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
                 Toggle("I checked Sent and want to retry this delivery", isOn: $reviewed).toggleStyle(.checkbox)

@@ -5,7 +5,7 @@ export const AI_BEHAVIORS = [
   { id: 'write', label: 'Write new emails', description: 'Turn your instructions into an editable draft.', context: 'none' },
   { id: 'rewrite', label: 'Rewrite drafts', description: 'Adjust the tone and clarity of your text.', context: 'draft' },
   { id: 'translate', label: 'Translate', description: 'Translate an email or draft into your chosen language.', context: 'selected' },
-  { id: 'briefing', label: 'Morning briefing', description: 'Create an on-demand digest of permitted mail.', context: 'mailbox' },
+  { id: 'briefing', label: 'Inbox briefing', description: 'Create a P0–P4 digest of permitted mail, manually or on your saved schedule.', context: 'mailbox' },
   { id: 'triage', label: 'Prioritize important mail', description: 'Preview which messages deserve attention.', context: 'mailbox', mock: true },
   { id: 'labels', label: 'Smart labels', description: 'Preview and apply labels inside Morrow.', context: 'mailbox', mock: true },
   { id: 'memory', label: 'Email Brain', description: 'Preview writing-style and contact notes from permitted mail.', context: 'mailbox', mock: true },
@@ -22,15 +22,25 @@ export const AI_BEHAVIORS = [
 
 export const DEFAULT_POLICY = {
   enabled: true,
+  triggers: { onOpen: false, onReply: false, onArrival: false, scheduledSummary: false, inboxOnly: true, starredOnly: false },
+  summarySchedule: { cadence: 'daily', time: '09:00', everyHours: 4, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' },
   behaviors: Object.fromEntries(AI_BEHAVIORS.map(feature => [feature.id, true])),
   folders: { inbox: true, sent: false, drafts: true, archive: false, trash: false },
   content: { subject: true, body: true, sender: true, contacts: true, calendar: true, attachments: false },
   maxMessages: 8,
 };
 
+export function matchesAITrigger(policy, trigger, message) {
+  const action = { onOpen: 'summary', onReply: 'reply', onArrival: 'summary' }[trigger];
+  return !!(action && policy.enabled && policy.triggers?.[trigger] && policy.behaviors[action] && message &&
+    !['drafts', 'trash'].includes(message.folder) && policy.folders[message.folder] &&
+    (!policy.triggers.inboxOnly || message.folder === 'inbox') && (!policy.triggers.starredOnly || message.starred) &&
+    ['subject', 'body', 'sender'].some(key => policy.content[key]));
+}
+
 export const DEFAULT_PREFERENCES = {
   displayName: '', signature: '', signatureFormat: 'plain', theme: 'system', density: 'comfortable', sort: 'newest',
-  markReadOnOpen: true, replyTone: 'friendly', language: 'English', syncInterval: 0,
+  markReadOnOpen: true, replyTone: 'friendly', language: 'English', translationLanguage: '', syncInterval: 0,
 };
 
 export const DEFAULT_SKILLS = [

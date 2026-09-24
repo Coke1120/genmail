@@ -45,7 +45,31 @@ function AccountGroup({ account, active, children }) {
   }}><summary title={account.email}><ChevronRight size={14} /><span><strong>{account.email}</strong><small>{account.provider === 'google' ? 'Google' : account.provider === 'microsoft' ? 'Outlook' : account.provider === 'imap' ? 'IMAP' : account.provider}</small></span>{account.unread > 0 && <span className="nav-count">{account.unread}</span>}</summary><div className="account-folders">{children}</div></details>;
 }
 
-function Compose({ initial, account: currentAccount, accounts, preferences, footer, policy, onClose, onSaved, onSent, onSettings, notify }) {
+function AutomaticAssistance({ messageId, account, trigger, policy, modelKey, onUse }) {
+  const [result, setResult] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const request = useRef(0);
+  useEffect(() => { request.current++; setResult(null); setError(''); setBusy(false); }, [JSON.stringify(policy), modelKey]);
+  useEffect(() => {
+    const action = trigger === 'onOpen' ? 'summary' : 'reply';
+    if (!policy.enabled || !policy.triggers?.[trigger] || !policy.behaviors[action]) return;
+    const current = ++request.current;
+    setBusy(true);
+    api('/ai', { account, method: 'POST', body: JSON.stringify({ action, messageId, trigger }) })
+      .then(value => { if (current === request.current) setResult(value); })
+      .catch(cause => { if (current === request.current) setError(cause.message); })
+      .finally(() => { if (current === request.current) setBusy(false); });
+    return () => { request.current++; };
+    // Triggers run on opening this view, not on preference changes or re-renders.
+  }, [messageId, account, trigger]);
+  if (!busy && !result?.text && !error) return null;
+  return <section className="compose-ai-preview" aria-label="Automatic assistance" aria-live="polite">
+    {busy && <p>Preparing automatic assistance…</p>}
+    {error && <p>Automatic assistance: {error}</p>}
+    {result?.text && <><strong>{result.source === 'demo' ? 'Automatic assistance · Illustrative demo' : 'Automatic assistance · Review before using'}</strong><pre>{result.text}</pre>{onUse && <button type="button" className="button secondary" onClick={() => onUse(result.text)}>Use suggested reply</button>}</>}
+  </section>;
+}
+
+function Compose({ initial, account: currentAccount, accounts, preferences, footer, policy, modelKey, onClose, onSaved, onSent, onSettings, notify }) {
   const [owner, setOwner] = useState(initial?.accountId || (currentAccount.id === 'all' ? accounts[0]?.id || 'demo' : currentAccount.id));
   const account = owner === 'demo' ? demoAccount : accounts.find(item => item.id === owner) || { id: owner, email: owner, mode: 'live' };
   const sendLock = useRef(false);
@@ -124,11 +148,12 @@ function Compose({ initial, account: currentAccount, accounts, preferences, foot
     <form className="compose-form" onSubmit={event => { event.preventDefault(); submit(true); }}>
       <label className="compose-field"><span>From</span><select aria-label="Sending account" value={owner} disabled={!!busy || aiBusy || !!draft.id || !!draft.replyToId || needsReview} onChange={event => { setOwner(event.target.value); setAiResult(null); setDraft(previous => ({ ...previous, requestId: crypto.randomUUID() })); }}>{[...accounts, demoAccount].map(item => <option key={item.id} value={item.id}>{item.mode === 'demo' ? 'Demo workspace (simulated)' : item.email}</option>)}</select></label>
       {draft.replyToId && <small className="reply-owner"><ShieldCheck size={14} />Replying from the mailbox that received this conversation.</small>}
+      {initial?.replyToId && !initial.id && !initial.body && !needsReview && <AutomaticAssistance messageId={initial.replyToId} account={owner} trigger="onReply" policy={policy} modelKey={modelKey} onUse={text => { if (!busy && (!draft.body || window.confirm('Replace your current draft text with this suggestion?'))) edit('body', text); }} />}
       {['to', 'cc', 'bcc'].map(field => <label className="compose-field" key={field}><span>{field === 'to' ? 'To' : field === 'cc' ? 'Cc' : 'Bcc'}</span><input aria-label={field.toUpperCase()} value={draft[field]} onChange={event => edit(field, event.target.value)} placeholder="Email addresses, separated by commas or semicolons" autoFocus={field === 'to'} disabled={!!busy || needsReview} /></label>)}
       <small>Up to 100 plain email addresses across To, Cc and Bcc. Bcc stays hidden from other recipients.</small>
       <label className="compose-field"><span>Subject</span><input value={draft.subject} onChange={event => edit('subject', event.target.value)} placeholder="What’s on your mind?" disabled={!!busy || needsReview} /></label>
       <div className="compose-ai-toggle"><button type="button" className="button ghost" onClick={() => setShowAI(!showAI)} aria-expanded={showAI} disabled={needsReview}><Sparkles size={15} />Writing assistant<ChevronDown size={13} /></button><span>{preferences.replyTone} · {preferences.language}</span></div>
-      {showAI && !needsReview && <div className="compose-ai-panel"><div className="compose-ai-tools"><label>Action<select value={aiAction} disabled={aiBusy || !!busy} onChange={event => { setAiAction(event.target.value); setAiResult(null); }}><option value="write">Write from instructions</option><option value="rewrite">Rewrite this draft</option><option value="translate">Translate this draft</option></select></label><label>{aiAction === 'translate' ? 'Language / instructions' : 'Instructions'}<input value={aiPrompt} maxLength={2000} disabled={aiBusy || !!busy} onChange={event => { setAiPrompt(event.target.value); setAiResult(null); }} placeholder={aiAction === 'translate' ? `Translate into ${preferences.language}` : aiAction === 'write' ? 'Thank Sam for the proposal and ask for a call Friday' : 'Make this clearer and more concise'} /></label><button type="button" className="button secondary" onClick={generate} disabled={!aiAllowed || aiBusy || !!busy || (aiAction === 'write' ? !aiPrompt.trim() : !draft.body.trim())}>{aiBusy ? <LoaderCircle size={15} className="spinning" /> : <Sparkles size={15} />}Preview</button></div>
+      {showAI && !needsReview && <div className="compose-ai-panel"><div className="compose-ai-tools"><label>Action<select value={aiAction} disabled={aiBusy || !!busy} onChange={event => { setAiAction(event.target.value); setAiResult(null); }}><option value="write">Write from instructions</option><option value="rewrite">Rewrite this draft</option><option value="translate">Translate this draft</option></select></label><label>{aiAction === 'translate' ? 'Language / instructions' : 'Instructions'}<input value={aiPrompt} maxLength={2000} disabled={aiBusy || !!busy} onChange={event => { setAiPrompt(event.target.value); setAiResult(null); }} placeholder={aiAction === 'translate' ? `Translate into ${preferences.translationLanguage || preferences.language}` : aiAction === 'write' ? 'Thank Sam for the proposal and ask for a call Friday' : 'Make this clearer and more concise'} /></label><button type="button" className="button secondary" onClick={generate} disabled={!aiAllowed || aiBusy || !!busy || (aiAction === 'write' ? !aiPrompt.trim() : !draft.body.trim())}>{aiBusy ? <LoaderCircle size={15} className="spinning" /> : <Sparkles size={15} />}Preview</button></div>
         {!aiAllowed && <div className="policy-notice"><ShieldCheck size={14} /><span>This action is disabled by your AI permissions.</span><button type="button" onClick={() => { if (!dirty || window.confirm('Discard unsaved changes and open settings?')) { onClose(); onSettings(); } }}>Settings</button></div>}
         {aiResult && <div className="compose-ai-preview"><div><strong>Review before inserting</strong><span>{aiResult.source === 'demo' ? 'ILLUSTRATIVE DEMO' : 'AI GENERATED'}</span></div><pre>{aiResult.text}</pre><button type="button" className="button primary" onClick={() => edit('body', aiResult.text)}>Replace draft text<ArrowRight size={14} /></button></div>}
       </div>}
@@ -236,10 +261,19 @@ export default function App() {
     return () => media.removeEventListener('change', update);
   }, [preferences.theme]);
   useEffect(() => {
-    if (!preferences.syncInterval || !state) return;
-    const timer = window.setInterval(() => { if (!compose && !settingsBusy && pendingIds.size === 0) sync(true); }, preferences.syncInterval * 60000);
-    return () => window.clearInterval(timer);
-  }, [preferences.syncInterval, state?.account.mode, state?.account.email, compose, settingsBusy, pendingIds.size]);
+    if (!state || compose || organizing || settingsOpen || calendarBusy || calendarDirty || studioBusy || studioDirty || aiBusy || syncing || pendingIds.size) return;
+    let active = true, pending = false;
+    // The service owns provider polling; clients only refresh their visible account.
+    const timer = window.setInterval(async () => {
+      if (pending) return;
+      pending = true;
+      const version = accountVersion.current;
+      try { const next = await api('/state', { account: stateRef.current.account }); if (active && version === accountVersion.current) setState(next); }
+      catch { /* The manual refresh path exposes connection failures. */ }
+      finally { pending = false; }
+    }, 30000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [!!state, state?.account.id, compose, organizing, settingsOpen, calendarBusy, calendarDirty, studioBusy, studioDirty, aiBusy, syncing, pendingIds.size]);
   useEffect(() => {
     const media = window.matchMedia('(max-width: 760px)');
     const update = () => setIsNarrow(media.matches);
@@ -416,6 +450,7 @@ export default function App() {
               {selected.cc && <p>Cc: {selected.cc}</p>}{selected.bcc && <p>Bcc: {selected.bcc}</p>}
               <div className="sender-detail"><Avatar name={selected.fromName} large /><div><div className="sender-name"><strong>{selected.fromName}</strong><span>&lt;{selected.fromEmail}&gt;</span></div><span className="sender-recipient">to {selected.to === state.account.email ? 'me' : selected.to || '—'}<ChevronDown size={12} /></span></div><time dateTime={selected.date} title={fullDate(selected.date)}>{shortDate(selected.date)}</time></div>
               {selected.folder !== 'drafts' && <button className="summary-callout" onClick={() => askAI('summary')} disabled={aiBusy || !allowed('summary', selected)}><span className="summary-icon"><Sparkles size={18} /></span><span><strong>A little clarity, in a click.</strong><small>Get the key points with your AI assistant</small></span><ArrowRight size={17} /></button>}
+              {selected.aiSummary ? <section className="compose-ai-preview" aria-label="New-mail summary"><strong>{selected.aiSummary.source === 'demo' ? 'Illustrative demo summary' : 'New-mail AI summary'} · {selected.aiSummary.items?.[0]?.priority}</strong><pre>{selected.aiSummary.items?.[0]?.summary}</pre><small>{fullDate(selected.aiSummary.completedAt)} · Review AI priorities.</small></section> : selectedId === messageKey(selected) && (!isNarrow || mobileReading) && <AutomaticAssistance messageId={selected.id} account={selected.accountId} trigger="onOpen" policy={policy} modelKey={JSON.stringify([state.settings.ai, state.settings.preferences])} />}
               <div className="message-body">{selected.body || <span className="muted">This message has no content yet.</span>}</div>
               <FooterPreview footer={selected.footer} />
               <div className="message-end"><span /><Leaf size={14} /><span /></div>
@@ -431,13 +466,13 @@ export default function App() {
           {aiBusy && <div className="ai-loading" role="status"><Sparkles size={18} className="pulse" /><span>Making a little room for clarity…</span></div>}
           {aiError && <div className="ai-error" role="alert"><p>{aiError}</p><button className="button secondary" onClick={() => setSettingsOpen(true, 'model')}>AI settings<ArrowRight size={14} /></button></div>}
           {aiResult && <div className="ai-response"><div className="ai-response-title"><Sparkles size={15} /><strong>{aiResult.action === 'reply' ? 'A starting point' : aiResult.action === 'summary' ? 'The important bits' : 'From your inbox'}</strong><span>{aiResult.source === 'demo' ? 'DEMO' : 'AI'}</span></div>{aiResult.prompt && <p className="ai-question">{aiResult.prompt}</p>}<div className="ai-response-text">{aiResult.text}</div>{aiResult.source === 'demo' && <p className="ai-demo-note">Illustrative demo output. Connect a model for real AI responses.</p>}{aiResult.action === 'reply' && aiResult.viewId === messageKey(selected) && <button className="button primary use-draft" onClick={() => reply(aiResult.text)}>Use in a draft<ArrowRight size={15} /></button>}</div>}
-        </div><div className="assistant-bottom"><form className="assistant-input" onSubmit={event => { event.preventDefault(); if (aiPrompt.trim()) askAI('ask', aiPrompt.trim()); }}><textarea maxLength={2000} aria-label="Ask about your inbox" placeholder="Ask about your inbox…" rows={2} value={aiPrompt} onChange={event => setAiPrompt(event.target.value)} disabled={aiBusy} /><div><span><Sparkles size={12} />Made for a lighter day</span><button type="submit" aria-label="Ask AI" disabled={aiBusy || !aiPrompt.trim() || !allowed('ask')}><ArrowRight size={17} /></button></div></form><p><ShieldCheck size={11} />AI runs only when you ask. Review its answers.</p></div></aside>}
+        </div><div className="assistant-bottom"><form className="assistant-input" onSubmit={event => { event.preventDefault(); if (aiPrompt.trim()) askAI('ask', aiPrompt.trim()); }}><textarea maxLength={2000} aria-label="Ask about your inbox" placeholder="Ask about your inbox…" rows={2} value={aiPrompt} onChange={event => setAiPrompt(event.target.value)} disabled={aiBusy} /><div><span><Sparkles size={12} />Made for a lighter day</span><button type="submit" aria-label="Ask AI" disabled={aiBusy || !aiPrompt.trim() || !allowed('ask')}><ArrowRight size={17} /></button></div></form><p><ShieldCheck size={11} />AI follows your saved permissions and triggers. Review its answers.</p></div></aside>}
       </div>
       </>}
       <footer className="workspace-footer"><span><span className="footer-dot" />A home for your email. A little space for you.</span><span>Open source, by nature.<Leaf size={12} /></span></footer>
     </main>
     {organizing && <OrganizeMail message={organizing} onClose={() => setOrganizing(null)} onUpdate={localUpdate} />}
-    {compose && <Compose initial={compose} account={state.account} accounts={state.accounts} preferences={preferences} footer={state.settings.footer} policy={policy} onSettings={() => setSettingsOpen(true, 'policy')} onClose={() => setCompose(null)} onSaved={localUpdate} onSent={sent} notify={notify} />}
+    {compose && <Compose initial={compose} account={state.account} accounts={state.accounts} preferences={preferences} footer={state.settings.footer} policy={policy} modelKey={JSON.stringify(state.settings.ai)} onSettings={() => setSettingsOpen(true, 'policy')} onClose={() => setCompose(null)} onSaved={localUpdate} onSent={sent} notify={notify} />}
     {toast && <div className={`toast ${toast.type}`} role={toast.type === 'error' ? 'alert' : 'status'}>{toast.type === 'error' ? <CircleHelp size={18} /> : <Check size={18} />}<span>{toast.message}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}><X size={15} /></button></div>}
   </div>;
 }

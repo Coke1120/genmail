@@ -185,7 +185,7 @@ export async function normalizeGoogleMessage(message) {
   return {
     id: `google:${message.id}`, fromName: from?.name || from?.address || 'Unknown sender', fromEmail: from?.address || '',
     to: metadata.to?.text || '', cc: metadata.cc?.text || '', bcc: metadata.bcc?.text || '', subject, body, preview: preview(body), date: dateString(Number(message.internalDate) || metadata.date),
-    folder: 'inbox', read: !message.labelIds?.includes('UNREAD'), starred: !!message.labelIds?.includes('STARRED'),
+    folder: 'inbox', providerSent: !!message.labelIds?.includes('SENT'), automated: headers.some(h => /^(auto-submitted|list-id|list-unsubscribe)$/i.test(h.name) && h.value !== 'no'), read: !message.labelIds?.includes('UNREAD'), starred: !!message.labelIds?.includes('STARRED'),
     category: category(subject, headers), labels: [], providerLabelIds: message.labelIds || [], ...(metadata.messageId ? { messageId: metadata.messageId } : {}),
   };
 }
@@ -210,23 +210,33 @@ export async function normalizeMicrosoftMessage(message) {
 }
 
 export async function fetchProviderMessages(mail) {
+  return (await fetchProviderPage(mail)).messages;
+}
+
+export async function fetchProviderPage(mail, { folder = 'inbox', since, before, cursor } = {}) {
+  if (!['inbox', 'sent'].includes(folder)) throw new Error('Unsupported import folder.');
   if (mail.provider === 'google') {
-    const list = await apiRequest(mail, '/messages?maxResults=50&labelIds=INBOX');
-    const messages = [];
-    const ids = list.messages || [];
-    for (let index = 0; index < ids.length; index += 5) {
-      messages.push(...await Promise.all(ids.slice(index, index + 5).map(async item => normalizeGoogleMessage(
-        await apiRequest(mail, `/messages/${encodeURIComponent(item.id)}?format=full`),
-      ))));
+    const query = new URLSearchParams({ maxResults: '50', labelIds: folder === 'sent' ? 'SENT' : 'INBOX' });
+    if (since || before) query.set('q', [since && `after:${Math.floor(Date.parse(since) / 1000)}`, before && `before:${Math.ceil(Date.parse(before) / 1000)}`].filter(Boolean).join(' '));
+    if (cursor) query.set('pageToken', cursor);
+    const list = await apiRequest(mail, `/messages?${query}`), messages = [];
+    for (let index = 0; index < (list.messages || []).length; index += 5) {
+      messages.push(...await Promise.all(list.messages.slice(index, index + 5).map(async item => ({
+        ...await normalizeGoogleMessage(await apiRequest(mail, `/messages/${encodeURIComponent(item.id)}?format=full`)), folder,
+      }))));
     }
-    return messages;
+    return { messages, nextCursor: list.nextPageToken || null };
   }
   providerConfig(mail.provider);
-  const fields = 'id,from,sender,toRecipients,ccRecipients,bccRecipients,subject,body,receivedDateTime,isRead,flag,internetMessageId,internetMessageHeaders';
-  const result = await apiRequest(mail, `/mailFolders/inbox/messages?$top=50&$orderby=receivedDateTime%20desc&$select=${fields}`, {
-    headers: { Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"' },
-  });
-  return Promise.all((result.value || []).map(normalizeMicrosoftMessage));
+  const dateField = folder === 'sent' ? 'sentDateTime' : 'receivedDateTime';
+  const path = `/mailFolders/${folder === 'sent' ? 'sentitems' : 'inbox'}/messages`;
+  const query = new URLSearchParams({ '$top': '50', '$orderby': `${dateField} desc`, '$select': 'id,from,sender,toRecipients,ccRecipients,bccRecipients,subject,body,receivedDateTime,sentDateTime,isRead,flag,internetMessageId,internetMessageHeaders' });
+  if (since || before) query.set('$filter', [since && `${dateField} ge ${since}`, before && `${dateField} lt ${before}`].filter(Boolean).join(' and '));
+  const target = cursor || `https://graph.microsoft.com/v1.0/me${path}?${query}`;
+  const url = new URL(target);
+  if (url.origin !== 'https://graph.microsoft.com' || url.pathname !== `/v1.0/me${path}` || url.username || url.password || url.hash) throw new Error('Invalid mailbox pagination URL.');
+  const result = await providerRequest(url.href, { headers: { Authorization: `Bearer ${mail.accessToken}`, Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"' } }, 'Microsoft');
+  return { messages: await Promise.all((result.value || []).map(async item => ({ ...await normalizeMicrosoftMessage(item), folder, date: dateString(item[dateField]), automated: (item.internetMessageHeaders || []).some(h => /^(auto-submitted|list-id|list-unsubscribe)$/i.test(h.name) && h.value !== 'no') }))), nextCursor: result['@odata.nextLink'] || null };
 }
 
 export async function sendProviderMessage(mail, { to, cc = '', bcc = '', subject, body, footer, replyMessageId, fromName }) {

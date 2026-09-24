@@ -14,10 +14,13 @@ test('permissions merge without mutating defaults and reject unknown or malforme
   assert.equal(policy.maxMessages, 3);
   assert.deepEqual(saved, { enabled: true, content: { body: false } });
   assert.deepEqual(DEFAULT_POLICY, defaults);
-  for (const patch of [null, [], { enabled: 'false' }, { maxMessages: 0 }, { maxMessages: 26 }, { maxMessages: 1.5 }, { unknown: true }, { content: [] }, { content: { sender: 1 } }, { folders: { spam: true } }, { behaviors: { nonexistent: true } }, JSON.parse('{"__proto__":{"enabled":true}}')]) {
+  for (const patch of [null, [], { enabled: 'false' }, { maxMessages: 0 }, { maxMessages: 51 }, { maxMessages: 1.5 }, { unknown: true }, { content: [] }, { content: { sender: 1 } }, { folders: { spam: true } }, { behaviors: { nonexistent: true } }, JSON.parse('{"__proto__":{"enabled":true}}')]) {
     assert.throws(() => updatePolicy(policy, patch), { status: 400 });
   }
   assert.deepEqual(resolvePolicy(), defaults);
+  assert.deepEqual(resolvePolicy(saved).triggers, { onOpen: false, onReply: false, onArrival: false, scheduledSummary: false, inboxOnly: true, starredOnly: false });
+  assert.deepEqual(updatePolicy(saved, { triggers: { onOpen: true } }).triggers, { onOpen: true, onReply: false, onArrival: false, scheduledSummary: false, inboxOnly: true, starredOnly: false });
+  for (const triggers of [[], { onOpen: 'true' }, { onSync: true }]) assert.throws(() => updatePolicy(saved, { triggers }), { status: 400 });
 });
 
 test('every behavior obeys the master switch, its own switch, and required content scopes', () => {
@@ -52,5 +55,5 @@ test('preferences validate persisted controls without mutating their defaults', 
   assert.equal(preferences.displayName, 'Morgan');
   assert.equal(preferences.language, 'English');
   assert.deepEqual(DEFAULT_PREFERENCES, defaults);
-  for (const patch of [{ theme: 'purple' }, { density: 'tight' }, { syncInterval: 1 }, { markReadOnOpen: 'true' }, { displayName: 'Injected\nSender' }, { signature: 'a'.repeat(12001) }, { language: '' }, { unknown: true }]) assert.throws(() => updatePreferences({}, patch), { status: 400 });
+  for (const patch of [{ theme: 'purple' }, { density: 'tight' }, { syncInterval: 2 }, { markReadOnOpen: 'true' }, { displayName: 'Injected\nSender' }, { signature: 'a'.repeat(12001) }, { language: '' }, { unknown: true }]) assert.throws(() => updatePreferences({}, patch), { status: 400 });
 });

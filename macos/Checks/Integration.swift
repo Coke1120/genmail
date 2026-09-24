@@ -10,6 +10,27 @@ struct NativeClientChecks {
         defer { model.stop() }
         guard !model.state.isNull else { throw APIError(model.error) }
         assert(model.features.count == 19)
+        let update = try await model.request("/updates?includePrereleases=true")
+        assert(update["updateAvailable"].bool && update["latestVersion"].string == "0.5.0-alpha.2")
+        let trigger: JSON = .object(["action": .string("summary"), "trigger": .string("onOpen"), "messageId": .string("demo-1")])
+        let disabledTrigger = try await model.request("/ai", method: "POST", body: trigger, mailbox: "demo")
+        assert(disabledTrigger["skipped"].bool)
+        model.state = try await model.request("/settings/policy", method: "POST", body: .object(["triggers": .object(["onOpen": .bool(true), "onReply": .bool(true)])]))
+        let automatic = try await model.request("/ai", method: "POST", body: trigger, mailbox: "demo")
+        assert(automatic["text"].nonempty && automatic["source"].string == "demo")
+        let replyTrigger = try await model.request("/ai", method: "POST", body: .object(["action": .string("reply"), "trigger": .string("onReply"), "messageId": .string("demo-1")]), mailbox: "demo")
+        assert(replyTrigger["text"].nonempty)
+        model.state = try await model.request("/settings/policy", method: "POST", body: .object(["triggers": .object(["onOpen": .bool(false), "onReply": .bool(false)])]))
+        print("Native update response and opt-in AI trigger checks passed.")
+        model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["language": .string("繁體中文"), "translationLanguage": .string("日本語"), "syncInterval": .number(1)]))
+        assert(model.preferences["language"].string == "繁體中文" && model.preferences["translationLanguage"].string == "日本語")
+        model.state = try await model.request("/settings/policy", method: "POST", body: .object(["triggers": .object(["onArrival": .bool(true), "scheduledSummary": .bool(true)]), "summarySchedule": .object(["cadence": .string("interval"), "everyHours": .number(4), "time": .string("09:15"), "timeZone": .string("Asia/Hong_Kong")])]))
+        try await model.reload()
+        assert(model.policy["triggers"]["onArrival"].bool && model.policy["triggers"]["scheduledSummary"].bool)
+        assert(model.policy["summarySchedule"]["everyHours"].number == 4 && model.policy["summarySchedule"]["timeZone"].string == "Asia/Hong_Kong")
+        model.state = try await model.request("/settings/policy", method: "POST", body: .object(["triggers": .object(["onArrival": .bool(false), "scheduledSummary": .bool(false)])]))
+        model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["syncInterval": .number(0)]))
+        print("Native summary schedule and separate language settings round-trip passed.")
         let selectedID = model.messages[0].id
         let calendars = try await model.request("/calendars")
         assert(calendars["connections"].array.filter { $0["connected"].bool }.count == 2)
@@ -42,7 +63,7 @@ struct NativeClientChecks {
             assertionFailure("Disabled behavior was allowed")
         } catch let error as APIError { assert(error.localizedDescription.contains("disabled")) }
         model.state = try await model.request("/account/live", method: "POST", body: .object([:]))
-        var draft = Draft(); draft.to = "recipient@example.com"; draft.subject = "Native recovery check"; draft.body = "Fixture delivery only."
+        var draft = Draft(); draft.to = "recipient@example.com"; draft.subject = "Native recovery check"; draft.body = "Fixture delivery only. Please review the suggested timetable and share your feedback when you have a moment."
         let saved = try await model.request("/drafts", method: "POST", body: draft.payload)
         draft.savedID = saved["message"].id
         var payload = draft.payload
@@ -96,6 +117,23 @@ struct NativeClientChecks {
         assert(model.accounts.count == 2 && model.combined && !model.messages.contains { $0["accountId"].string == owner })
         try await model.selectAccount("native@example.com", folder: "sent")
         assert(model.messages.contains { $0.id == "sent:" + draft.requestID })
+        model.state = try await model.request("/imports/start", method: "POST", body: .object(["months": .number(3), "inbox": .bool(true), "sent": .bool(true)]))
+        assert(model.accounts.first(where: { $0.id == "native@example.com" })?["import"]["status"].string == "running")
+        model.state = try await model.request("/imports/pause", method: "POST", body: .object([:]))
+        assert(model.accounts.first(where: { $0.id == "native@example.com" })?["import"]["status"].string == "paused")
+        model.state = try await model.request("/settings/ai", method: "POST", body: .object(["baseUrl": .string("http://127.0.0.1:11434/v1"), "model": .string("native-fixture")]))
+        model.state = try await model.request("/settings/policy", method: "POST", body: .object(["folders": .object(["sent": .bool(true)]), "content": .object(["body": .bool(true), "contacts": .bool(false)])]))
+        model.state = try await model.request("/style/settings", method: "POST", body: .object(["enabled": .bool(true), "maxSamples": .number(50), "tokenBudget": .number(16000)]))
+        model.state = try await model.request("/style/preview", method: "POST", body: .object([:]))
+        let stylePreview = model.state["workspace"]["styleLearning"]["preview"]
+        assert(stylePreview["sampleCount"].number > 0 && stylePreview["estimatedTokens"].number <= 16000)
+        model.state = try await model.request("/style/generate", method: "POST", body: .object(["previewId": .string(stylePreview.id)]))
+        assert(model.state["workspace"]["styleLearning"]["preview"]["status"].string == "ready")
+        model.state = try await model.request("/style/apply", method: "POST", body: .object(["previewId": .string(stylePreview.id), "voice": .string("Reviewed native style.")]))
+        assert(model.state["workspace"]["styleLearning"]["profile"]["active"].bool)
+        model.state = try await model.request("/style/profile", method: "DELETE", body: .object([:]))
+        assert(model.state["workspace"]["styleLearning"]["profile"].isNull)
+        print("Native import controls and writing-style preview, review, save and delete checks passed.")
         print("Native client integration passed: 19 behaviors, permissions, both calendars, send recovery, multi-account routing, combined IDs, and disconnect isolation.")
     }
 }

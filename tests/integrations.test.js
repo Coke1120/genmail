@@ -29,3 +29,19 @@ test('AI responses are bounded before parsing even without a content-length head
   t.mock.method(globalThis, 'fetch', async () => new Response('x'.repeat(1024 * 1024 + 1)));
   await assert.rejects(runModel({ baseUrl: 'https://model.example/v1', model: 'test' }, 'write', [], 'hello'), /1 MB limit/);
 });
+
+test('model prompts keep preferred output and target translation languages separate with validated priority context', async t => {
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => { requests.push(JSON.parse(options.body)); return new Response(JSON.stringify({ choices: [{ message: { content: 'fixture response' } }] })); });
+  const ai = { baseUrl: 'http://localhost:11434/v1', model: 'fixture' }, messages = [{ id: 'one', subject: 'Subject', body: 'Body' }];
+  const options = { preferences: { language: '繁體中文', translationLanguage: '日本語' }, timeZone: 'Asia/Hong_Kong' };
+  await runModel(ai, 'briefing', messages, '', { ...options, structuredSummary: true });
+  await runModel(ai, 'translate', messages, '', options);
+  await runModel(ai, 'translate', messages, '', { preferences: { language: '繁體中文', translationLanguage: '' } });
+  assert.match(requests[0].messages[0].content, /preferred language \(繁體中文\)/);
+  assert.match(requests[0].messages[0].content, /P0: explicit emergency/);
+  assert.match(requests[0].messages[0].content, /Asia\/Hong_Kong/);
+  assert.equal(JSON.parse(requests[0].messages[1].content).emails[0].messageId, 'one');
+  assert.match(requests[1].messages[0].content, /target translation language \(日本語\)/);
+  assert.match(requests[2].messages[0].content, /target translation language \(繁體中文\)/);
+});

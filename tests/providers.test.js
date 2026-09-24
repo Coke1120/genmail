@@ -120,3 +120,24 @@ test('both native sending APIs encode Unicode and RFC reply headers without cont
   await assert.rejects(sendProviderMessage({ provider: 'google', email: 'me@example.com' }, { to: 'to@example.com\r\nBcc: victim@example.com', subject: 'Bad', body: 'Bad' }), /single line/);
   assert.equal(count, 2);
 });
+
+test('history pages use chosen folders and dates and reject foreign Graph continuation URLs', async t => {
+  const { fetchProviderPage } = await import('../server/providers.js');
+  const seen = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    seen.push({ url: new URL(url), options });
+    return new Response(JSON.stringify(String(url).includes('googleapis') ? { messages: [], nextPageToken: 'opaque token' } : { value: [], '@odata.nextLink': 'https://attacker.invalid/leak' }));
+  });
+  const options = { folder: 'sent', since: '2026-06-24T12:00:00.000Z', before: '2026-09-24T12:00:00.000Z' };
+  const google = await fetchProviderPage({ provider: 'google', accessToken: 'private' }, options);
+  assert.equal(google.nextCursor, 'opaque token');
+  assert.equal(seen[0].url.searchParams.get('labelIds'), 'SENT');
+  assert.match(seen[0].url.searchParams.get('q'), /after:\d+ before:\d+/);
+  await fetchProviderPage({ provider: 'google', accessToken: 'private' }, { ...options, cursor: google.nextCursor });
+  assert.equal(seen[1].url.searchParams.get('pageToken'), 'opaque token');
+  const graph = await fetchProviderPage({ provider: 'microsoft', accessToken: 'private' }, options);
+  assert.equal(seen[2].url.pathname, '/v1.0/me/mailFolders/sentitems/messages');
+  assert.match(seen[2].url.searchParams.get('$filter'), /^sentDateTime ge/);
+  await assert.rejects(fetchProviderPage({ provider: 'microsoft', accessToken: 'private' }, { ...options, cursor: graph.nextCursor }), /Invalid mailbox pagination/);
+  assert.equal(seen.length, 3);
+});

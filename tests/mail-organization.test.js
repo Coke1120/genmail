@@ -118,3 +118,23 @@ test('IMAP requires MOVE + UIDPLUS and a matching UID validity before writes, an
   await assert.rejects(listImapFolders(mail), /MOVE and UIDPLUS/);
   assert.equal(moves, 1);
 });
+
+test('IMAP history keeps folder-specific identity and refuses changed UIDVALIDITY across pages', async t => {
+  const { fetchImapPage } = await import('../server/integrations.js');
+  let validity = 55n;
+  t.mock.method(ImapFlow.prototype, 'connect', async function () { this.mailbox = { uidValidity: validity, exists: 60 }; });
+  t.mock.method(ImapFlow.prototype, 'logout', async () => {});
+  t.mock.method(ImapFlow.prototype, 'list', async () => [{ path: 'Sent Items', specialUse: '\\Sent' }]);
+  t.mock.method(ImapFlow.prototype, 'getMailboxLock', async (path, options) => { assert.ok(['INBOX', 'Sent Items'].includes(path)); assert.equal(options.readOnly, true); return { release() {} }; });
+  t.mock.method(ImapFlow.prototype, 'search', async (query, options) => { assert.equal(options.uid, true); return Array.from({ length: 60 }, (_, i) => i + 1); });
+  t.mock.method(ImapFlow.prototype, 'fetch', async function* (range) { for (const uid of range.split(',').map(Number)) yield { uid, flags: new Set(), size: 100, internalDate: new Date('2026-09-23T12:00:00Z') }; });
+  t.mock.method(ImapFlow.prototype, 'fetchOne', async () => ({ source: Buffer.from('From: a@example.com\r\nTo: b@example.com\r\nSubject: Sent sample\r\nDate: Wed, 23 Sep 2026 12:00:00 +0000\r\n\r\nHello, this is a useful writing sample from the account owner.') }));
+  const mail = { provider: 'imap', email: 'a@example.com', imapHost: 'fixture.invalid', imapPort: 993, password: 'fixture' };
+  const sent = await fetchImapPage(mail, { folder: 'sent', since: '2026-06-01T00:00:00Z', before: '2026-09-24T00:00:00Z' });
+  const inbox = await fetchImapPage(mail);
+  assert.equal(sent.messages.length, 50); assert.equal(sent.messages[0].folder, 'sent');
+  assert.notEqual(sent.messages[0].id, inbox.messages[0].id); assert.equal(sent.messages[0].remoteId, inbox.messages[0].remoteId);
+  assert.equal(sent.nextCursor.uid, 11);
+  validity = 56n;
+  await assert.rejects(fetchImapPage(mail, { folder: 'sent', cursor: sent.nextCursor }), /folder changed/);
+});

@@ -1,3 +1,5 @@
+import { createHistory, importOptions } from './history.js';
+import { createLearning } from './learning.js';
 import express from 'express';
 import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -7,7 +9,10 @@ import * as integrations from './integrations.js';
 import * as providers from './providers.js';
 import { normalizeFooter, preferencesFooter } from './footer.js';
 import { recipients } from './recipients.js';
-import { AI_BEHAVIORS, DEFAULT_PREFERENCES, DEFAULT_SKILLS } from '../shared/features.js';
+import { AI_BEHAVIORS, DEFAULT_PREFERENCES, DEFAULT_SKILLS, matchesAITrigger } from '../shared/features.js';
+import { checkUpdates } from './updates.js';
+import { createAutomation } from './automation.js';
+import { prioritySummary } from './summaries.js';
 import { resolvePolicy, updatePolicy, updatePreferences, requireBehavior, permittedMessages, redactMessage } from './policy.js';
 import { createWorkflowPlan } from './workflows.js';
 import { registerCalendarRoutes, calendarState } from './calendar-routes.js';
@@ -52,13 +57,15 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   let uiUrl;
   try { uiUrl = new URL(appUrl); } catch { throw new Error('APP_URL must be a localhost HTTP origin.'); }
   if (uiUrl.protocol !== 'http:' || !isLoopbackHost(uiUrl.host) || uiUrl.origin !== appUrl || uiUrl.username || uiUrl.password) throw new Error('APP_URL must be a localhost HTTP origin without a path.');
-  const api = { ...integrations, ...providers, ...services };
+  const api = { ...integrations, ...providers, checkUpdates, ...services };
   const app = express();
   const trustedOrigins = new Set([appUrl, `http://localhost:${port}`, `http://127.0.0.1:${port}`, 'http://localhost:5173', 'http://127.0.0.1:5173']);
   const oauthPending = new Map();
   const sending = new Map();
   const sendingDrafts = new Set();
   const previews = new Map();
+  const updateChecks = new Map();
+  const automaticAI = new Map();
   let mailboxBusy = false;
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -95,7 +102,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.use('/api', (req, res, next) => {
     const routePath = req.path.toLowerCase().replace(/\/+$/, '');
     const supplied = req.get('X-Genmail-Account');
-    const bound = ['POST', 'PATCH', 'DELETE'].includes(req.method) && /^\/(send|drafts|ai|sync|messages\/[^/]+(?:\/organize)?|workflows\/.*|skills(?:\/.*)?|workspace\/.*|account\/disconnect)$/.test(routePath);
+    const bound = ['POST', 'PATCH', 'DELETE'].includes(req.method) && /^\/(send|drafts|ai|sync|messages\/[^/]+(?:\/organize)?|workflows\/.*|imports\/.*|style\/.*|skills(?:\/.*)?|workspace\/.*|account\/disconnect)$/.test(routePath);
     if (bound && !validAccount(supplied) && !(routePath === '/sync' && supplied === 'all')) {
       return res.status(409).json({ error: 'Choose a connected mailbox before continuing. This account may have been disconnected.' });
     }
@@ -119,25 +126,29 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const mail = accounts[view] || config.mail || {};
     const ai = config.ai || {};
     const preferences = { ...DEFAULT_PREFERENCES, ...config.preferences };
-    const rows = account => store.listMessages(account).map(message => ownedMessage(account, message));
+    const rows = account => {
+      const summaries = automation.reports(account).filter(report => report.kind === 'arrival' && report.status === 'completed');
+      return store.listMessages(account).map(message => ownedMessage(account, { ...message, aiSummary: summaries.find(report => report.messageIds.includes(message.id)) || null }));
+    };
     const metadata = Object.values(accounts).map(connection => {
       const messages = store.listMessages(connection.email);
       return { id: connection.email, email: connection.email, mode: 'live', provider: connection.provider || 'imap', name: connection.email.split('@')[0],
         unread: messages.filter(message => message.folder === 'inbox' && !message.read).length,
         counts: Object.fromEntries(['inbox', 'starred', 'sent', 'drafts', 'archive', 'trash'].map(folder => [folder, messages.filter(message => folder === 'starred' ? message.starred && message.folder !== 'trash' : message.folder === folder).length])),
-        settings: safeMail(connection) };
+        settings: safeMail(connection), import: history.status(connection.email) };
     });
     return {
       features: AI_BEHAVIORS,
       account: { id: view, email: live ? view : view === 'all' ? '' : 'alex@genmail.example', name: view === 'all' ? 'All accounts' : preferences.displayName || (live ? view.split('@')[0] : 'Alex Morgan'), mode: view === 'all' ? 'combined' : live ? 'live' : 'demo', provider: live ? mail.provider || 'imap' : view },
       accounts: metadata,
+      syncErrors: config.backgroundSyncErrors || [],
       messages: view === 'all' ? Object.keys(accounts).flatMap(rows).sort((a, b) => b.date.localeCompare(a.date) || a.viewId.localeCompare(b.viewId)) : rows(view),
       settings: {
         mail: safeMail(mail),
         ai: { configured: !!(ai.baseUrl && ai.model), baseUrl: ai.baseUrl || 'http://127.0.0.1:11434/v1', model: ai.model || '', hasApiKey: !!ai.apiKey, temperature: ai.temperature ?? 0.3, maxTokens: ai.maxTokens ?? 1200 },
         policy: resolvePolicy(config.policy), preferences, footer: preferencesFooter(preferences), calendars: calendarState(config),
       },
-      workspace: workspace(view),
+      workspace: { ...workspace(view), styleLearning: learning.state(view), summaries: automation.reports(view), summaryOverflow: automation.overflow(view) },
     };
   }
   function getMessage(account, id) {
@@ -152,11 +163,19 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     try { return await work(); } finally { mailboxBusy = false; }
   }
   function importMessages(mail, messages) {
-    const imported = new Map(store.listMessages(mail.email).filter(item => !item.providerFolderId || item.providerFolderId === 'INBOX' || mail.provider !== 'imap').map(item => [item.remoteId || item.id, item]));
+    const remoteKey = item => mail.provider === 'imap' ? JSON.stringify([item.providerFolderId || 'INBOX', item.remoteId || item.id]) : item.remoteId || item.id;
+    const cached = store.listMessages(mail.email);
+    const imported = new Map(cached.map(item => [remoteKey(item), item]));
+    const localSent = new Map(cached.filter(item => item.id.startsWith('sent:') && !item.remoteId && item.messageId).map(item => [item.messageId, item]));
+    const newIDs = [];
     store.transaction(() => { for (const message of messages) {
-      const existing = imported.get(message.id);
-      store.upsertMessage(mail.email, { ...message, ...(existing ? { id: existing.id, remoteId: existing.remoteId, providerFolderId: existing.providerFolderId, providerFolderName: existing.providerFolderName, folder: existing.folder, read: existing.read, starred: existing.starred, labels: existing.labels } : {}) });
+      const existing = imported.get(remoteKey(message)) || (message.folder === 'sent' && message.fromEmail?.toLowerCase() === mail.email.toLowerCase() && localSent.get(message.messageId));
+      if (!existing && !store.getMessage(mail.email, message.id)) newIDs.push(message.id);
+      // Keep the original delivery fingerprint on locally sent records when attaching the provider copy.
+      store.upsertMessage(mail.email, { ...(existing?.id?.startsWith('sent:') ? { ...message, ...existing } : message), ...(existing ? { id: existing.id, remoteId: existing.remoteId || message.remoteId || message.id, providerFolderId: existing.providerFolderId || message.providerFolderId, providerFolderName: existing.providerFolderName || message.providerFolderName, folder: existing.folder, read: existing.read, starred: existing.starred, labels: existing.labels } : {}) });
+      if (existing) localSent.delete(message.messageId);
     } });
+    return newIDs;
   }
   async function currentMail(account) {
     const mail = connections()[account];
@@ -172,7 +191,33 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     return mail.provider && mail.provider !== 'imap' ? api.fetchProviderMessages(mail) : api.fetchImapMessages(mail);
   }
 
+  const fetchPage = (mail, options) => (mail.provider && mail.provider !== 'imap' ? api.fetchProviderPage : api.fetchImapPage)(mail, options);
+  const history = createHistory({ store, connection: account => connections()[account], currentMail, fetchPage, importMessages, lock: mailboxOperation, ...(services.now ? { now: services.now } : {}) });
+  const learning = createLearning({ store, connection: account => connections()[account], runModel: (...args) => api.runModel(...args), ...(services.now ? { now: services.now } : {}) });
+  app.post('/api/imports/:action', (req, res) => {
+    if (!connections()[req.mailAccount]) fail('Choose a connected mailbox.', 409);
+    if (req.params.action === 'start') history.start(req.mailAccount, req.body);
+    else history.control(req.mailAccount, req.params.action);
+    res.json(state(req.mailAccount));
+  });
+  app.post('/api/style/settings', (req, res) => { learning.updateSettings(req.mailAccount, req.body); res.json(state(req.mailAccount)); });
+  app.post('/api/style/preview', (req, res) => { learning.prepare(req.mailAccount); res.json(state(req.mailAccount)); });
+  app.post('/api/style/generate', async (req, res) => { await learning.generate(req.mailAccount, req.body?.previewId); res.json(state(req.mailAccount)); });
+  app.post('/api/style/apply', (req, res) => { learning.apply(req.mailAccount, req.body); res.json(state(req.mailAccount)); });
+  app.delete('/api/style/profile', (req, res) => { learning.clear(req.mailAccount); res.json(state(req.mailAccount)); });
+
   app.get('/api/state', (req, res) => res.json(state(req.mailAccount)));
+  app.get('/api/updates', async (req, res) => {
+    if (req.query.includePrereleases !== undefined && !['true', 'false'].includes(req.query.includePrereleases)) fail('Choose a valid release channel.');
+    const includePrereleases = req.query.includePrereleases === 'true';
+    let cached = updateChecks.get(includePrereleases);
+    if (!cached || cached.expiresAt < Date.now()) {
+      cached = { result: api.checkUpdates({ includePrereleases }), expiresAt: Date.now() + 60000 };
+      updateChecks.set(includePrereleases, cached);
+    }
+    try { res.json(await cached.result); }
+    catch (error) { if (updateChecks.get(includePrereleases) === cached) updateChecks.delete(includePrereleases); throw error; }
+  });
   function selectAccount(account) {
     if (account !== 'all' && !validAccount(account)) fail('Choose a connected mailbox.', 409);
     store.setSettings({ activeAccount: account, ...(connections()[account] ? { mail: connections()[account] } : {}) });
@@ -203,10 +248,11 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const sameDestination = existing?.email === address && existing.provider === 'imap' && Object.entries(hosts).every(([key, value]) => existing[key] === value);
     const password = input.password || (sameDestination ? existing.password : '');
     const mail = { provider: 'imap', email: address, password: text(password, 'Mailbox password', 4096), ...hosts };
+    const options = input.importOptions === undefined ? null : importOptions(input.importOptions);
     let messages;
-    try { await api.verifySmtp(mail); messages = await fetchMessages(mail); }
+    try { await api.verifySmtp(mail); messages = options ? (await fetchPage(mail, { folder: options.inbox ? 'inbox' : 'sent', since: new Date(Date.now() - 86400000).toISOString() })).messages : await fetchMessages(mail); }
     catch { fail('Mailbox connection failed. Check the hosts, ports, and app password. IMAP requires TLS; SMTP requires TLS or STARTTLS.', 502); }
-    store.transaction(() => { importMessages(mail, messages); saveConnection(mail, true); });
+    store.transaction(() => { if (!options) importMessages(mail, messages); saveConnection(mail, true); if (options) history.start(address, options); });
     res.json(state(address));
   }));
   function modelSettings(input) {
@@ -234,7 +280,9 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     } catch { fail('The connection test failed. Check your base URL, model ID, and API key.', 502); }
   });
   app.post('/api/settings/policy', (req, res) => {
-    store.setSettings({ policy: updatePolicy(settings().policy, req.body) });
+    const before = resolvePolicy(settings().policy), policy = updatePolicy(settings().policy, req.body);
+    store.setSettings({ policy });
+    if (JSON.stringify(before.summarySchedule) !== JSON.stringify(policy.summarySchedule) || (!before.enabled && policy.enabled) || (!before.triggers.scheduledSummary && policy.triggers.scheduledSummary) || (!before.behaviors.briefing && policy.behaviors.briefing)) automation.resetSchedules();
     previews.clear();
     res.json(state(req.mailAccount));
   });
@@ -243,19 +291,27 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     store.setSettings({ preferences: updatePreferences(settings().preferences, req.body) });
     res.json(state(req.mailAccount));
   });
-  app.post('/api/sync', async (req, res) => mailboxOperation(async () => {
-    const accounts = req.mailAccount === 'all' ? Object.keys(connections()) : req.mailAccount === 'demo' ? [] : [req.mailAccount];
+  async function syncAccounts(accounts) {
     const syncErrors = [];
     for (const account of accounts) {
       try {
         const mail = await currentMail(account);
-        importMessages(mail, await fetchMessages(mail));
+        const options = history.options(account);
+        const messages = options ? (await Promise.all(['inbox', 'sent'].filter(folder => options[folder]).map(folder => fetchPage(mail, { folder, since: history.status(account).since })))).flatMap(page => page.messages) : await fetchMessages(mail);
+        store.transaction(() => automation.arrivals(account, importMessages(mail, messages).filter(id => !history.status(account) || store.getMessage(account, id)?.date >= history.status(account).before)));
       } catch {
-        if (req.mailAccount !== 'all') fail('Mailbox sync failed. Check your connection or reconnect in Settings.', 502);
         syncErrors.push({ accountId: account, error: 'Sync failed. Check your connection or reconnect this account in Settings.' });
       }
     }
+    store.setSettings({ backgroundSyncErrors: [...(settings().backgroundSyncErrors || []).filter(item => !accounts.includes(item.accountId)), ...syncErrors] });
+    return syncErrors;
+  }
+  app.post('/api/sync', async (req, res) => mailboxOperation(async () => {
+    const accounts = req.mailAccount === 'all' ? Object.keys(connections()) : req.mailAccount === 'demo' ? [] : [req.mailAccount];
+    const syncErrors = await syncAccounts(accounts);
+    if (syncErrors.length && req.mailAccount !== 'all') fail('Mailbox sync failed. Check your connection or reconnect in Settings.', 502);
     res.json({ ...state(req.mailAccount), syncErrors });
+    setImmediate(() => { void automation.tick().catch(() => {}); });
   }));
 
   app.post('/api/oauth/:provider/start', (req, res) => {
@@ -268,7 +324,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const browserToken = randomBytes(32).toString('hex');
     for (const [key, value] of oauthPending) if (value.expiresAt < Date.now()) oauthPending.delete(key);
     if (oauthPending.size >= 20) fail('Too many pending connections. Wait a few minutes and try again.', 429);
-    oauthPending.set(pending.state, { ...pending, provider, redirectUri, browserToken, expiresAt: Date.now() + 10 * 60 * 1000 });
+    oauthPending.set(pending.state, { ...pending, importOptions: req.body?.importOptions === undefined ? null : importOptions(req.body.importOptions), provider, redirectUri, browserToken, expiresAt: Date.now() + 10 * 60 * 1000 });
     res.json({ url: `http://localhost:${port}/api/oauth/${provider}/authorize?state=${encodeURIComponent(pending.state)}` });
   });
   app.get('/api/oauth/:provider/authorize', (req, res) => {
@@ -293,10 +349,10 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
         let mail, messages;
         try {
           mail = await api.oauthFinish(pending.provider, { code, verifier: pending.verifier, config: pending.config, redirectUri: pending.redirectUri });
-          messages = await fetchMessages(mail);
+          messages = pending.importOptions ? [] : await fetchMessages(mail);
         } catch { fail('The provider connection failed. Check your app registration and permissions, then try again.'); }
         mail.email = canonicalAddress(email(mail.email));
-        store.transaction(() => { importMessages(mail, messages); saveConnection(mail, true); });
+        store.transaction(() => { importMessages(mail, messages); saveConnection(mail, true); if (pending.importOptions) history.start(mail.email, pending.importOptions); });
       });
       redirect.searchParams.set('connected', pending.provider);
     } catch (error) { redirect.searchParams.set('connectionError', error.status ? error.message : 'Connection failed. Try again from Settings.'); }
@@ -459,11 +515,18 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     }
     return { config, policy, feature, account, messages, skill };
   }
-  app.post('/api/ai', async (req, res) => {
-    const input = req.body || {};
+  async function assistance(input, owner, summaryIDs = null) {
     const { action, prompt = '' } = input;
     text(prompt, 'AI instructions', 2000, !['ask', 'write'].includes(action));
-    const { config, policy, feature, account, messages, skill } = contextFor(action, input, req.mailAccount);
+    const context = contextFor(action, input, owner);
+    const { config, policy, feature, account, skill } = context;
+    let messages = context.messages;
+    if (summaryIDs) {
+      if (!['summary', 'briefing'].includes(action) || summaryIDs.length > policy.maxMessages) fail('Invalid summary context.');
+      messages = summaryIDs.map(id => getMessage(account, id));
+      if (messages.some(message => !policy.folders[message.folder] || ['drafts', 'trash'].includes(message.folder))) fail('Summary context is no longer permitted.', 403);
+      messages = messages.map(message => redactMessage(message, policy));
+    }
     if (feature.mock) fail('Use the workflow preview for simulated behaviors.');
     const brain = workspace(account).brain;
     const useBrain = policy.behaviors.memory && policy.content.contacts && policy.content.sender && policy.content.body && policy.content.subject &&
@@ -471,17 +534,38 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
         const folder = store.getMessage(account, id)?.folder;
         return policy.folders[folder] && (!skill?.folders || skill.folders[folder]);
       });
-    const options = { preferences: { ...DEFAULT_PREFERENCES, ...config.preferences }, brain: useBrain ? brain : null };
+    const options = { preferences: { ...DEFAULT_PREFERENCES, ...config.preferences }, brain: useBrain ? brain : null, styleVoice: ['reply', 'write', 'rewrite'].includes(action) && (!skill || skill.folders.sent) ? learning.voice(account) : '', structuredSummary: !!summaryIDs, timeZone: policy.summarySchedule.timeZone };
     const instructions = skill ? `${skill.instructions}\n\n${prompt}` : prompt;
     if (!config.ai?.model || !config.ai?.baseUrl) {
       if (account !== 'demo') fail('Choose an AI model in Settings to use assistance with your mailbox.', 409);
-      return res.json({ text: api.demoAssistance(action, messages, instructions, options), source: 'demo' });
+      const text = api.demoAssistance(action, messages, instructions, options);
+      return { ...(summaryIDs ? prioritySummary(text, messages) : { text }), source: 'demo' };
     }
     let result;
     try { result = await api.runModel(config.ai, action, messages, instructions, options); }
     catch (error) { fail(error.message?.startsWith('The AI provider returned') ? error.message : 'Could not reach the AI model or read its response. Check your endpoint and model, then try again.', 502); }
-    if (!validAccount(account) || connections(config)[account]?.connectionId !== connections()[account]?.connectionId || JSON.stringify(policy) !== JSON.stringify(resolvePolicy(settings().policy)) || (skill && JSON.stringify(skill) !== JSON.stringify(workspace(account).skills.find(item => item.id === skill.id)))) fail('The account or AI permissions changed while this request was running. Its response was discarded.', 409);
-    res.json({ text: result, source: 'model' });
+    if (options.styleVoice && options.styleVoice !== learning.voice(account)) fail('Writing style changed while this request was running. Its response was discarded.', 409);
+    if (!validAccount(account) || connections(config)[account]?.connectionId !== connections()[account]?.connectionId || JSON.stringify(config.ai) !== JSON.stringify(settings().ai) || JSON.stringify(config.preferences) !== JSON.stringify(settings().preferences) || JSON.stringify(policy) !== JSON.stringify(resolvePolicy(settings().policy)) || (input.trigger && !matchesAITrigger(policy, input.trigger, store.getMessage(account, input.messageId))) || (skill && JSON.stringify(skill) !== JSON.stringify(workspace(account).skills.find(item => item.id === skill.id)))) fail('The account, model or AI permissions changed while this request was running. Its response was discarded.', 409);
+    return { ...(summaryIDs ? prioritySummary(result, messages) : { text: result }), source: 'model' };
+  }
+  app.post('/api/ai', async (req, res) => {
+    const input = req.body || {}, account = req.mailAccount;
+    if (input.trigger !== undefined) {
+      const action = { onOpen: 'summary', onReply: 'reply' }[input.trigger];
+      if (typeof input.trigger !== 'string' || !action || input.action !== action || input.prompt || input.draftText !== undefined) fail('Invalid automatic AI trigger.');
+      const config = settings(), message = getMessage(account, input.messageId), policy = resolvePolicy(config.policy);
+      if (!matchesAITrigger(policy, input.trigger, message)) return res.json({ skipped: true });
+      // Coalesce overlapping UI requests; retain no automatic result after completion.
+      const key = createHash('sha256').update(JSON.stringify([account, input.trigger, message.id, message.body, message.subject, message.starred, message.folder, config.ai, config.preferences, policy, connections(config)[account]?.connectionId])).digest('hex');
+      let pending = automaticAI.get(key);
+      if (!pending) {
+        if (automaticAI.size >= 4) fail('AI is busy. Try again after the current requests finish.', 429);
+        pending = assistance(input, account); automaticAI.set(key, pending);
+      }
+      try { return res.json(await pending); }
+      finally { if (automaticAI.get(key) === pending) automaticAI.delete(key); }
+    }
+    res.json(await assistance(input, account));
   });
 
   app.post('/api/workflows/preview', (req, res) => {
@@ -572,6 +656,15 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     saveWorkspace(account, { [collection]: current[collection].map(record => record.id === id ? { ...record, ...patch } : record) });
     res.json(state(req.mailAccount));
   });
+  const automation = createAutomation({ store, accounts: () => Object.keys(connections()), connection: account => connections()[account],
+    generate: (account, kind, ids) => assistance({ action: kind === 'arrival' ? 'summary' : 'briefing', messageId: ids[0] }, account, ids),
+    sync: () => mailboxOperation(() => syncAccounts(Object.keys(connections()))),
+    maintenance: async isStopped => { await history.tick(); if (!isStopped()) await learning.tick(); },
+    ...(services.now ? { now: services.now } : {}),
+  });
+  app.locals.automation = automation;
+  app.locals.history = history;
+  app.locals.learning = learning;
   registerCalendarRoutes(app, { store, port, appUrl, services });
   app.get('/api/health', (req, res) => {
     store.getSettings();

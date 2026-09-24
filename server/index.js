@@ -10,7 +10,7 @@ const projectDirectory = fileURLToPath(new URL('../', import.meta.url));
 if (process.env.NODE_ENV === 'production' && !existsSync(resolve(projectDirectory, 'dist/index.html'))) throw new Error('Build Morrow Mail before production startup: npm run build.');
 const store = createStore(resolve(process.env.DATA_DIR || resolve(projectDirectory, 'data')));
 const app = createApp({ store, port, appUrl: process.env.APP_URL || `http://localhost:${port}` });
-const server = app.listen(port, '127.0.0.1', () => console.log(`Morrow Mail is running at http://localhost:${port}`));
+const server = app.listen(port, '127.0.0.1', () => { app.locals.automation.start(); console.log(`Morrow Mail is running at http://localhost:${port}`); });
 server.on('error', (error) => {
   console.error(error.code === 'EADDRINUSE' ? `Port ${port} is in use. Stop the other server or set PORT.` : 'Unable to start Morrow Mail.');
   store.close();
@@ -22,6 +22,7 @@ let stopping = false;
 function shutdown() {
   if (stopping) return;
   stopping = true;
+  app.locals.automation.stop();
   server.close(() => { store.close(); process.exit(0); });
   // Let in-flight provider requests finish; avoid hanging forever on an idle client.
   setTimeout(() => { server.closeAllConnections(); store.close(); process.exit(0); }, 65_000).unref();
