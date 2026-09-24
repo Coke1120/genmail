@@ -6,6 +6,7 @@
 // requesting the full fixture size removes all derived documents, including demo.
 // Rebuild observation has a fixed 180-second limit.
 // --profileDir=test-results/rust-service-profile enables macOS native stack sampling;
+// --profileSeconds=1..180 sets its duration (default 2; profiling adds overhead).
 // --binary=/absolute/path/to/release/morrow-service selects a preserved release build.
 import assert from 'node:assert/strict';
 import { fork, spawn, execFileSync } from 'node:child_process';
@@ -208,7 +209,7 @@ async function run(size) {
       mkdirSync(args.profileDir, { recursive: true });
       const path = join(args.profileDir, `rust-service-${size}-${foregroundPath.endsWith('revision') ? 'revision' : 'state'}-${service.pid}.sample.txt`);
       sampler = new Promise((resolve, reject) => {
-        const child = spawn('/usr/bin/sample', [String(service.pid), '2', '1', '-file', path], { stdio: 'ignore' });
+        const child = spawn('/usr/bin/sample', [String(service.pid), String(args.profileSeconds || 2), '1', '-file', path], { stdio: 'ignore' });
         child.once('error', reject); child.once('exit', code => code === 0 ? resolve(path) : reject(Error(`Native sample failed (${code})`)));
       }).then(path => ({ path }), error => ({ error }));
     }
@@ -232,7 +233,9 @@ async function run(size) {
       }
       previousCoverage = coverage; previousMatches = result.data.total;
       trace.push({ startedMs, foregroundCompletedMs, elapsedMs: clock() - rebuildStart, foregroundPath, foregroundMs: state.ms, ...(foregroundPath === '/state' ? { stateMs: state.ms, stateBytes: state.bytes } : {}), foregroundPhases: state.phases, searchMs: result.ms, searchPhases: result.phases, indexedMessages: coverage, invoiceMatches: result.data.total, warning: result.data.warning, cpuDeltaMs: Math.max(0, process.cpuMs - before.cpuMs), ...process });
-      if (coverage === size) { assert.equal(result.data.total, Math.ceil(size / 10)); rebuildComplete = true; break; }
+      // Coverage describes connected real accounts; the rebuild warning also covers
+      // demo/other accounts. Do not stop before those derived rows are restored.
+      if (coverage === size && result.data.warning === '') { assert.equal(result.data.total, Math.ceil(size / 10)); rebuildComplete = true; break; }
       phase = 'between requests';
       await delay(Math.max(0, Math.min(100, rebuildTimeoutMs - (clock() - rebuildStart))));
     }
@@ -265,6 +268,7 @@ if (args.child) {
   assert(args.missingRows === undefined || (Number.isInteger(Number(args.missingRows)) && Number(args.missingRows) >= 1 && sizes.every(size => Number(args.missingRows) <= size)), '--missingRows must be an integer between 1 and every fixture size');
   assert(!args.rebuildMode || ['state', 'revision'].includes(args.rebuildMode));
   assert(!args.probeRevision || ['true', 'false'].includes(args.probeRevision));
+  assert(args.profileSeconds === undefined || (args.profileDir && Number.isInteger(Number(args.profileSeconds)) && Number(args.profileSeconds) >= 1 && Number(args.profileSeconds) <= 180), '--profileSeconds requires --profileDir and an integer from 1 to 180');
   const source = resolve(args.binary || join(root, 'rust/target/release/morrow-service' + (process.platform === 'win32' ? '.exe' : '')));
   const snapshotDirectory = mkdtempSync(join(tmpdir(), 'morrow-release-benchmark-')), executable = join(snapshotDirectory, 'morrow-service' + (process.platform === 'win32' ? '.exe' : ''));
   try {
@@ -276,7 +280,7 @@ if (args.child) {
     for (const size of sizes) {
       process.stderr.write(`Rust service benchmark: ${size} fictional messages\n`);
       results.push(await new Promise((resolve, reject) => {
-        const child = fork(fileURLToPath(import.meta.url), [`--child=${size}`, `--idleSeconds=${idleSeconds}`, `--executable=${executable}`, `--rebuildMode=${args.rebuildMode || 'state'}`, `--probeRevision=${args.probeRevision || 'false'}`, ...(args.missingRows === undefined ? [] : [`--missingRows=${args.missingRows}`]), ...(profileDirectory ? [`--profileDir=${profileDirectory}`] : [])], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+        const child = fork(fileURLToPath(import.meta.url), [`--child=${size}`, `--idleSeconds=${idleSeconds}`, `--executable=${executable}`, `--rebuildMode=${args.rebuildMode || 'state'}`, `--probeRevision=${args.probeRevision || 'false'}`, ...(args.missingRows === undefined ? [] : [`--missingRows=${args.missingRows}`]), ...(profileDirectory ? [`--profileDir=${profileDirectory}`, `--profileSeconds=${args.profileSeconds || 2}`] : [])], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
         let result;
         child.on('message', value => { result = value; }); child.once('error', reject);
         child.once('exit', code => code === 0 && result ? resolve(result) : reject(Error(`Rust benchmark fixture failed (${code})`)));
@@ -287,7 +291,7 @@ if (args.child) {
       platform: platform(), os: release(), architecture: process.arch, cpu: cpus()[0]?.model, logicalCPUs: cpus().length, totalMemoryBytes: totalmem(), freeMemoryBytesAtEnd: freemem(), driverNode: process.version,
       fixture: 'Same mail-v1 corpus as benchmark-mail.js: two fictional accounts, colliding IDs, mixed Chinese/English, 1024-code-unit bodies (UTF-8 sizes reported); no providers or models.',
       method: `Node writer closes before Rust starts. An immutable copy of the actual release executable starts through its private stdin pipe. Migration startup includes backup/schema open of the Node-produced current index; restart uses that migrated workspace. Each operation records first request plus five warm requests; nearest-rank p50/p95 uses warm samples only. RSS and cumulative CPU are sampled from the Rust service PID, excluding the Node fixture/HTTP driver. Idle samples issue no HTTP requests. A stopped-process fixture mutation removes ${args.missingRows === undefined ? 'min(size,1000)' : Number(args.missingRows)} selected-account derived rows. An explicit --missingRows equal to the fixture size deletes all derived documents, including any other accounts; the default preserves other accounts. Each result reports removed and retained counts and whether this is full index loss. Rebuild observation is bounded to 180 seconds; a timeout preserves progress in this report and exits unsuccessfully. Mailbox metadata and monotonically increasing search coverage/expected invoice identities are verified throughout.`,
-      profiling: { rebuildForeground: args.rebuildMode || 'state', concurrentRevisionProbes: args.probeRevision === 'true', nativeSampling: !!args.profileDir, note: 'Header timing includes client scheduling, network, server execution and DB queue; it does not by itself isolate server phases. Concurrent revision probes share the service DB queue. Optional macOS sampling and probes change workload and can add overhead.' },
+      profiling: { rebuildForeground: args.rebuildMode || 'state', concurrentRevisionProbes: args.probeRevision === 'true', nativeSampling: !!args.profileDir, nativeSampleSeconds: args.profileDir ? Number(args.profileSeconds || 2) : 0, note: 'Header timing includes client scheduling, network, server execution and DB queue; it does not by itself isolate server phases. Concurrent revision probes share the service DB queue. Optional macOS sampling and probes change workload and can add overhead. The sampler can continue observing the idle service after rebuild completes; that wait is excluded from reported rebuild completion time.' },
       limitations: 'No UI, whole-app, real-account, external-model, or OS cold-cache claims. Rebuild results apply only to the reported missing-row counts and body sizes; partial rebuild cases do not establish full-index-loss performance. Sampled RSS is not a guaranteed peak. CPU timer resolution is OS-dependent; zero small deltas can mean below-resolution work. Five warm samples provide a smoke benchmark, not a latency-distribution acceptance study. Concurrent developer activity and shared filesystem cache can affect timings.', results };
     const output = resolve(args.output || join(root, 'test-results/migration-rust-service.json')); mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, JSON.stringify(report, null, 2) + '\n'); process.stdout.write(`Saved ${output}\n`);
     if (results.some(result => !result.checks.indexRebuildCompleted)) { process.stderr.write('Background indexing exceeded the 180-second limit; progress was saved.\n'); process.exitCode = 1; }

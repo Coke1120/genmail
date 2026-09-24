@@ -1516,6 +1516,10 @@ mod download_tests {
             uuid::Uuid::new_v4()
         ));
         fs::create_dir(&root).unwrap();
+        // Keep the ordinary absolute path for the unchanged Node-era validator.
+        // Windows canonicalize returns a verbatim path that Node's JS realpathSync
+        // root traversal cannot handle. Rust installation checks still use it.
+        let node_root = root.clone();
         let root = fs::canonicalize(root).unwrap();
         let archive_root = if platform == "macos-arm64" {
             "Morrow Mail.app"
@@ -1622,11 +1626,14 @@ mod download_tests {
             serde_json::to_vec(&json!({"version":"99.0.0","platforms":platforms})).unwrap();
         let signature = STANDARD.encode(key.sign(&manifest).to_bytes()).into_bytes();
         // Validate the new metadata/layout with the unchanged Node-era validator too.
+        let node_incoming = node_root.join("incoming").join(archive_root);
+        assert!(node_incoming.is_absolute());
+        assert_eq!(fs::canonicalize(&node_incoming).unwrap(), incoming);
         let script = "const {validatePackage}=await import('./server/update-installer.js');await validatePackage(process.argv[1],process.argv[2],'99.0.0');";
         let mut node = clean_command(if cfg!(windows) { "node.exe" } else { "node" });
         node.current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
             .args(["--input-type=module", "-e", script])
-            .arg(&incoming)
+            .arg(&node_incoming)
             .arg(platform);
         fixture_command(
             "validate fixture with the original Node updater",

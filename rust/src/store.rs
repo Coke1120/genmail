@@ -322,7 +322,11 @@ impl Store {
                     store.upsert("demo", &message)?;
                 }
             }
-            if store.index_remaining()? == 0 { store.conn.execute("INSERT OR IGNORE INTO search_meta VALUES(1)", [])?; }
+            if store.index_remaining()? == 0 {
+                store.conn.execute("INSERT OR IGNORE INTO search_meta VALUES(1)", [])?;
+            } else {
+                store.conn.execute("DELETE FROM search_meta", [])?;
+            }
             Ok(())
         })?;
         Ok(store)

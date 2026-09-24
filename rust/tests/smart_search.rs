@@ -114,6 +114,26 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+#[tokio::test]
+async fn empty_reconciliation_does_not_start_a_write_transaction() {
+    let fixture = Fixture::new().await;
+    fixture
+        .app()
+        .db(|db| {
+            for enabled in [false, true] {
+                db.set_settings(&json!({"searchAI":{"enabled":enabled}}))?;
+                smart_search::reconcile(db)?;
+                db.conn.execute_batch("PRAGMA query_only=ON")?;
+                let result = smart_search::reconcile(db);
+                db.conn.execute_batch("PRAGMA query_only=OFF")?;
+                result?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 async fn request(app: &App, path: &str, body: Option<Value>, owner: &str) -> (u16, Value) {
     let mut headers = HeaderMap::new();
     if !owner.is_empty() {

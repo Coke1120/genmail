@@ -161,7 +161,16 @@ fn partial_index_keeps_all_metadata_pages_consistent_during_backfill() {
             [&owners[0]],
         )
         .unwrap();
-    db.conn.execute("DELETE FROM search_meta", []).unwrap();
+    // A crash/corrupt derived table can leave its old completion marker behind.
+    drop(db);
+    let db = Store::open(&root).unwrap();
+    assert_eq!(
+        db.conn
+            .query_row("SELECT count(*) FROM search_meta", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert_eq!(pages::stats(&db, &owners).unwrap(), stats);
     for (i, sort) in sorts.iter().enumerate() {
         assert_eq!(

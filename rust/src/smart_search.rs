@@ -202,6 +202,16 @@ pub fn reconcile(db: &Store) -> Result<()> {
             &json!({"searchScope":scope,"searchGeneration":uuid::Uuid::new_v4().to_string()}),
         )?;
     }
+    // SQLite's unconditional DELETE dirties an empty table too. Keep idle
+    // reconciliation read-only after recording any permission generation change.
+    if !db
+        .conn
+        .query_row("SELECT EXISTS(SELECT 1 FROM search_vectors)", [], |row| {
+            row.get::<_, bool>(0)
+        })?
+    {
+        return Ok(());
+    }
     let value = config(&settings);
     let identity = stamp(&settings);
     let policy = policy::resolve(&settings["policy"]);
