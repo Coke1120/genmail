@@ -193,7 +193,16 @@ await delay(300); assert.equal(JSON.parse(readFileSync(${JSON.stringify(join(bac
   const previous = readdirSync(join(directory, 'installed')).filter(name => name.startsWith('.morrow-update-')).map(name => join(directory, 'installed', name, 'previous', relativeBackend, 'package.json'));
   assert.equal(previous.length, 1);
   assert.equal(JSON.parse(readFileSync(previous[0])).version, '0.0.1');
-  for (const [file, content] of Object.entries(recovery)) assert.equal(readFileSync(join(workspace, file), 'utf8'), content, `${file} was changed by the upgrade.`);
+  for (const [file, content] of Object.entries(recovery)) {
+    const actual = readFileSync(join(workspace, file), 'utf8');
+    if (file === 'client-state.json') {
+      // The real UI may persist new preferences on launch. Every pre-existing
+      // value, including the serialized calendar request/payload, must be exact.
+      const state = JSON.parse(actual);
+      for (const [key, value] of Object.entries(JSON.parse(content))) assert.equal(state[key], value, `${key} was changed by the upgrade.`);
+    } else assert.equal(actual, content, `${file} was changed by the upgrade.`);
+  }
+  const clientStateAfterRestart = readFileSync(join(workspace, 'client-state.json'), 'utf8');
   assert.equal(digest(join(workspace, 'encryption.key')), keyDigest);
   const verifyRecords = directory => {
     const restored = createStore(directory);
@@ -204,7 +213,7 @@ await delay(300); assert.equal(JSON.parse(readFileSync(${JSON.stringify(join(bac
       assert.deepEqual(restored.getMessage(draftOwner, draft.id), draft, 'The unconfirmed draft, delivery ID, To/Cc/Bcc, body and footer must survive.');
       assert.equal(restored.getMessage('demo', draft.id), null, 'The retained outbox must not migrate to another account.');
     } finally { restored.close(); }
-    for (const file of ['pending-calendar.json', 'client-state.json']) assert.equal(readFileSync(join(directory, file), 'utf8'), recovery[file], `${file} recovery ID and full reviewed payload must survive.`);
+    for (const file of ['pending-calendar.json', 'client-state.json']) assert.equal(readFileSync(join(directory, file), 'utf8'), file === 'client-state.json' ? clientStateAfterRestart : recovery[file], `${file} recovery ID and full reviewed payload must survive.`);
     assert.equal(digest(join(directory, 'encryption.key')), keyDigest);
   };
   verifyRecords(workspace);

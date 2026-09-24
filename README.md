@@ -152,7 +152,7 @@ Rust candidate bundles contain `morrow-service` instead of a backend Node runtim
 
 On the first Rust open, the service locks the workspace against both Rust and legacy SQLite writers, verifies the existing key, and makes a consistent backup before migration. Mail, drafts, send-review records, calendar retry IDs and the AES-256-GCM settings format are preserved. It never restores an old database automatically during binary rollback. Interrupted paid jobs stop for review; legacy semantic vectors require a reviewed rebuild.
 
-For a Rust candidate backup, quit the app and run its bundled executable with **absolute** workspace and new destination paths:
+The macOS Back Up Workspace control creates a consistent snapshot while the service runs. For a command-line Rust candidate backup, quit the app and run its bundled executable with **absolute** workspace and new destination paths:
 
 ```sh
 '/path/to/Morrow Mail.app/Contents/Resources/morrow-service' --backup '/absolute/workspace' '/absolute/new-backup'
