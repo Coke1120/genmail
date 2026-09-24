@@ -2,7 +2,7 @@
 
 日期：2026-09-24
 
-狀態：2026-09-25 已實作 M0 量測工具、M1 分頁介面、M2 唯讀試點及 M3–M5 完整 Rust service 候選版本。預設正式套件仍使用 Node，待跨平台驗收與明確切換確認；M6 依本計劃的 M5 穩定條件另行評估。詳見 [相容性清單](RUST_MIGRATION_INVENTORY.md) 與 [實際驗證記錄](../VERIFICATION.md)。
+狀態：2026-09-25 已實作 M0 量測工具、M1 分頁介面、M2 唯讀試點及 M3–M5 完整 Rust service 候選版本。同一 commit 的 macOS／Windows Rust 桌面建置、實際升級與備份還原自動化驗收已通過；預設正式套件仍使用 Node，待其餘發佈驗收與明確切換確認。M6 依本計劃的 M5 穩定條件另行評估。詳見 [相容性清單](RUST_MIGRATION_INVENTORY.md) 與 [實際驗證記錄](../VERIFICATION.md)。
 
 本計劃保留 macOS 原生 SwiftUI 介面，逐步將共用 Node.js 服務遷移至 Rust。Windows 先保留 React / Electron，待 Rust 後端穩定後，另行評估 React / Tauri。Node.js 仍可用於 React 建置；「移除 Node.js」指最終桌面產品不再需要捆綁或啟動 Node.js runtime。
 
@@ -103,7 +103,7 @@ Rust 先使用一個 Cargo package、按責任劃分模組；不預先建立多�
 驗收：
 
 - [x] 每個預計遷移模組均有對應呼叫者與相容性要求；見 RUST_MIGRATION_INVENTORY.md。
-- [ ] baseline 可在 Mac 與 Windows fixture workspace 重現。
+- [x] 同一 mail-v1 corpus 的 Node baseline 可在 Mac 與 Windows fixture workspace 重現；CI 保存 1,000／10,000／50,000 封量測，硬體與平台結果分開記錄。
 - [x] 搜尋語法、繁簡處理、範圍、分頁、智慧搜尋授權及失效規則已有測試依據；見既有 search tests 與新增 Rust 差異測試。
 
 ### M1 — 改善資料流，保留 Node.js
@@ -123,7 +123,7 @@ Rust 先使用一個 Cargo package、按責任劃分模組；不預先建立多�
 - [x] 新版兩個介面使用有界 metadata 頁面；1,000／10,000／50,000 封 fixture 均不傳送未開啟正文。舊 API 相容路徑仍保留。
 - [ ] 所有原有排序、跨帳戶檢視、搜尋分頁及讀取正文通過兩個介面的回歸檢查。
 - [ ] 大型 fixture 不再依賴提高回應大小上限；刷新、索引及慢帳戶情境下，UI 回應與資料正確性達到記錄的驗收門檻。
-- [ ] 記錄相對 M0 的改善，確認剩餘瓶頸；若某項問題已解決，不另作無效重寫。
+- [x] 記錄相對 M0 的 payload／查詢改善、完整與部分索引重建，以及剩餘文字排序掃描；不把 service RSS 當成整個 App 的用量。量測限制見 VERIFICATION.md。
 
 ### M2 — Rust 搜尋核心試點
 
@@ -162,7 +162,7 @@ Rust 先使用一個 Cargo package、按責任劃分模組；不預先建立多�
 - [x] 新、舊及部分遷移 fixture workspace 都有確定行為；不支援的 schema 清楚拒絕開啟。
 - [x] 帳戶重連／大小寫、disconnect 隔離、重複 ID、交易回滾、草稿及復原記錄通過。
 - [x] 備份可還原且資料庫完整性、設定解密、client recovery metadata 均有效。
-- [ ] 中途終止、磁碟滿、權限錯誤或第二個 App 同時開啟均不造成雙寫或資料遺失。
+- [x] 隔離 fixtures 通過中途終止／rollback journal recovery、磁碟滿交易回滾、權限／key 拒絕及第二個 writer 排除；不將這些案例宣稱為任意硬體故障保證。
 
 ### M4 — 遷移外部服務、AI 及排程
 
@@ -202,10 +202,11 @@ provider acceptance 先使用隔離 fixture；真實寄件、建立事件及付�
 
 驗收：
 
-- [ ] 兩平台啟動、關閉、unsaved / in-flight guards、更新取消、等待進程退出、安裝及重啟通過。
-- [ ] manifest、checksum、ZIP 路徑／symlink、平台、版本與最低 OS 驗證保持有效。
-- [ ] binary rollback 與資料 schema rollback 分開驗證；新版寫入的資料不因換回舊 binary 而被丟棄。
-- [ ] 新包不需要系統 Node.js，不再包含 Node backend runtime；Electron 自身的 Node runtime 此時仍存在，須如實記錄。
+- [x] 同一 commit 的兩平台自動化 fixtures 通過啟動、關閉、in-flight guards、更新取消、雙 PID 等待、實際套件安裝／UI 重啟及備份還原；見 CI run 36050110233。
+- [x] manifest、checksum、ZIP 路徑／symlink、平台與版本檢查通過兩平台 fixtures。
+- [x] binary rollback 保留目前 workspace，新增 schema 的 Node↔Rust 寫入及備份還原分別驗證；不自動覆寫為遷移前資料。
+- [x] 候選套件不需要系統 Node.js、不含 backend Node runtime；Windows Electron 自身的 Node runtime 仍存在。
+- [ ] 最低 OS／其他硬體、unsaved UI、中文輸入法、焦點與無障礙完成完整人工驗收；正式簽署／notarization 及真實帳戶另外驗收。
 - [ ] Mac / Windows 同 tag 的 build、packaged smoke、migration 及 updater checks 全數通過才發佈。
 
 ### M6 — Windows Tauri，獨立評估與切換
@@ -251,7 +252,7 @@ M0 先記錄 hardware、OS、build mode、資料集、索引狀態及量測腳�
 | 記憶體 | 計算 UI、服務及所有 worker 的合計 RSS；含高峰、取消後與長時間運行 |
 | 寫入正確性 | crash、restart、timeout、重連、重試下零已確認的重複副作用及資料隔離違規 |
 
-初步效能預算提案：10,000 封已索引郵件的 warm lexical search 服務端 p95 ≤ 200 ms；50,000 封 ≤ 500 ms，不含 UI rendering。這是待 M0 依硬體確認的目標，不是目前成果。涉及資料安全、權限或重複寄件的測試失敗，一律阻擋切換，不以平均效能抵銷。
+效能預算：10,000 封已索引郵件的 warm lexical search 服務端 p95 ≤ 200 ms；50,000 封 ≤ 500 ms，不含 UI rendering。本機及 macOS／Windows CI 的固定 fixture 量測均達標，硬體、取樣與限制見 VERIFICATION.md；不視為所有機器或 UI 的效能保證。涉及資料安全、權限或重複寄件的測試失敗，一律阻擋切換，不以平均效能抵銷。
 
 ## 7. 測試與發佈清單
 
@@ -266,6 +267,6 @@ M0 先記錄 hardware、OS、build mode、資料集、索引狀態及量測腳�
 
 ## 8. 下一個可執行里程碑
 
-M0–M5 的實作已整合為預設關閉的候選版本。下一步是同一 commit 的 macOS／Windows 套件、原有 Node 安裝器升級至 Rust 套件、恢復與效能驗收；使用非發佈 CI 留下跨平台證據。完成並審核明確切換後，才將正式建置預設改成 Rust。M6 Tauri 維持獨立、以 M5 穩定為前提。
+M0–M5 的實作已整合為預設關閉的候選版本。同一 commit 的 macOS／Windows Rust 套件、原有 Node 安裝器升級至實際 Rust 套件、UI／service 重啟與備份還原已由非發佈 CI 驗證。下一步是最低 OS／其他硬體、完整人工 UI、真實帳戶及正式簽署驗收；效能記錄不外推到未量測的平台或硬體。完成必要驗收並明確確認切換後，才將正式建置預設改成 Rust。M6 Tauri 維持獨立、以 M5 穩定為前提。
 
-本次保持一個 Cargo package，完成 Rust service、相容儲存／備份、provider／AI／排程／更新與明確候選套件選擇。上列未勾選項代表完整驗收尚未達成，不代表該功能尚未實作；跨平台、最低 OS、真實帳戶及正式簽署必須分別留下證據。正式切換不由建置成功自動啟用。
+本次保持一個 Cargo package，完成 Rust service、相容儲存／備份、provider／AI／排程／更新與明確候選套件選擇。上列未勾選項代表完整驗收尚未達成；M6 尚未實作。跨平台自動化、最低 OS、真實帳戶及正式簽署必須分別留下證據。正式切換不由建置成功自動啟用。
