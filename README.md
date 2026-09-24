@@ -134,6 +134,35 @@ The release job requires `MORROW_UPDATE_SIGNING_KEY` in GitHub Actions secrets. 
 
 Every change is checked; versioned tags publish paired downloads. Unsigned automation accepts numbered alpha and beta versions; stable and release-candidate tags are rejected. Native UI differences remain explicit in [feature coverage](FEATURE_COVERAGE.md); API changes must preserve both clients.
 
+## Rust service candidate
+
+The Rust backend now implements storage, the local API, Gmail/Outlook OAuth and mail, IMAP/SMTP, calendars, AI/workflows/learning, background imports/summaries, keyword/semantic search, and signed desktop updates. SwiftUI and React use bounded metadata pages, SQL counts, on-demand bodies and revision checks. The existing Node backend remains the default until the release gates in [VERIFICATION.md](VERIFICATION.md) pass and cutover is approved.
+
+```sh
+npm run rust:test
+npm run macos:rust:test                  # macOS: actual native client + isolated Rust service
+MORROW_SERVICE_RUNTIME=rust npm run macos:build
+# Windows PowerShell:
+# $env:MORROW_SERVICE_RUNTIME = 'rust'; npm run windows:build
+# npm run desktop:test -- --packaged
+npm run benchmark:rust-service -- --output=test-results/migration-rust-service.json
+```
+
+Rust candidate bundles contain `morrow-service` instead of a backend Node runtime. A selected Rust service fails closed if it cannot start; it never falls back to a second writer. Windows still uses Electron and its internal Node runtime. Tauri remains a separately gated stage. Build selection is recorded in bundle metadata, not accepted from the renderer. `package.json` remains the version source. The locked Rust build requires Rust 1.98+, rustfmt/clippy and a C compiler; bundled third-party notices accompany the executable.
+
+On the first Rust open, the service locks the workspace against both Rust and legacy SQLite writers, verifies the existing key, and makes a consistent backup before migration. Mail, drafts, send-review records, calendar retry IDs and the AES-256-GCM settings format are preserved. It never restores an old database automatically during binary rollback. Interrupted paid jobs stop for review; legacy semantic vectors require a reviewed rebuild.
+
+For a Rust candidate backup, quit the app and run its bundled executable with **absolute** workspace and new destination paths:
+
+```sh
+'/path/to/Morrow Mail.app/Contents/Resources/morrow-service' --backup '/absolute/workspace' '/absolute/new-backup'
+# Windows: .\resources\app\runtime\morrow-service.exe --backup C:\absolute\workspace C:\absolute\new-backup
+```
+
+The older development-only read worker remains available with `MORROW_SEARCH_ENGINE=rust`; Node owns its writes and falls back locally on worker failure. It is separate from the complete Rust service. Compare that pilot with `npm run benchmark:mail -- --engine=rust`; compare the full service with `benchmark:rust-service`. All benchmarks use fictional temporary data, without provider or model calls.
+
+See [the migration plan](docs/RUST_MIGRATION_PLAN.md) and [compatibility inventory](docs/RUST_MIGRATION_INVENTORY.md) for limits and acceptance evidence. Fixture tests do not establish live-account acceptance or Developer ID notarization.
+
 ## Web development interface
 
 Requires **Node.js 22.13 or newer** and npm. SQLite is built into Node; no database service is needed.

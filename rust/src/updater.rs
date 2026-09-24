@@ -1,0 +1,2000 @@
+//! Signed, host-owned desktop updates. The helper is a copy of this executable;
+//! neither a renderer nor downloaded content supplies commands or destinations.
+use crate::{
+    error::{Error, Result},
+    service::{App, Context},
+    store::{now, string},
+};
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use ed25519_dalek::{Signature, VerifyingKey, pkcs8::DecodePublicKey};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    cmp::Ordering,
+    collections::HashSet,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering as AtomicOrdering},
+    },
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::Command,
+    sync::{Mutex, watch},
+    task::JoinHandle,
+};
+
+pub const VERSION: &str = env!("MORROW_VERSION");
+pub const PUBLIC_KEY: &str = include_str!("../../server/update-public-key.pem");
+pub const ARCHIVE_LIMIT: u64 = 750 * 1024 * 1024;
+const PLATFORMS: [&str; 2] = ["macos-arm64", "windows-x64"];
+const REPOSITORY: &str = "https://github.com/Coke1120/genmail";
+const DOWNLOAD_ERROR: &str = "Could not download or verify the update. No app files were changed. Try again or use the release downloads.";
+fn fail(message: &str) -> Error {
+    Error::conflict(message)
+}
+fn host_platform() -> Option<&'static str> {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some(PLATFORMS[0])
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some(PLATFORMS[1])
+    } else {
+        None
+    }
+}
+fn regex(pattern: &str, text: &str) -> bool {
+    regex::Regex::new(pattern)
+        .expect("static update regex")
+        .is_match(text)
+}
+
+// Decimal comparison preserves Node's BigInt SemVer behavior without a numeric limit.
+fn decimal(a: &str, b: &str) -> Ordering {
+    a.len().cmp(&b.len()).then(a.cmp(b))
+}
+#[derive(Eq, PartialEq)]
+struct Version {
+    core: Vec<String>,
+    pre: Vec<String>,
+}
+impl Version {
+    fn parse(text: &str) -> Option<Self> {
+        if text.len() > 100 {
+            return None;
+        }
+        let expression = regex::Regex::new(r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$").unwrap();
+        let captures = expression.captures(text)?;
+        let pre: Vec<String> = captures
+            .get(4)
+            .map(|p| p.as_str().split('.').map(str::to_owned).collect())
+            .unwrap_or_default();
+        if pre
+            .iter()
+            .any(|p| p.bytes().all(|b| b.is_ascii_digit()) && p.len() > 1 && p.starts_with('0'))
+        {
+            return None;
+        }
+        Some(Self {
+            core: (1..=3).map(|i| captures[i].to_owned()).collect(),
+            pre,
+        })
+    }
+    fn compare(&self, other: &Self) -> Ordering {
+        for (a, b) in self.core.iter().zip(&other.core) {
+            let order = decimal(a, b);
+            if order != Ordering::Equal {
+                return order;
+            }
+        }
+        if self.pre.is_empty() || other.pre.is_empty() {
+            return self.pre.is_empty().cmp(&other.pre.is_empty());
+        }
+        for (a, b) in self.pre.iter().zip(&other.pre) {
+            let numeric = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+            let order = match (numeric(a), numeric(b)) {
+                (true, true) => decimal(a, b),
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                _ => a.cmp(b),
+            };
+            if order != Ordering::Equal {
+                return order;
+            }
+        }
+        self.pre.len().cmp(&other.pre.len())
+    }
+}
+pub fn select_release(
+    releases: &Value,
+    installed: &str,
+    include_prereleases: bool,
+) -> Result<Value> {
+    let local = Version::parse(installed)
+        .ok_or_else(|| Error::new(502, "The installed version is not recognized."))?;
+    let releases = releases.as_array().ok_or_else(|| {
+        Error::new(
+            502,
+            "Could not check GitHub for updates. Check your connection and try again.",
+        )
+    })?;
+    let (item, latest) = releases.iter().rev().filter(|item| item["draft"] != true).filter_map(|item| Version::parse(string(item,"tag_name")).map(|parsed| (item,parsed)))
+        .filter(|(item,parsed)| include_prereleases || (item["prerelease"] != true && parsed.pre.is_empty())).max_by(|a,b| a.1.compare(&b.1))
+        .ok_or_else(|| Error::new(404,"No published releases were found for this channel. Try including alpha and beta releases."))?;
+    let tag = string(item, "tag_name");
+    Ok(
+        json!({"currentVersion":installed,"latestVersion":tag.strip_prefix('v').unwrap_or(tag),"updateAvailable":latest.compare(&local)==Ordering::Greater,"prerelease":item["prerelease"]==true || !latest.pre.is_empty(),"url":format!("{REPOSITORY}/releases/tag/{}",crate::providers::component(tag)),"checkedAt":now()}),
+    )
+}
+async fn check_updates(client: &reqwest::Client, prereleases: bool) -> Result<Value> {
+    let result = async {
+        let response = client
+            .get("https://api.github.com/repos/Coke1120/genmail/releases?per_page=100")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "Morrow-Mail-update-check")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|_| Error::new(502, "Update check failed."))?;
+        if matches!(response.status().as_u16(), 403 | 429) {
+            return Err(Error::new(
+                503,
+                "GitHub temporarily limited update checks. Try again later.",
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(Error::new(502, "Update check failed."));
+        }
+        let bytes = limited(response, 4 * 1024 * 1024).await?;
+        let releases: Value = serde_json::from_slice(&bytes)?;
+        if !releases.is_array() {
+            return Err(Error::new(502, "Update check failed."));
+        }
+        Ok(releases)
+    }
+    .await
+    .map_err(|error: Error| {
+        if error.status == 503 {
+            error
+        } else {
+            Error::new(
+                502,
+                "Could not check GitHub for updates. Check your connection and try again.",
+            )
+        }
+    })?;
+    select_release(&result, VERSION, prereleases)
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Asset {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Manifest {
+    pub version: String,
+    pub platforms: std::collections::BTreeMap<String, Asset>,
+}
+pub fn verify_manifest(
+    bytes: &[u8],
+    signature: &str,
+    version: &str,
+    key: &str,
+) -> Result<Manifest> {
+    let signature = signature.trim();
+    if bytes.len() > 16384 || !regex(r"^[A-Za-z0-9+/]{86}==$", signature) {
+        return Err(fail("The update signature could not be verified."));
+    }
+    let key = VerifyingKey::from_public_key_pem(key)
+        .map_err(|_| fail("The update signature could not be verified."))?;
+    let raw = STANDARD
+        .decode(signature)
+        .map_err(|_| fail("The update signature could not be verified."))?;
+    let signature = Signature::from_slice(&raw)
+        .map_err(|_| fail("The update signature could not be verified."))?;
+    key.verify_strict(bytes, &signature)
+        .map_err(|_| fail("The update signature could not be verified."))?;
+    let value: Manifest = serde_json::from_slice(bytes)
+        .map_err(|_| fail("The signed update manifest is invalid."))?;
+    if value.version != version
+        || !regex(
+            r"^[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta)\.[0-9]+)?$",
+            version,
+        )
+    {
+        return Err(fail("The update version does not match."));
+    }
+    for platform in PLATFORMS {
+        let item = value
+            .platforms
+            .get(platform)
+            .ok_or_else(|| fail("The signed update manifest is invalid."))?;
+        if item.name != format!("Morrow-Mail-{version}-{platform}.zip")
+            || !regex(r"^[a-f0-9]{64}$", &item.sha256)
+            || !(1..=ARCHIVE_LIMIT).contains(&item.size)
+        {
+            return Err(fail("The signed update manifest is invalid."));
+        }
+    }
+    Ok(value)
+}
+pub fn trusted_asset_url(text: &str) -> Result<url::Url> {
+    let url = url::Url::parse(text).map_err(|_| fail("Untrusted update download destination."))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.port().is_some_and(|p| p != 443)
+        || !matches!(
+            url.host_str(),
+            Some(
+                "github.com"
+                    | "release-assets.githubusercontent.com"
+                    | "objects.githubusercontent.com"
+            )
+        )
+    {
+        return Err(fail("Untrusted update download destination."));
+    }
+    Ok(url)
+}
+async fn release_asset(client: &reqwest::Client, text: &str) -> Result<reqwest::Response> {
+    let mut url = trusted_asset_url(text)?;
+    for _ in 0..6 {
+        let response = client
+            .get(url.clone())
+            .timeout(Duration::from_secs(15 * 60))
+            .send()
+            .await
+            .map_err(|_| fail(DOWNLOAD_ERROR))?;
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| fail("Untrusted update download destination."))?;
+            url = trusted_asset_url(
+                url.join(location)
+                    .map_err(|_| fail("Untrusted update download destination."))?
+                    .as_str(),
+            )?;
+        } else if response.status().is_success() {
+            return Ok(response);
+        } else {
+            return Err(fail(
+                "The update files are not available. Use the release downloads or try again later.",
+            ));
+        }
+    }
+    Err(fail("Too many update download redirects."))
+}
+async fn limited(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(fail("The update metadata is too large."));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| fail(DOWNLOAD_ERROR))? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(fail("The update metadata is too large."));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+pub fn hash_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+fn u16le(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
+}
+fn u32le(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+fn archive_read(file: &mut File, size: u64, at: u64, length: usize) -> Result<Vec<u8>> {
+    if at.checked_add(length as u64).is_none_or(|end| end > size) {
+        return Err(fail("Invalid update archive."));
+    }
+    let mut bytes = vec![0; length];
+    file.seek(SeekFrom::Start(at))?;
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+fn safe_name(name: &str, root: &str) -> bool {
+    !name.contains(['\\', '\0', ':'])
+        && !name.starts_with('/')
+        && (name == root || name.starts_with(&format!("{root}/")) || name.starts_with("__MACOSX/"))
+        && name.trim_end_matches('/').split('/').all(|part| {
+            let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+            !part.is_empty()
+                && part != ".."
+                && part != "."
+                && !part.ends_with(['.', ' '])
+                && !part.chars().any(|c| c.is_control())
+                && !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                && !(stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        })
+}
+fn link_destination(name: &str, link: &str, root: &str) -> bool {
+    if link.is_empty() || link.starts_with('/') || link.contains(['\\', ':', '\0']) {
+        return false;
+    }
+    let mut path: Vec<&str> = name.split('/').collect();
+    path.pop();
+    for part in link.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if path.pop().is_none() {
+                    return false;
+                }
+            }
+            _ => path.push(part),
+        }
+    }
+    safe_name(&path.join("/"), root) && path.first().copied() == Some(root)
+}
+/// Bounds and names are checked before the native extractor can write anything.
+/// ZIP64 is deliberately unsupported, matching the existing release format.
+pub fn inspect_archive(path: &Path, root: &str) -> Result<()> {
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    if size > ARCHIVE_LIMIT {
+        return Err(fail("The update download exceeds its signed size."));
+    }
+    let tail = archive_read(
+        &mut file,
+        size,
+        size.saturating_sub(65557),
+        size.min(65557) as usize,
+    )?;
+    let end = (0..=tail.len().saturating_sub(22))
+        .rev()
+        .find(|&i| {
+            i + 22 <= tail.len()
+                && u32le(&tail, i) == 0x06054b50
+                && i + 22 + u16le(&tail, i + 20) as usize == tail.len()
+        })
+        .ok_or_else(|| fail("Unsupported update archive."))?;
+    if u32le(&tail, end + 4) != 0 {
+        return Err(fail("Unsupported update archive."));
+    }
+    let count = u16le(&tail, end + 10);
+    let length = u32le(&tail, end + 12) as usize;
+    let offset = u32le(&tail, end + 16) as u64;
+    if count == 0
+        || count == 65535
+        || length > 32 * 1024 * 1024
+        || u16le(&tail, end + 8) != count
+        || offset + length as u64 != size - tail.len() as u64 + end as u64
+    {
+        return Err(fail("Unsupported update archive."));
+    }
+    let central = archive_read(&mut file, size, offset, length)?;
+    let mut cursor = 0;
+    let mut expanded = 0u64;
+    let mut seen = HashSet::new();
+    let mut links = Vec::new();
+    let mut intervals = Vec::new();
+    for _ in 0..count {
+        if cursor + 46 > central.len() || u32le(&central, cursor) != 0x02014b50 {
+            return Err(fail("Invalid update archive entries."));
+        }
+        let flags = u16le(&central, cursor + 8);
+        let method = u16le(&central, cursor + 10);
+        let packed = u32le(&central, cursor + 20) as u64;
+        let unpacked = u32le(&central, cursor + 24) as u64;
+        let n = u16le(&central, cursor + 28) as usize;
+        let extra = u16le(&central, cursor + 30) as usize;
+        let comment = u16le(&central, cursor + 32) as usize;
+        if cursor + 46 + n + extra + comment > central.len() {
+            return Err(fail("Invalid update archive entries."));
+        }
+        let bytes = &central[cursor + 46..cursor + 46 + n];
+        let name = std::str::from_utf8(bytes).map_err(|_| fail("Unsafe update archive entry."))?;
+        let kind = (u32le(&central, cursor + 38) >> 16) & 0xf000;
+        if !safe_name(name, root)
+            || !seen.insert(name.trim_end_matches('/').to_lowercase())
+            || flags & 1 != 0
+            || ![0, 8].contains(&method)
+            || ![0, 0x4000, 0x8000, 0xa000].contains(&kind)
+            || u16le(&central, cursor + 34) != 0
+        {
+            return Err(fail("Unsafe update archive entry."));
+        }
+        expanded += unpacked;
+        if expanded > 4 * 1024 * 1024 * 1024 || unpacked > ARCHIVE_LIMIT {
+            return Err(fail("The expanded update is too large."));
+        }
+        let local_offset = u32le(&central, cursor + 42) as u64;
+        let local = archive_read(&mut file, size, local_offset, 30)?;
+        let data_offset = local_offset + 30 + u16le(&local, 26) as u64 + u16le(&local, 28) as u64;
+        if data_offset + packed > offset {
+            return Err(fail("Invalid update archive offsets."));
+        }
+        if u32le(&local, 0) != 0x04034b50
+            || u16le(&local, 8) != method
+            || u16le(&local, 6) != flags
+            || archive_read(
+                &mut file,
+                size,
+                local_offset + 30,
+                u16le(&local, 26) as usize,
+            )? != bytes
+        {
+            return Err(fail("Inconsistent update archive entry."));
+        }
+        intervals.push((local_offset, data_offset + packed));
+        if kind == 0xa000 {
+            if packed > 8192 || unpacked > 4096 || name.ends_with('/') {
+                return Err(fail("Unsafe update symlink."));
+            }
+            let data = archive_read(&mut file, size, data_offset, packed as usize)?;
+            let decoded = if method == 8 {
+                let mut out = Vec::new();
+                flate2::read::DeflateDecoder::new(&data[..])
+                    .take(4097)
+                    .read_to_end(&mut out)?;
+                out
+            } else {
+                data
+            };
+            let link = std::str::from_utf8(&decoded).map_err(|_| fail("Unsafe update symlink."))?;
+            if decoded.len() as u64 != unpacked || !link_destination(name, link, root) {
+                return Err(fail("Unsafe update symlink."));
+            }
+            links.push(name.to_lowercase());
+        }
+        cursor += 46 + n + extra + comment;
+    }
+    if cursor != central.len() {
+        return Err(fail("Invalid update archive directory."));
+    }
+    intervals.sort_unstable();
+    if intervals.windows(2).any(|p| p[0].1 > p[1].0) {
+        return Err(fail("Invalid update archive offsets."));
+    }
+    if links.iter().any(|link| {
+        seen.iter()
+            .any(|name| name.starts_with(&format!("{link}/")))
+    }) {
+        return Err(fail("Unsafe update symlink."));
+    }
+    Ok(())
+}
+
+pub fn package_paths(target: &Path, platform: &str) -> Result<(PathBuf, PathBuf)> {
+    match platform {
+        "macos-arm64" => Ok((
+            target.join("Contents/Resources/backend"),
+            target.join("Contents/MacOS/MorrowMail"),
+        )),
+        "windows-x64" => Ok((
+            target.join("resources/app/backend"),
+            target.join("Morrow Mail.exe"),
+        )),
+        _ => Err(fail("Unsupported update platform.")),
+    }
+}
+fn clean_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .env_remove("ELECTRON_RUN_AS_NODE")
+        .env_remove("LD_PRELOAD")
+        .env_remove("DYLD_INSERT_LIBRARIES");
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    command.kill_on_drop(true);
+    command
+}
+async fn cancellable<T>(
+    cancel: &mut watch::Receiver<bool>,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    if *cancel.borrow() {
+        return Err(fail("Cancelled"));
+    }
+    tokio::select! {biased; _=cancel.changed()=>Err(fail("Cancelled")), result=work=>result}
+}
+async fn command_output(command: &mut Command, seconds: u64) -> Result<Vec<u8>> {
+    command_output_cancellable(command, seconds, None).await
+}
+async fn command_output_cancellable(
+    command: &mut Command,
+    seconds: u64,
+    mut cancel: Option<&mut watch::Receiver<bool>>,
+) -> Result<Vec<u8>> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| fail(DOWNLOAD_ERROR))?
+        .take(16385);
+    let work = async {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        if bytes.len() > 16384 || !child.wait().await?.success() {
+            return Err(fail("The downloaded app could not be verified."));
+        }
+        Ok(bytes)
+    };
+    let result = tokio::select! {
+        result=tokio::time::timeout(Duration::from_secs(seconds),work)=>result.unwrap_or_else(|_|Err(fail("The update verification timed out."))),
+        _=async {if let Some(cancel)=cancel.as_mut() {if !*cancel.borrow(){let _=cancel.changed().await;}}else{std::future::pending::<()>().await;}}=>Err(fail("Cancelled")),
+    };
+    // Wait for extraction to die before its staging directory can be removed.
+    if result.is_err() {
+        let _ = child.kill().await;
+    }
+    result
+}
+fn powershell() -> PathBuf {
+    PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe")
+}
+fn ps_command(script: &str) -> Command {
+    let mut command = clean_command(powershell());
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        &STANDARD.encode(bytes),
+    ]);
+    command
+}
+fn private_directory(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
+    Ok(())
+}
+async fn protect_directory(path: &Path) -> Result<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || crate::store::private(&path, true))
+        .await
+        .map_err(|_| fail(DOWNLOAD_ERROR))?
+}
+async fn read_limited_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await?;
+    if file.metadata().await?.len() > limit as u64 {
+        return Err(fail("The update metadata is too large."));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() > limit {
+        return Err(fail("The update metadata is too large."));
+    }
+    Ok(bytes)
+}
+fn private_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+fn save_private(path: &Path, data: &[u8]) -> Result<()> {
+    let mut file = private_file(path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    Ok(())
+}
+fn check_tree(target: &Path) -> Result<()> {
+    fn visit(directory: &Path, root: &Path) -> Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let child = entry.path();
+            let actual = fs::canonicalize(&child)?;
+            if !actual.starts_with(root) {
+                return Err(fail("The update contains an unsafe link."));
+            }
+            if entry.file_type()?.is_dir() {
+                visit(&child, root)?;
+            }
+        }
+        Ok(())
+    }
+    if fs::symlink_metadata(target)?.file_type().is_symlink() {
+        return Err(fail("The update contains an unsafe link."));
+    }
+    visit(target, &fs::canonicalize(target)?)
+}
+pub async fn validate_package(target: &Path, platform: &str, version: &str) -> Result<()> {
+    let (backend, executable) = package_paths(target, platform)?;
+    if !fs::symlink_metadata(executable)?.is_file()
+        || serde_json::from_slice::<Value>(&fs::read(backend.join("package.json"))?)?["version"]
+            != version
+    {
+        return Err(fail(
+            "The downloaded app is incomplete or has the wrong version.",
+        ));
+    }
+    let target_owned = target.to_owned();
+    tokio::task::spawn_blocking(move || check_tree(&target_owned))
+        .await
+        .map_err(|_| fail(DOWNLOAD_ERROR))??;
+    if platform == "macos-arm64" {
+        command_output(
+            clean_command("/usr/bin/codesign")
+                .args(["--verify", "--deep", "--strict"])
+                .arg(target),
+            60,
+        )
+        .await?;
+        let minimum = command_output(
+            clean_command("/usr/bin/plutil")
+                .args(["-extract", "LSMinimumSystemVersion", "raw", "-o", "-"])
+                .arg(target.join("Contents/Info.plist")),
+            15,
+        )
+        .await?;
+        let current =
+            command_output(clean_command("/usr/bin/sw_vers").arg("-productVersion"), 15).await?;
+        let minimum = String::from_utf8_lossy(&minimum);
+        let minimum = minimum.trim();
+        let current = String::from_utf8_lossy(&current);
+        let numbers = |v: &str| {
+            v.trim()
+                .split('.')
+                .map(|s| s.parse::<u64>().unwrap_or(u64::MAX))
+                .chain([0, 0, 0])
+                .take(3)
+                .collect::<Vec<_>>()
+        };
+        if !regex(r"^[0-9]+(?:\.[0-9]+){0,2}$", minimum) || numbers(minimum) > numbers(&current) {
+            return Err(fail("The update requires a newer macOS version."));
+        }
+    }
+    Ok(())
+}
+async fn extract(
+    directory: &Path,
+    platform: &str,
+    cancel: Option<&mut watch::Receiver<bool>>,
+) -> Result<PathBuf> {
+    let root = if platform == "macos-arm64" {
+        "Morrow Mail.app"
+    } else {
+        "Morrow Mail-win32-x64"
+    };
+    let path = directory.join("update.zip");
+    let path_owned = path.clone();
+    tokio::task::spawn_blocking(move || inspect_archive(&path_owned, root))
+        .await
+        .map_err(|_| fail(DOWNLOAD_ERROR))??;
+    let extraction = directory.join("extracted");
+    private_directory(&extraction)?;
+    if platform == "macos-arm64" {
+        command_output_cancellable(
+            clean_command("/usr/bin/ditto")
+                .args(["-x", "-k"])
+                .arg(path)
+                .arg(&extraction),
+            120,
+            cancel,
+        )
+        .await?;
+    } else {
+        command_output_cancellable(ps_command("$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath $env:MORROW_UPDATE_ZIP -DestinationPath $env:MORROW_UPDATE_DEST").env("MORROW_UPDATE_ZIP",path).env("MORROW_UPDATE_DEST",&extraction),120,cancel).await?;
+    }
+    Ok(extraction.join(root))
+}
+
+#[derive(Clone)]
+pub struct Updater(Arc<UpdaterInner>);
+struct UpdaterInner {
+    data: PathBuf,
+    target: Option<PathBuf>,
+    parent: AtomicU32,
+    token_valid: bool,
+    state: Mutex<UpdateState>,
+    checks: [Mutex<Option<(Instant, Value)>>; 2],
+}
+struct UpdateState {
+    value: Value,
+    directory: Option<PathBuf>,
+    cancel: Option<watch::Sender<bool>>,
+    job: Option<JoinHandle<()>>,
+}
+impl Updater {
+    pub fn new(directory: &Path, parent: Option<u32>, token: &str) -> Self {
+        let target = std::env::current_exe()
+            .ok()
+            .and_then(|exe| fs::canonicalize(exe).ok())
+            .and_then(|exe| {
+                let relative = if host_platform()? == "macos-arm64" {
+                    "Contents/Resources/morrow-service"
+                } else {
+                    "resources/app/runtime/morrow-service.exe"
+                };
+                let mut target = exe.clone();
+                for _ in Path::new(relative).components() {
+                    target.pop();
+                }
+                if target.join(relative) != exe {
+                    return None;
+                }
+                let actual = fs::canonicalize(&target).ok()?;
+                let data = fs::canonicalize(directory).ok()?;
+                if data.starts_with(&actual)
+                    || fs::symlink_metadata(&target).ok()?.file_type().is_symlink()
+                {
+                    return None;
+                }
+                Some(target)
+            });
+        Self(Arc::new(UpdaterInner {
+            data: directory.to_owned(),
+            target,
+            parent: AtomicU32::new(parent.unwrap_or(0)),
+            token_valid: regex(r"^[a-f0-9]{64}$", token),
+            state: Mutex::new(UpdateState {
+                value: json!({"phase":"idle","received":0,"total":0}),
+                directory: None,
+                cancel: None,
+                job: None,
+            }),
+            checks: [Mutex::new(None), Mutex::new(None)],
+        }))
+    }
+    pub fn configure(&self, parent: u32) {
+        self.0.parent.store(
+            if (2..=i32::MAX as u32).contains(&parent) {
+                parent
+            } else {
+                0
+            },
+            AtomicOrdering::Release,
+        );
+    }
+    fn supported(&self) -> bool {
+        self.0.target.is_some()
+            && self.0.token_valid
+            && self.0.parent.load(AtomicOrdering::Acquire) > 1
+    }
+    async fn status_value(&self, value: &Value) -> Value {
+        let mut value = value.clone();
+        value["supported"] = self.supported().into();
+        if let Ok(bytes) = read_limited_file(&self.0.data.join("update-result.json"), 4096).await
+            && bytes.len() <= 4096
+            && let Ok(previous) = serde_json::from_slice::<Value>(&bytes)
+        {
+            if previous["status"] == "installed" && previous["version"].is_string() {
+                value["previous"] = format!("Updated to {}.", string(&previous, "version")).into();
+            } else if previous["status"] == "error" {
+                value["previous"]="The last update did not complete. Your previous app was retained; try again or use the release downloads.".into();
+            }
+        }
+        value
+    }
+    pub async fn status(&self) -> Value {
+        self.status_value(&self.0.state.lock().await.value).await
+    }
+    pub async fn check(&self, client: &reqwest::Client, prereleases: bool) -> Result<Value> {
+        let mut cache = self.0.checks[usize::from(prereleases)].lock().await;
+        if let Some((at, value)) = &*cache
+            && at.elapsed() < Duration::from_secs(60)
+        {
+            return Ok(value.clone());
+        }
+        *cache = None;
+        let result = check_updates(client, prereleases).await?;
+        *cache = Some((Instant::now(), result.clone()));
+        Ok(result)
+    }
+    pub async fn start(&self, client: reqwest::Client, prereleases: bool) -> Result<Value> {
+        self.start_trusted(client, prereleases, PUBLIC_KEY).await
+    }
+    async fn start_trusted(
+        &self,
+        client: reqwest::Client,
+        prereleases: bool,
+        key: &str,
+    ) -> Result<Value> {
+        if !self.supported() {
+            return Err(fail(
+                "In-app installation is available only in packaged desktop builds.",
+            ));
+        }
+        let mut state = self.0.state.lock().await;
+        if state.cancel.is_some() || state.value["phase"] == "installing" {
+            return Err(fail("An update operation is already running."));
+        }
+        if let Some(directory) = state.directory.take() {
+            tokio::fs::remove_dir_all(directory).await?;
+        }
+        state.value = json!({"phase":"checking","received":0,"total":0});
+        let (cancel, mut cancelled) = watch::channel(false);
+        state.cancel = Some(cancel.clone());
+        let updater = self.clone();
+        let key = key.to_owned();
+        state.job = Some(tokio::spawn(async move {
+            let timer = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+                let _ = cancel.send(true);
+            });
+            let outcome = updater
+                .download(&client, prereleases, &key, &mut cancelled)
+                .await;
+            timer.abort();
+            let mut state = updater.0.state.lock().await;
+            if let Err(error) = outcome {
+                if let Some(directory) = state.directory.take() {
+                    let _ = tokio::fs::remove_dir_all(directory).await;
+                }
+                state.value = if *cancelled.borrow() {
+                    json!({"phase":"idle","received":0,"total":0})
+                } else {
+                    json!({"phase":"error","received":0,"total":0,"error":error.to_string()})
+                };
+            }
+            state.cancel = None;
+        }));
+        Ok(self.status_value(&state.value).await)
+    }
+    async fn download(
+        &self,
+        client: &reqwest::Client,
+        prereleases: bool,
+        key: &str,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> Result<()> {
+        let latest = cancellable(cancel, check_updates(client, prereleases)).await?;
+        self.download_release(client, &latest, key, cancel).await
+    }
+    async fn download_release(
+        &self,
+        client: &reqwest::Client,
+        latest: &Value,
+        key: &str,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> Result<()> {
+        if latest["updateAvailable"] != true {
+            return Err(fail("No newer release is available for this channel."));
+        }
+        let version = string(latest, "latestVersion");
+        let base = format!(
+            "{REPOSITORY}/releases/download/v{}/",
+            crate::providers::component(version)
+        );
+        let (bytes, signature) = cancellable(cancel, async {
+            let bytes = limited(
+                release_asset(client, &format!("{base}update-manifest.json")).await?,
+                16384,
+            )
+            .await?;
+            let signature = limited(
+                release_asset(client, &format!("{base}update-manifest.sig")).await?,
+                256,
+            )
+            .await?;
+            Ok((bytes, signature))
+        })
+        .await?;
+        let signature = std::str::from_utf8(&signature).map_err(|_| fail(DOWNLOAD_ERROR))?;
+        let manifest = verify_manifest(&bytes, signature, version, key)?;
+        let platform = host_platform().ok_or_else(|| fail(DOWNLOAD_ERROR))?;
+        let asset = &manifest.platforms[platform];
+        let parent = self
+            .0
+            .target
+            .as_ref()
+            .and_then(|target| target.parent())
+            .ok_or_else(|| fail(DOWNLOAD_ERROR))?;
+        let directory = parent.join(format!(".morrow-update-{}", uuid::Uuid::new_v4()));
+        private_directory(&directory).map_err(|_|fail("This installation folder is not writable. Use the manual release download to update this copy."))?;
+        {
+            let mut state = self.0.state.lock().await;
+            state.directory = Some(directory.clone());
+            state.value =
+                json!({"phase":"downloading","version":version,"received":0,"total":asset.size});
+        }
+        protect_directory(&directory).await?;
+        save_private(&directory.join("update-manifest.json"), &bytes)?;
+        save_private(&directory.join("update-manifest.sig"), signature.as_bytes())?;
+        let path = directory.join("update.zip");
+        let mut output = tokio::fs::File::from_std(private_file(&path)?);
+        let mut hash = Sha256::new();
+        let mut received = 0u64;
+        let mut response = cancellable(
+            cancel,
+            release_asset(client, &format!("{base}{}", asset.name)),
+        )
+        .await?;
+        if response.content_length().is_some_and(|n| n != asset.size) {
+            return Err(fail(
+                "The update checksum does not match. No app files were changed.",
+            ));
+        }
+        while let Some(chunk) = cancellable(cancel, async {
+            response.chunk().await.map_err(|_| fail(DOWNLOAD_ERROR))
+        })
+        .await?
+        {
+            received += chunk.len() as u64;
+            if received > asset.size {
+                return Err(fail("The update download exceeds its signed size."));
+            }
+            hash.update(&chunk);
+            output.write_all(&chunk).await?;
+            self.0.state.lock().await.value["received"] = received.into();
+        }
+        output.sync_all().await?;
+        drop(output);
+        if received != asset.size || format!("{:x}", hash.finalize()) != asset.sha256 {
+            return Err(fail(
+                "The update checksum does not match. No app files were changed.",
+            ));
+        }
+        self.0.state.lock().await.value["phase"] = "verifying".into();
+        let staged = extract(&directory, platform, Some(cancel)).await?;
+        validate_package(&staged, platform, version).await?;
+        if *cancel.borrow() {
+            return Err(fail("Cancelled"));
+        }
+        self.0.state.lock().await.value["phase"] = "ready".into();
+        Ok(())
+    }
+    pub async fn cancel(&self) -> Result<Value> {
+        let mut state = self.0.state.lock().await;
+        if state.value["phase"] == "installing" {
+            return Err(fail("The app is restarting to install the update."));
+        }
+        if let Some(cancel) = &state.cancel {
+            let _ = cancel.send(true);
+        } else {
+            if let Some(directory) = state.directory.take() {
+                tokio::fs::remove_dir_all(directory).await?;
+            }
+            state.value = json!({"phase":"idle","received":0,"total":0});
+        }
+        Ok(self.status_value(&state.value).await)
+    }
+    pub async fn prepare(&self) -> Result<Value> {
+        let mut state = self.0.state.lock().await;
+        if !self.supported() || state.value["phase"] != "ready" || state.cancel.is_some() {
+            return Err(fail("Download and verify an update before installing it."));
+        }
+        let directory = state
+            .directory
+            .as_ref()
+            .ok_or_else(|| fail(DOWNLOAD_ERROR))?;
+        let platform = host_platform().unwrap();
+        let root = if platform == "macos-arm64" {
+            "Morrow Mail.app"
+        } else {
+            "Morrow Mail-win32-x64"
+        };
+        let helper = directory.join(format!(
+            "update-helper-{}{}",
+            uuid::Uuid::new_v4(),
+            if cfg!(windows) { ".exe" } else { "" }
+        ));
+        let copy = helper.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut source = File::open(std::env::current_exe()?)?;
+            let mut output = private_file(&copy)?;
+            std::io::copy(&mut source, &mut output)?;
+            output.sync_all()?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| fail(DOWNLOAD_ERROR))??;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700))?;
+        }
+        let config = InstallConfig {
+            directory: directory.clone(),
+            root: root.into(),
+            platform: platform.into(),
+            target: self.0.target.clone().unwrap(),
+            staged: directory.join("extracted").join(root),
+            backup: directory.join("previous"),
+            version: string(&state.value, "version").into(),
+            installed_version: VERSION.into(),
+            pids: [
+                self.0.parent.load(AtomicOrdering::Acquire),
+                std::process::id(),
+            ],
+            result_file: self.0.data.join("update-result.json"),
+        };
+        let mut command = clean_command(&helper);
+        command
+            .arg("--update-installer")
+            .current_dir(directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(false);
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
+        let mut child = command.spawn()?;
+        let ready = async {
+            let mut input = child.stdin.take().ok_or_else(|| fail(DOWNLOAD_ERROR))?;
+            input.write_all(&serde_json::to_vec(&config)?).await?;
+            input.shutdown().await?;
+            drop(input);
+            let stdout = child.stdout.take().ok_or_else(|| fail(DOWNLOAD_ERROR))?;
+            let mut reader = BufReader::new(stdout).take(1024);
+            let mut line = String::new();
+            reader.read_line(&mut line).await?;
+            if line != "ready\n" {
+                return Err(fail("Invalid update installer response."));
+            }
+            Ok(())
+        };
+        match tokio::time::timeout(Duration::from_secs(15), ready).await {
+            Ok(Ok(())) => {}
+            outcome => {
+                let _ = child.kill().await;
+                let _ = tokio::fs::remove_file(helper).await;
+                return Err(match outcome {
+                    Ok(Err(error)) => error,
+                    _ => fail("The update installer did not become ready."),
+                });
+            }
+        }
+        // kill_on_drop(false) leaves the detached helper alive after host/service exit.
+        drop(child);
+        state.value["phase"] = "installing".into();
+        Ok(self.status_value(&state.value).await)
+    }
+    pub async fn stop(&self) {
+        let job = {
+            let mut state = self.0.state.lock().await;
+            if let Some(cancel) = &state.cancel {
+                let _ = cancel.send(true);
+            }
+            state.job.take()
+        };
+        if let Some(job) = job {
+            let _ = job.await;
+        }
+        let mut state = self.0.state.lock().await;
+        if state.value["phase"] != "installing"
+            && let Some(directory) = state.directory.take()
+        {
+            let _ = tokio::fs::remove_dir_all(directory).await;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallConfig {
+    pub directory: PathBuf,
+    pub root: String,
+    pub platform: String,
+    pub target: PathBuf,
+    pub staged: PathBuf,
+    pub backup: PathBuf,
+    pub version: String,
+    pub installed_version: String,
+    pub pids: [u32; 2],
+    pub result_file: PathBuf,
+}
+fn validate_install_paths(config: &InstallConfig) -> Result<()> {
+    let root = match config.platform.as_str() {
+        "macos-arm64" => "Morrow Mail.app",
+        "windows-x64" => "Morrow Mail-win32-x64",
+        _ => return Err(fail("Unsupported update platform.")),
+    };
+    if config.root != root
+        || !config.directory.is_absolute()
+        || !config.target.is_absolute()
+        || config.directory.parent() != config.target.parent()
+        || config.directory == config.target
+        || config.staged != config.directory.join("extracted").join(root)
+        || config.backup != config.directory.join("previous")
+        || config
+            .directory
+            .file_name()
+            .is_none_or(|name| !name.to_string_lossy().starts_with(".morrow-update-"))
+        || config
+            .pids
+            .iter()
+            .any(|&pid| pid <= 1 || pid > i32::MAX as u32 || pid == std::process::id())
+        || config.pids[0] == config.pids[1]
+    {
+        return Err(fail("Invalid update installation paths."));
+    }
+    for path in [&config.target, &config.directory] {
+        if fs::symlink_metadata(path)?.file_type().is_symlink() || fs::canonicalize(path)? != *path
+        {
+            return Err(fail("Invalid update installation paths."));
+        }
+    }
+    let data = config
+        .result_file
+        .parent()
+        .ok_or_else(|| fail("Invalid update result path."))?;
+    let data = fs::canonicalize(data)?;
+    if config
+        .result_file
+        .file_name()
+        .is_none_or(|name| name != "update-result.json")
+        || data.starts_with(&config.target)
+        || data.starts_with(&config.directory)
+        || !config.result_file.is_absolute()
+        || fs::symlink_metadata(&config.result_file).is_ok_and(|m| !m.is_file())
+    {
+        return Err(fail("Invalid update result path."));
+    }
+    Ok(())
+}
+pub async fn replace_and_launch<F, Fut>(config: &InstallConfig, launch: F) -> Result<()>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    validate_install_paths(config)?;
+    if fs::symlink_metadata(&config.backup).is_ok() {
+        return Err(fail("The previous app backup already exists."));
+    }
+    fs::rename(&config.target, &config.backup)?;
+    let outcome = async {
+        fs::rename(&config.staged, &config.target)?;
+        launch(config.target.clone()).await
+    }
+    .await;
+    if let Err(error) = outcome {
+        if config.target.exists() {
+            fs::rename(&config.target, &config.staged)?;
+        }
+        fs::rename(&config.backup, &config.target)?;
+        return Err(error);
+    }
+    Ok(())
+}
+pub fn process_alive(pid: u32) -> bool {
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(pid as i32, 0) == 0
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        }
+    }
+    #[cfg(windows)]
+    {
+        unsafe {
+            use windows_sys::Win32::{
+                Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_TIMEOUT},
+                System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+            };
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if handle.is_null() {
+                return GetLastError() != ERROR_INVALID_PARAMETER;
+            }
+            let result = WaitForSingleObject(handle, 0);
+            CloseHandle(handle);
+            result == WAIT_TIMEOUT || result == u32::MAX
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
+    }
+}
+async fn launch_app(target: &Path, platform: &str, workspace: &Path) -> Result<()> {
+    if platform == "macos-arm64" {
+        // LaunchServices need not inherit the helper's environment. The host's
+        // validated workspace must survive an update, including custom locations.
+        let mut environment = std::ffi::OsString::from("MORROW_DATA_DIR=");
+        environment.push(workspace);
+        command_output(
+            clean_command("/usr/bin/open")
+                .arg("-n")
+                .arg("--env")
+                .arg(environment)
+                .arg(target),
+            20,
+        )
+        .await?;
+    } else {
+        let (_, executable) = package_paths(target, platform)?;
+        let mut command = clean_command(executable);
+        command
+            .current_dir(target)
+            .env("MORROW_DATA_DIR", workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(false);
+        #[cfg(windows)]
+        command.creation_flags(0x00000008 | 0x00000200);
+        command.spawn()?;
+    }
+    Ok(())
+}
+async fn verify_staging(config: &InstallConfig, key: &str) -> Result<()> {
+    validate_install_paths(config)?;
+    let bytes = read_limited_file(&config.directory.join("update-manifest.json"), 16384).await?;
+    let signature = read_limited_file(&config.directory.join("update-manifest.sig"), 256).await?;
+    let signature = std::str::from_utf8(&signature)
+        .map_err(|_| fail("The update signature could not be verified."))?;
+    let manifest = verify_manifest(&bytes, signature, &config.version, key)?;
+    let asset = &manifest.platforms[&config.platform];
+    let path = config.directory.join("update.zip");
+    let size = asset.size;
+    let hash = asset.sha256.clone();
+    tokio::task::spawn_blocking(move || {
+        if fs::metadata(&path)?.len() != size || hash_file(&path)? != hash {
+            return Err(fail("The staged update changed."));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| fail(DOWNLOAD_ERROR))?
+}
+/// Private entry point used only by a host-prepared, copied helper over stdin.
+pub async fn installer_main() -> i32 {
+    let result = async {
+        let mut bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::io::stdin().take(16385).read_to_end(&mut bytes),
+        )
+        .await
+        .map_err(|_| fail("Invalid update owner."))??;
+        if bytes.len() > 16384 {
+            return Err(fail("Invalid update owner."));
+        }
+        let config: InstallConfig = serde_json::from_slice(&bytes)?;
+        if Some(config.platform.as_str()) != host_platform()
+            || fs::canonicalize(std::env::current_exe()?)?.parent()
+                != Some(config.directory.as_path())
+        {
+            return Err(fail("Invalid update owner."));
+        }
+        Ok(config)
+    }
+    .await;
+    let config = match result {
+        Ok(config) => config,
+        Err(_) => return 1,
+    };
+    let outcome = install_package(&config, PUBLIC_KEY, || {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(b"ready\n")?;
+        stdout.flush()?;
+        Ok(())
+    })
+    .await;
+    if outcome.is_ok() { 0 } else { 1 }
+}
+/// The caller supplies its compiled trust anchor; the native helper always uses PUBLIC_KEY.
+/// Keeping verification separate lets fixtures use generated keys without a runtime key override.
+pub async fn install_package(
+    config: &InstallConfig,
+    key: &str,
+    ready: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    verify_staging(config, key).await?;
+    ready()?;
+    let mut parents_exited = false;
+    let outcome =
+        async {
+            let deadline = Instant::now() + Duration::from_secs(100);
+            while config.pids.iter().any(|&pid| process_alive(pid)) {
+                if Instant::now() >= deadline {
+                    return Err(fail("The app did not close; no update was installed."));
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            parents_exited = true;
+            verify_staging(config, key).await?;
+            let (backend, _) = package_paths(&config.target, &config.platform)?;
+            if serde_json::from_slice::<Value>(
+                &tokio::fs::read(backend.join("package.json")).await?,
+            )?["version"]
+                != config.installed_version
+            {
+                return Err(fail(
+                    "The installed app changed. Download the update again.",
+                ));
+            }
+            // Re-extract authenticated bytes after the wait; never trust mutable staged files.
+            tokio::fs::remove_dir_all(config.directory.join("extracted")).await?;
+            let staged = extract(&config.directory, &config.platform, None).await?;
+            validate_package(&staged, &config.platform, &config.version).await?;
+            replace_and_launch(config, |target| {
+                let platform = config.platform.clone();
+                let workspace = config.result_file.parent().unwrap().to_owned();
+                async move { launch_app(&target, &platform, &workspace).await }
+            })
+            .await
+        }
+        .await;
+    let value = if outcome.is_ok() {
+        json!({"status":"installed","version":config.version})
+    } else {
+        json!({"status":"error","reason":"The update did not complete. The previous app and workspace have been retained."})
+    };
+    let temporary = config
+        .result_file
+        .with_file_name(format!(".update-result-{}.json", uuid::Uuid::new_v4()));
+    if save_private(&temporary, &serde_json::to_vec(&value).unwrap()).is_ok() {
+        // Windows rename cannot replace an existing result file; this file is status only.
+        #[cfg(windows)]
+        {
+            let _ = fs::remove_file(&config.result_file);
+        }
+        let _ = fs::rename(&temporary, &config.result_file);
+    }
+    if outcome.is_err() && parents_exited && config.target.exists() {
+        let _ = launch_app(
+            &config.target,
+            &config.platform,
+            config.result_file.parent().unwrap(),
+        )
+        .await;
+    }
+    outcome
+}
+pub async fn handle(app: &App, context: &Context) -> Result<Option<Response>> {
+    let route: Vec<String> = context
+        .path
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let route: Vec<&str> = route.iter().map(String::as_str).collect();
+    let updater = &app.0.updater;
+    let mut status = StatusCode::OK;
+    let value = match (context.method.as_str(), route.as_slice()) {
+        ("GET", ["updates"]) => {
+            let channel = context.query.get("includePrereleases");
+            if channel.is_some_and(|v| v != "true" && v != "false") {
+                return Err(Error::invalid("Choose a valid release channel."));
+            }
+            updater
+                .check(&app.0.client, channel.is_some_and(|v| v == "true"))
+                .await?
+        }
+        ("GET", ["updates", "status"]) => updater.status().await,
+        ("POST", ["updates", "download"]) => {
+            let channel = context.body["includePrereleases"]
+                .as_bool()
+                .ok_or_else(|| fail("Choose a valid update channel."))?;
+            status = StatusCode::ACCEPTED;
+            updater.start(app.0.client.clone(), channel).await?
+        }
+        ("POST", ["updates", "cancel"]) => updater.cancel().await?,
+        ("POST", ["updates", "install"]) => {
+            if app.0.update_token.is_empty()
+                || !crate::validation::same_secret(
+                    context.header("x-morrow-update"),
+                    &app.0.update_token,
+                )
+            {
+                return Err(Error::new(
+                    403,
+                    "Install updates from the desktop app controls.",
+                ));
+            }
+            let _guard = app
+                .0
+                .mailbox
+                .try_lock()
+                .map_err(|_| fail("Wait for the current operation to finish."))?;
+            let _google = app
+                .0
+                .calendars
+                .provider("google")?
+                .change
+                .try_lock()
+                .map_err(|_| crate::calendar::busy())?;
+            let _microsoft = app
+                .0
+                .calendars
+                .provider("microsoft")?
+                .change
+                .try_lock()
+                .map_err(|_| crate::calendar::busy())?;
+            if app.settings().await?["searchIndex"]["status"] == "running" {
+                return Err(fail("Wait for the current indexing operation to finish."));
+            }
+            updater.prepare().await?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((status, Json(value)).into_response()))
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey, pkcs8::EncodePublicKey};
+    use std::sync::atomic::AtomicU8;
+    use tokio_rustls::{TlsAcceptor, rustls};
+
+    struct Fixture {
+        root: PathBuf,
+        task: JoinHandle<()>,
+        client: reqwest::Client,
+        updater: Updater,
+        key: String,
+        mode: Arc<AtomicU8>,
+        marker: PathBuf,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.task.abort();
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+    async fn fixture() -> Fixture {
+        let platform = host_platform().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "morrow-rust-update-download-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let archive_root = if platform == "macos-arm64" {
+            "Morrow Mail.app"
+        } else {
+            "Morrow Mail-win32-x64"
+        };
+        let incoming = root.join("incoming").join(archive_root);
+        let target = root.join(if platform == "macos-arm64" {
+            "Installed Morrow.app"
+        } else {
+            "installed"
+        });
+        let data = root.join("workspace");
+        let (backend, executable) = package_paths(&incoming, platform).unwrap();
+        fs::create_dir_all(&backend).unwrap();
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::write(backend.join("package.json"), r#"{"version":"99.0.0"}"#).unwrap();
+        fs::write(data.join("retained"), "original workspace").unwrap();
+        let (old_backend, _) = package_paths(&target, platform).unwrap();
+        fs::create_dir_all(old_backend).unwrap();
+        fs::write(
+            package_paths(&target, platform)
+                .unwrap()
+                .0
+                .join("package.json"),
+            serde_json::to_vec(&json!({"version":VERSION})).unwrap(),
+        )
+        .unwrap();
+        let marker = root.join("restarted.txt");
+        if platform == "macos-arm64" {
+            let source = root.join("fixture.swift");
+            fs::write(&source,format!("import Foundation\ntry! (ProcessInfo.processInfo.environment[\"MORROW_DATA_DIR\"] ?? \"missing workspace\").write(toFile: {}, atomically: true, encoding: .utf8)\n",serde_json::to_string(&marker.to_string_lossy()).unwrap())).unwrap();
+            command_output(
+                clean_command("/usr/bin/swiftc")
+                    .args(["-target", "arm64-apple-macosx13.5"])
+                    .arg(&source)
+                    .arg("-o")
+                    .arg(&executable),
+                60,
+            )
+            .await
+            .unwrap();
+            fs::write(incoming.join("Contents/Info.plist"),r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.morrowmail.rust-updater-fixture</string><key>CFBundleExecutable</key><string>MorrowMail</string><key>CFBundleVersion</key><string>99.0.0</string><key>LSMinimumSystemVersion</key><string>13.5</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#).unwrap();
+            command_output(
+                clean_command("/usr/bin/codesign")
+                    .args(["--force", "--sign", "-"])
+                    .arg(&incoming),
+                30,
+            )
+            .await
+            .unwrap();
+        } else {
+            let code = format!(
+                "public class Restart {{ public static void Main() {{ System.IO.File.WriteAllText({}, System.Environment.GetEnvironmentVariable(\"MORROW_DATA_DIR\") ?? \"missing workspace\"); }} }}",
+                serde_json::to_string(&marker.to_string_lossy()).unwrap()
+            );
+            command_output(ps_command("$ErrorActionPreference='Stop'; Add-Type -TypeDefinition $env:MORROW_FIXTURE_CODE -OutputAssembly $env:MORROW_FIXTURE_EXE -OutputType WindowsApplication").env("MORROW_FIXTURE_CODE",code).env("MORROW_FIXTURE_EXE",&executable),60).await.unwrap();
+        }
+        let archive = root.join("update.zip");
+        if platform == "macos-arm64" {
+            command_output(
+                clean_command("/usr/bin/ditto")
+                    .args(["-c", "-k", "--keepParent"])
+                    .arg(&incoming)
+                    .arg(&archive),
+                30,
+            )
+            .await
+            .unwrap();
+        } else {
+            command_output(ps_command("$ErrorActionPreference='Stop'; Compress-Archive -LiteralPath $env:MORROW_FIXTURE_APP -DestinationPath $env:MORROW_FIXTURE_ZIP").env("MORROW_FIXTURE_APP",&incoming).env("MORROW_FIXTURE_ZIP",&archive),30).await.unwrap();
+        }
+        let zip = fs::read(&archive).unwrap();
+        let digest = hash_file(&archive).unwrap();
+        let key = SigningKey::from_bytes(&crate::store::random_bytes::<32>().unwrap());
+        let key_pem = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let platforms=PLATFORMS.into_iter().map(|p|(p.to_owned(),json!({"name":format!("Morrow-Mail-99.0.0-{p}.zip"),"size":zip.len(),"sha256":digest}))).collect::<serde_json::Map<_,_>>();
+        let manifest =
+            serde_json::to_vec(&json!({"version":"99.0.0","platforms":platforms})).unwrap();
+        let signature = STANDARD.encode(key.sign(&manifest).to_bytes()).into_bytes();
+        // Validate the new metadata/layout with the unchanged Node-era validator too.
+        let script = "const {validatePackage}=await import('./server/update-installer.js');await validatePackage(process.argv[1],process.argv[2],'99.0.0');";
+        let mut node = clean_command(if cfg!(windows) { "node.exe" } else { "node" });
+        node.current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+            .args(["--input-type=module", "-e", script])
+            .arg(&incoming)
+            .arg(platform);
+        command_output(&mut node, 60).await.unwrap();
+        let certificate = rcgen::generate_simple_self_signed(vec![
+            "github.com".into(),
+            "api.github.com".into(),
+            "objects.githubusercontent.com".into(),
+            "release-assets.githubusercontent.com".into(),
+        ])
+        .unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![certificate.cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der())
+                .into(),
+        )
+        .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .add_root_certificate(reqwest::Certificate::from_der(certificate.cert.der()).unwrap())
+            .resolve("github.com", address)
+            .resolve("api.github.com", address)
+            .resolve("objects.githubusercontent.com", address)
+            .resolve("release-assets.githubusercontent.com", address)
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let mode = Arc::new(AtomicU8::new(0));
+        let response_mode = mode.clone();
+        let zip = Arc::new(zip);
+        let manifest = Arc::new(manifest);
+        let signature = Arc::new(signature);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let acceptor = acceptor.clone();
+                let mode = response_mode.clone();
+                let zip = zip.clone();
+                let manifest = manifest.clone();
+                let signature = signature.clone();
+                tokio::spawn(async move {
+                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut bytes = Vec::new();
+                    while bytes.len() < 16384 && !bytes.ends_with(b"\r\n\r\n") {
+                        match stream.read_u8().await {
+                            Ok(byte) => bytes.push(byte),
+                            Err(_) => return,
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&bytes);
+                    let path = text.split_whitespace().nth(1).unwrap_or("");
+                    let mode = mode.load(AtomicOrdering::Acquire);
+                    let (status, headers, body) = if path.starts_with("/repos/") {
+                        if mode == 6 {
+                            (429, "", b"limited".to_vec())
+                        } else {
+                            (
+                                200,
+                                "",
+                                br#"[{"tag_name":"v99.0.0","prerelease":false,"draft":false}]"#
+                                    .to_vec(),
+                            )
+                        }
+                    } else if path.ends_with("update-manifest.json") {
+                        (
+                            200,
+                            "",
+                            if mode == 4 {
+                                vec![b'x'; 16385]
+                            } else {
+                                manifest.to_vec()
+                            },
+                        )
+                    } else if path.ends_with("update-manifest.sig") {
+                        (
+                            200,
+                            "",
+                            if mode == 3 {
+                                vec![b'x'; 88]
+                            } else {
+                                signature.to_vec()
+                            },
+                        )
+                    } else if path.ends_with(".zip") {
+                        if mode == 5 {
+                            (302, "Location: http://127.0.0.1/private\r\n", vec![])
+                        } else {
+                            let mut body = zip.to_vec();
+                            if mode == 2 {
+                                body[0] ^= 1;
+                            }
+                            (200, "", body)
+                        }
+                    } else {
+                        (404, "", vec![])
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status} Fixture\r\nConnection: close\r\n{headers}Content-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    if stream.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if mode == 1 && path.ends_with(".zip") {
+                        let _ = stream.write_all(&body[..1]).await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        return;
+                    }
+                    let _ = stream.write_all(&body).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        let updater = Updater(Arc::new(UpdaterInner {
+            data,
+            target: Some(target),
+            parent: AtomicU32::new(std::process::id()),
+            token_valid: true,
+            state: Mutex::new(UpdateState {
+                value: json!({"phase":"idle","received":0,"total":0}),
+                directory: None,
+                cancel: None,
+                job: None,
+            }),
+            checks: [Mutex::new(None), Mutex::new(None)],
+        }));
+        Fixture {
+            root,
+            task,
+            client,
+            updater,
+            key: key_pem,
+            mode,
+            marker,
+        }
+    }
+    async fn settled(updater: &Updater) -> Value {
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let state = updater.0.state.lock().await;
+                if state.cancel.is_none() {
+                    return state.value.clone();
+                }
+                drop(state);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn signed_download_cancellation_corruption_and_install_waiting_for_both_processes() {
+        if host_platform().is_none() {
+            return;
+        }
+        let fixture = fixture().await;
+        let updater = &fixture.updater;
+        assert_eq!(
+            updater.check(&fixture.client, true).await.unwrap()["latestVersion"],
+            "99.0.0"
+        );
+        for (mode, phase) in [
+            (2, "error"),
+            (3, "error"),
+            (4, "error"),
+            (5, "error"),
+            (6, "error"),
+        ] {
+            fixture.mode.store(mode, AtomicOrdering::Release);
+            updater
+                .start_trusted(fixture.client.clone(), true, &fixture.key)
+                .await
+                .unwrap();
+            assert_eq!(settled(updater).await["phase"], phase);
+            assert!(updater.0.state.lock().await.directory.is_none());
+            assert!(fixture.marker.try_exists().is_ok_and(|exists| !exists));
+        }
+        fixture.mode.store(1, AtomicOrdering::Release);
+        updater
+            .start_trusted(fixture.client.clone(), true, &fixture.key)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while updater.status().await["received"] != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            updater
+                .start_trusted(fixture.client.clone(), true, &fixture.key)
+                .await
+                .is_err()
+        );
+        updater.cancel().await.unwrap();
+        assert_eq!(settled(updater).await["phase"], "idle");
+        fixture.mode.store(0, AtomicOrdering::Release);
+        updater
+            .start_trusted(fixture.client.clone(), true, &fixture.key)
+            .await
+            .unwrap();
+        assert_eq!(settled(updater).await["phase"], "ready");
+        let old_directory = updater.0.state.lock().await.directory.clone().unwrap();
+        updater.cancel().await.unwrap();
+        assert!(!old_directory.exists());
+        updater
+            .start_trusted(fixture.client.clone(), true, &fixture.key)
+            .await
+            .unwrap();
+        assert_eq!(settled(updater).await["phase"], "ready");
+        let directory = updater.0.state.lock().await.directory.clone().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(directory.join("update.zip"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        #[cfg(windows)]
+        {
+            // Staging and downloaded content must inherit only owner/SYSTEM access,
+            // even when the installation's parent grants other local users access.
+            command_output(
+                ps_command("$ErrorActionPreference='Stop'; $d=Get-Acl -LiteralPath $env:MORROW_FIXTURE_STAGE; if (!$d.AreAccessRulesProtected) { throw 'Staging DACL is not protected' }; $owner=$d.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; foreach ($path in @($env:MORROW_FIXTURE_STAGE,(Join-Path $env:MORROW_FIXTURE_STAGE 'update.zip'))) { $a=Get-Acl -LiteralPath $path; $rules=$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); if (!$rules.Count) { throw 'Missing staging access rules' }; foreach ($rule in $rules) { if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin @($owner,'S-1-5-18')) { throw 'Staging grants another principal access' } } }")
+                    .env("MORROW_FIXTURE_STAGE", &directory),
+                30,
+            )
+            .await
+            .unwrap();
+        }
+        let sleeper = || {
+            let mut command = if cfg!(windows) {
+                let mut c = clean_command(powershell());
+                c.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 30",
+                ]);
+                c
+            } else {
+                let mut c = clean_command("/bin/sleep");
+                c.arg("30");
+                c
+            };
+            command.spawn().unwrap()
+        };
+        let mut ui = sleeper();
+        let mut service = sleeper();
+        let platform = host_platform().unwrap();
+        let root = if platform == "macos-arm64" {
+            "Morrow Mail.app"
+        } else {
+            "Morrow Mail-win32-x64"
+        };
+        let config = InstallConfig {
+            directory: directory.clone(),
+            root: root.into(),
+            platform: platform.into(),
+            target: updater.0.target.clone().unwrap(),
+            staged: directory.join("extracted").join(root),
+            backup: directory.join("previous"),
+            version: "99.0.0".into(),
+            installed_version: VERSION.into(),
+            pids: [ui.id().unwrap(), service.id().unwrap()],
+            result_file: updater.0.data.join("update-result.json"),
+        };
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let install = config.clone();
+        let key = fixture.key.clone();
+        let task = tokio::spawn(async move {
+            install_package(&install, &key, || {
+                let _ = ready.send(());
+                Ok(())
+            })
+            .await
+        });
+        waiting.await.unwrap();
+        // A modified staging tree must never become trusted just because the archive still hashes.
+        fs::write(
+            package_paths(&config.staged, platform)
+                .unwrap()
+                .0
+                .join("package.json"),
+            r#"{"version":"tampered"}"#,
+        )
+        .unwrap();
+        ui.kill().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!config.backup.exists());
+        assert!(!task.is_finished());
+        service.kill().await.unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&config.result_file).unwrap()).unwrap()["status"],
+            "installed"
+        );
+        assert!(config.backup.exists());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !fixture.marker.exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&fixture.marker).unwrap(),
+            updater.0.data.to_string_lossy()
+        );
+        assert_eq!(
+            fs::read_to_string(updater.0.data.join("retained")).unwrap(),
+            "original workspace"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &fs::read(
+                    package_paths(&config.target, platform)
+                        .unwrap()
+                        .0
+                        .join("package.json")
+                )
+                .unwrap()
+            )
+            .unwrap()["version"],
+            "99.0.0"
+        );
+        assert_eq!(updater.status().await["previous"], "Updated to 99.0.0.");
+        // Stop must retain the previous application once installation has been handed off.
+        updater.0.state.lock().await.value["phase"] = "installing".into();
+        updater.stop().await;
+        assert!(config.backup.exists());
+        assert!(updater.cancel().await.is_err());
+    }
+    #[tokio::test]
+    async fn installation_holds_calendar_change_gates_and_rejects_active_indexing() {
+        let root = std::env::temp_dir().join(format!(
+            "morrow-update-install-guards-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let app = App::open(&root, 3001, "a".repeat(64), "b".repeat(64)).unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-morrow-update",
+            axum::http::HeaderValue::from_str(&"b".repeat(64)).unwrap(),
+        );
+        let context = Context {
+            method: axum::http::Method::POST,
+            path: vec!["updates".into(), "install".into()],
+            body: json!({}),
+            query: json!({}),
+            headers,
+            owner: "demo".into(),
+            paged: false,
+        };
+        for provider in ["google", "microsoft"] {
+            let gate = app
+                .0
+                .calendars
+                .provider(provider)
+                .unwrap()
+                .change
+                .lock()
+                .await;
+            assert_eq!(
+                handle(&app, &context).await.unwrap_err().body,
+                crate::calendar::busy().body
+            );
+            drop(gate);
+        }
+        app.db(|db| {
+            db.set_settings(&json!({"searchIndex":{"status":"running"}}))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            handle(&app, &context).await.unwrap_err().to_string(),
+            "Wait for the current indexing operation to finish."
+        );
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn cancelling_a_native_extractor_waits_for_termination() {
+        let (send, mut receive) = watch::channel(false);
+        let mut command = if cfg!(windows) {
+            let mut c = clean_command(powershell());
+            c.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ]);
+            c
+        } else {
+            let mut c = clean_command("/bin/sleep");
+            c.arg("30");
+            c
+        };
+        let task = tokio::spawn(async move {
+            command_output_cancellable(&mut command, 30, Some(&mut receive)).await
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        send.send(true).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+    }
+}

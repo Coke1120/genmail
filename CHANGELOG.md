@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — Rust service candidate
+
+- Implement the complete Rust storage/API/provider/AI/calendar/background/search/update service with compatible encryption, retained recovery records, verified migration backups and one database writer.
+- Add bounded mail pages, six locale-aware sorts, body-on-demand loading and revision refresh in SwiftUI and React; preserve owner identity and manually unread messages.
+- Add explicit Rust desktop builds, native integration, isolated TLS protocol/provider fixtures, signed-upgrade checks, dependency audit/notices and 1k/10k/50k benchmarks. Default production selection remains Node until release gates and explicit cutover approval; Windows remains Electron.
+
 ## 0.5.0-beta.2 — 2026-09-24
 
 - In-app download, verified installation and automatic restart on macOS and Windows, with unsaved-edit/write guards.

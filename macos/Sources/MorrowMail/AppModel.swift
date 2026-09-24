@@ -10,11 +10,21 @@ final class AppModel: ObservableObject {
     @Published var error = ""
     @Published var notice = ""
     @Published var section = "inbox"
-    @Published var selectedMessage: String?
+    @Published var selectedMessage: String? {
+        didSet { if selectedMessage != oldValue { openedMessage = nil } }
+    }
     @Published var compose: Draft?
     @Published var organizing: JSON?
     @Published var searchFocus = 0
     @Published var searchResponse: JSON = .null
+    @Published var mailPage: JSON = .null
+    @Published var mailLoading = false
+    @Published var unreadOnly = false
+    @Published var messageDetail: JSON = .null
+    @Published var mailCursors = [""]
+    private var mailGeneration = 0
+    private var mailPageKey = ""
+    private var openedMessage: String?
     @Published var showSettings = false
     @Published var settingsTab = "general"
     @Published var assistantAction = "summary"
@@ -29,6 +39,7 @@ final class AppModel: ObservableObject {
     private var refreshing = false
     private var shuttingDown = false
     private var launchAttempt = 0
+    private var launching = false
     let dataDirectory: URL
     let session: URLSession
 
@@ -52,28 +63,65 @@ final class AppModel: ObservableObject {
     var features: [JSON] { state["features"].array }
     var preferences: JSON { state["settings"]["preferences"] }
     var policy: JSON { state["settings"]["policy"] }
-    var current: JSON? { (searchResponse.isNull ? messages : searchResponse["messages"].array).first { $0.viewID == selectedMessage } }
+    var mailQueryKey: String { [account, section, preferences["sort"].string, String(unreadOnly), state["revision"].string].joined(separator: "\n") }
+    var listedMessages: [JSON] {
+        if mailPage.isNull { return messages.filter { section == "studio" || (section == "starred" ? $0["starred"].bool && $0["folder"].string != "trash" : $0["folder"].string == section) } }
+        return mailPageKey == mailQueryKey ? mailPage["messages"].array : []
+    }
+    var current: JSON? {
+        let row = (searchResponse.isNull ? listedMessages : searchResponse["messages"].array).first { message in
+            message.viewID == selectedMessage && (message["accountId"].string == "demo" ? account == "demo" : accounts.contains { $0.id == message["accountId"].string })
+        }
+        let owner = messageDetail["accountId"].string
+        let folder = messageDetail["folder"].string
+        let inFolder = section == "studio" || (section == "starred" ? messageDetail["starred"].bool && folder != "trash" : section == folder)
+        let visible = row != nil || (searchResponse.isNull && inFolder && (account == owner || combined && accounts.contains { $0.id == owner }))
+        if visible && messageDetail.viewID == selectedMessage && !messageDetail.isNull { return messageDetail }
+        return row
+    }
     var colorScheme: ColorScheme? {
         switch preferences["theme"].string { case "light": return .light; case "dark": return .dark; default: return nil }
     }
     var canNavigate: Bool { !busy && unsavedForms.isEmpty && compose == nil && organizing == nil && !showSettings }
 
     func start() async {
-        guard process == nil else { return }
+        guard !launching else { return }
+        launching = true; defer { launching = false }
+        if let previous = process {
+            guard shuttingDown else { return }
+            // Retain ownership until the previous service has actually drained and exited.
+            let deadline = Date().addingTimeInterval(70)
+            while previous.isRunning && Date() < deadline {
+                guard !Task.isCancelled else { starting = false; return }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard !previous.isRunning else {
+                error = "The previous local service is still closing. Wait for it to finish before reopening Morrow Mail."
+                starting = false; return
+            }
+            process = nil; input = nil; output = nil
+        }
+        if let identifier = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: identifier).contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+            error = "Another copy of Morrow Mail is already running. Close it before opening this copy."
+            starting = false; return
+        }
         starting = true; error = ""; shuttingDown = false; launchAttempt += 1
         let attempt = launchAttempt
         do {
             let resources = Bundle.main.resourceURL!
+            let runtime = Bundle.main.object(forInfoDictionaryKey: "MorrowServiceRuntime") as? String ?? "node"
+            guard ["node", "rust"].contains(runtime) else { throw APIError("The app has an invalid service configuration. Reinstall Morrow Mail.") }
             let backend = resources.appendingPathComponent("backend/server/native.js")
-            let node = resources.appendingPathComponent("node")
-            guard FileManager.default.isExecutableFile(atPath: node.path), FileManager.default.fileExists(atPath: backend.path) else {
+            let executable = resources.appendingPathComponent(runtime == "rust" ? "morrow-service" : "node")
+            guard FileManager.default.isExecutableFile(atPath: executable.path), runtime == "rust" || FileManager.default.fileExists(atPath: backend.path) else {
                 throw APIError("Build and open Morrow Mail.app with npm run macos:build. The app includes its own runtime.")
             }
             var random = [UInt8](repeating: 0, count: 32)
             guard SecRandomCopyBytes(kSecRandomDefault, random.count, &random) == errSecSuccess else { throw APIError("The system could not create a private session.") }
             token = random.map { String(format: "%02x", $0) }.joined()
             let child = Process(), input = Pipe(), output = Pipe()
-            child.executableURL = node; child.arguments = [backend.path]
+            child.executableURL = executable; child.arguments = runtime == "rust" ? [] : [backend.path]
             child.currentDirectoryURL = resources.appendingPathComponent("backend")
             // Do not inherit NODE_OPTIONS, preload paths, or shell secrets.
             child.environment = ["PATH": "/usr/bin:/bin", "HOME": FileManager.default.homeDirectoryForCurrentUser.path, "NODE_ENV": "production"]
@@ -81,8 +129,9 @@ final class AppModel: ObservableObject {
             child.standardError = FileHandle.nullDevice
             child.terminationHandler = { [weak self] _ in
                 Task { @MainActor in
-                    guard let self, self.launchAttempt == attempt, !self.shuttingDown else { return }
-                    self.baseURL = nil; self.process = nil; self.starting = false
+                    guard let self, self.launchAttempt == attempt else { return }
+                    self.baseURL = nil; self.process = nil; self.input = nil; self.output = nil; self.starting = false
+                    guard !self.shuttingDown else { return }
                     self.error = "The local service stopped. Your saved data is retained. Quit and reopen Morrow Mail."
                 }
             }
@@ -113,7 +162,12 @@ final class AppModel: ObservableObject {
                     try? await Task.sleep(nanoseconds: 30_000_000_000)
                     guard !Task.isCancelled, let self else { return }
                     // The service syncs all accounts and schedules AI; this only refreshes visible state.
-                    if self.canNavigate { self.perform { try await self.reload() } }
+                    if self.canNavigate && NSApp.isActive {
+                        self.perform {
+                            let stamp = try await self.request("/state/revision", mailbox: "")
+                            if stamp["revision"] != self.state["revision"] || stamp["accountId"].string != self.account { try await self.reload() }
+                        }
+                    }
                 }
             }
         } catch {
@@ -125,12 +179,14 @@ final class AppModel: ObservableObject {
         shuttingDown = true; periodic?.cancel()
         try? input?.fileHandleForWriting.close()
         if process?.isRunning == true { process?.terminate() }
-        process = nil; input = nil; output = nil; baseURL = nil
+        baseURL = nil
+        if process?.isRunning != true { process = nil; input = nil; output = nil }
     }
     func request(_ path: String, method: String = "GET", body: JSON? = nil, mailbox: String? = nil, authorizeUpdate: Bool = false) async throws -> JSON {
         guard let baseURL, let url = URL(string: "/api" + path, relativeTo: baseURL)?.absoluteURL else { throw APIError("The local service is not connected.") }
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.setValue("paged", forHTTPHeaderField: "X-Morrow-View")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if authorizeUpdate { request.setValue(token, forHTTPHeaderField: "X-Morrow-Update") }
         let owner = mailbox ?? account
@@ -139,7 +195,7 @@ final class AppModel: ObservableObject {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.url?.host == baseURL.host, http.url?.port == baseURL.port else { throw APIError("The local service returned an unexpected response.") }
         guard data.count <= 32 * 1024 * 1024 else { throw APIError("The response was too large. Narrow your request.") }
-        let result = try JSONDecoder().decode(JSON.self, from: data)
+        let result = try await Task.detached(priority: .userInitiated) { try JSONDecoder().decode(JSON.self, from: data) }.value
         guard (200...299).contains(http.statusCode) else { throw APIError(payload: result) }
         return result
     }
@@ -157,6 +213,20 @@ final class AppModel: ObservableObject {
             } catch { onError(error.localizedDescription) }
         }
     }
+    func backup(to destination: URL) async throws {
+        let resources = Bundle.main.resourceURL!
+        if Bundle.main.object(forInfoDictionaryKey: "MorrowServiceRuntime") as? String == "rust" {
+            _ = try await request("/backup", method: "POST", body: .object(["destination": .string(destination.path)]), authorizeUpdate: true)
+        } else {
+            let process = Process(); process.executableURL = resources.appendingPathComponent("node")
+            process.arguments = [resources.appendingPathComponent("backend/scripts/backup.js").path, destination.path]
+            process.environment = ["DATA_DIR": dataDirectory.path, "PATH": "/usr/bin:/bin"]
+            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+            try process.run()
+            await Task.detached { process.waitUntilExit() }.value
+            guard process.terminationStatus == 0 else { throw APIError("Backup failed. Choose a new destination that does not already exist.") }
+        }
+    }
     func reload() async throws {
         guard !refreshing else { return }
         refreshing = true; defer { refreshing = false }
@@ -164,8 +234,51 @@ final class AppModel: ObservableObject {
         // message mutations still carry their explicitly captured owner.
         let next = try await request("/state", mailbox: "")
         guard !next["account"].isNull, !next["messages"].isNull else { throw APIError("Morrow received an incomplete workspace.") }
+        if next["account"]["id"].string != account { mailPage = .null; messageDetail = .null; selectedMessage = nil; searchResponse = .null }
         state = next
-        if let selectedMessage, !(messages + searchResponse["messages"].array).contains(where: { $0.viewID == selectedMessage }) { self.selectedMessage = nil }
+    }
+    @discardableResult
+    func loadMailPage(cursor: String = "", reset: Bool = true) async -> Bool {
+        guard (mailFolders.contains(section) || section == "studio"), baseURL != nil else { return false }
+        mailGeneration += 1
+        let ticket = mailGeneration, query = mailQueryKey
+        mailLoading = true; error = ""
+        defer { if ticket == mailGeneration { mailLoading = false } }
+        do {
+            let result = try await request("/mail/page", method: "POST", body: .object(["folder": .string(section == "studio" ? "" : section), "sort": preferences["sort"], "unreadOnly": .bool(section != "studio" && unreadOnly), "cursor": .string(cursor), "locale": .string(Locale.current.identifier(.bcp47))]))
+            guard !Task.isCancelled, ticket == mailGeneration, query == mailQueryKey else { return false }
+            if reset { mailCursors = [""] }
+            mailPageKey = query
+            mailPage = result
+            return true
+        } catch {
+            guard !Task.isCancelled, ticket == mailGeneration, query == mailQueryKey else { return false }
+            self.error = error.localizedDescription
+            if !cursor.isEmpty { await loadMailPage(); notice = "Mail changed. Showing the first page." }
+            return false
+        }
+    }
+    func turnMailPage(next: Bool) async {
+        let cursors = next ? mailCursors + [mailPage["nextCursor"].string] : Array(mailCursors.dropLast())
+        guard let cursor = cursors.last, !next || !cursor.isEmpty else { return }
+        selectedMessage = nil; messageDetail = .null
+        if await loadMailPage(cursor: cursor, reset: false) { mailCursors = cursors }
+    }
+    func loadMessage() async {
+        guard let row = current else { return }
+        let id = row.viewID, view = account
+        do {
+            let result = try await request("/messages/" + encodedPath(row.id), mailbox: row["accountId"].string)
+            guard !Task.isCancelled, selectedMessage == id, account == view else { return }
+            messageDetail = result["message"]
+            let firstOpen = openedMessage != id
+            openedMessage = id
+            if firstOpen && preferences["markReadOnOpen"].bool && !messageDetail["read"].bool && messageDetail["folder"].string != "drafts" {
+                let updated = try await request("/messages/" + encodedPath(row.id), method: "PATCH", body: .object(["read": .bool(true)]), mailbox: row["accountId"].string)
+                if selectedMessage == id { messageDetail = updated["message"] }
+                try await reload()
+            }
+        } catch { if !Task.isCancelled, selectedMessage == id { messageDetail = .null; self.error = error.localizedDescription } }
     }
     func refreshWhenActive() {
         guard !starting, baseURL != nil, !busy, compose == nil else { return }
@@ -180,7 +293,7 @@ final class AppModel: ObservableObject {
         }
     }
     func selectAccount(_ id: String, folder: String? = nil) async throws {
-        searchResponse = .null
+        searchResponse = .null; mailPage = .null; messageDetail = .null
         state = try await request("/account/select", method: "POST", body: .object(["accountId": .string(id)]))
         selectedMessage = nil
         if let folder { section = folder }
@@ -188,7 +301,7 @@ final class AppModel: ObservableObject {
     func openAssistant(_ action: String, message: JSON) {
         perform {
             if self.account != message["accountId"].string { try await self.selectAccount(message["accountId"].string) }
-            self.selectedMessage = message.viewID; self.assistantAction = action; self.section = "studio"
+            self.selectedMessage = message.viewID; self.messageDetail = message; self.assistantAction = action; self.section = "studio"
         }
     }
     func sync() async throws {
@@ -207,6 +320,7 @@ final class AppModel: ObservableObject {
         perform {
             _ = try await self.request("/messages/" + encodedPath(message.id), method: "PATCH", body: values, mailbox: message["accountId"].string)
             try await self.reload()
+            await self.loadMessage()
         }
     }
     func newDraft(_ value: Draft? = nil) {

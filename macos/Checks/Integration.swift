@@ -18,6 +18,25 @@ struct NativeClientChecks {
         let publicState = try JSONEncoder().encode(model.state)
         assert(!String(decoding: publicState, as: UTF8.self).contains("fixture-bundled-secret"))
         assert(model.features.count == 19)
+        assert(model.messages.allSatisfy { $0["body"].isNull && $0["footer"].isNull })
+        await model.loadMailPage()
+        assert(!model.listedMessages.isEmpty && model.mailPage["pageSize"].number == 50)
+        model.selectedMessage = model.listedMessages[0].viewID
+        await model.loadMessage()
+        assert(model.current?["body"].nonempty == true)
+        let revision = try await model.request("/state/revision")
+        assert(revision["revision"] == model.state["revision"])
+        let opened = model.current!
+        _ = try await model.request("/messages/" + encodedPath(opened.id), method: "PATCH", body: .object(["read": .bool(false)]), mailbox: opened["accountId"].string)
+        try await model.reload()
+        await model.loadMessage()
+        assert(model.current?["read"].bool == false, "Refreshing the body must preserve a manual mark-unread action.")
+        model.selectedMessage = nil
+        model.selectedMessage = opened.viewID
+        await model.loadMessage()
+        assert(model.current?["read"].bool == true, "Reopening the message still marks it read.")
+        model.selectedMessage = nil; model.messageDetail = .null; model.mailPage = .null
+        print("Native bounded mail metadata, on-demand body and revision checks passed.")
         let update = try await model.request("/updates?includePrereleases=true")
         assert(update["updateAvailable"].bool && update["latestVersion"].string == "0.5.0-alpha.2")
         let trigger: JSON = .object(["action": .string("summary"), "trigger": .string("onOpen"), "messageId": .string("demo-1")])
@@ -100,6 +119,10 @@ struct NativeClientChecks {
         try await model.selectAccount("all", folder: "inbox")
         let duplicates = model.messages.filter { $0.id == "shared-inbox-id" }
         assert(duplicates.count == 2 && Set(duplicates.map(\.viewID)).count == 2)
+        for row in duplicates {
+            let detail = try await model.request("/messages/" + encodedPath(row.id), mailbox: row["accountId"].string)
+            assert(detail["message"]["accountId"] == row["accountId"] && detail["message"]["body"].nonempty)
+        }
         let searchOptions: JSON = .object(["query": .string("Owned"), "scope": .string("all"), "sort": .string("relevance")])
         let search = try await model.request("/search", method: "POST", body: searchOptions)
         assert(search["total"].number == 2 && Set(search["messages"].array.map(\.viewID)).count == 2)

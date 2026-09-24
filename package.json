@@ -54,7 +54,13 @@
     "macos:open": "open \"build/macos/Morrow Mail.app\"",
     "windows:build": "node scripts/build-windows.js",
     "desktop:test": "node scripts/test-desktop.js",
-    "updater:test": "node scripts/test-updater.js"
+    "updater:test": "node scripts/test-updater.js",
+    "benchmark:mail": "node scripts/benchmark-mail.js",
+    "rust:test": "node scripts/test-rust.js",
+    "rust:build": "cargo build --manifest-path rust/Cargo.toml --release --locked",
+    "macos:rust:test": "node scripts/test-macos-rust.js",
+    "benchmark:rust-service": "node scripts/benchmark-rust-service.js",
+    "updater:rust-upgrade:test": "node scripts/test-rust-upgrade.js"
   },
   "license": "MIT",
   "type": "module",

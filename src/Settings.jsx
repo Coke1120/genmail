@@ -107,7 +107,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   }, [tab, isDirty, operationBusy, onUpdate]);
 
   async function refreshMailConnections(signal) {
-    const response = await fetch('/api/state', { signal });
+    const response = await fetch('/api/state', { signal, headers: { 'X-Morrow-View': 'paged' } });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error);
     if (!signal?.aborted) onUpdate(result);
@@ -115,7 +115,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   async function updateDownload(action) {
     setBusy('updates'); setError('');
     try {
-      const response = await fetch(`/api/updates/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ includePrereleases }) });
+      const response = await fetch(`/api/updates/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Morrow-View': 'paged' }, body: JSON.stringify({ includePrereleases }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not update the app.');
       setDownloadState(result);
@@ -149,7 +149,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
     if (label === 'test') setTestResult('');
     try {
       const response = await fetch(`/api/${path}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Genmail-Account': accountId }, body: JSON.stringify(body),
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Morrow-View': 'paged', 'X-Genmail-Account': accountId }, body: JSON.stringify(body),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Unable to save. Please try again.');
@@ -302,7 +302,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
           <label className="settings-field">History range<select value={importOptions.months} onChange={e => setImportOptions({ ...importOptions, months: Number(e.target.value) })}>{[1, 3, 6, 12].map(n => <option key={n} value={n}>Last {n} month{n > 1 ? 's' : ''}</option>)}</select></label>
           {['inbox', 'sent'].map(folder => <label className="settings-permission" key={folder}><input type="checkbox" checked={importOptions[folder]} onChange={e => setImportOptions({ ...importOptions, [folder]: e.target.checked })} /><span>{folder === 'inbox' ? 'Inbox' : 'Sent — for optional writing-style learning'}</span></label>)}
           <p className="settings-help">Choose at least one folder. IMAP Sent requires the server’s Sent special-use folder. Configure style learning separately in Learning.</p>
-          <button className="button secondary" onClick={async () => { setBusy('refresh'); setError(''); try { const response = await fetch('/api/state', { headers: { 'X-Genmail-Account': state.account.id } }); const next = await response.json(); if (!response.ok) throw new Error(next.error); onUpdate(next); } catch (error) { setError(error.message); } finally { setBusy(''); } }}>Refresh progress</button>
+          <button className="button secondary" onClick={async () => { setBusy('refresh'); setError(''); try { const response = await fetch('/api/state', { headers: { 'X-Genmail-Account': state.account.id, 'X-Morrow-View': 'paged' } }); const next = await response.json(); if (!response.ok) throw new Error(next.error); onUpdate(next); } catch (error) { setError(error.message); } finally { setBusy(''); } }}>Refresh progress</button>
         </fieldset>
         {(state.accounts || []).map(account => <div className="settings-connected" key={account.id}>
           <div><strong>{account.email}</strong><p>{account.provider.toUpperCase()} · Disconnect removes only this account’s credentials. Cached mail and drafts stay on this computer.</p>{account.import && <p role="status">Import: {account.import.status} · {account.import.imported} new messages · {account.import.options.months} months{account.import.error && ` · ${account.import.error}`}</p>}

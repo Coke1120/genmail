@@ -16,7 +16,7 @@ export default function StyleLearning({ state, onUpdate, onDirtyChange, onBusyCh
     if (['settings', 'preview'].includes(path) && preview?.status === 'ready' && !window.confirm('Replace the current style proposal? Your approved style will be retained.')) return;
     setBusy(true); setError('');
     try {
-      const response = await fetch(`/api/style/${path}`, { method, headers: { 'Content-Type': 'application/json', 'X-Genmail-Account': state.account.id }, body: JSON.stringify(body) });
+      const response = await fetch(`/api/style/${path}`, { method, headers: { 'Content-Type': 'application/json', 'X-Morrow-View': 'paged', 'X-Genmail-Account': state.account.id }, body: JSON.stringify(body) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Unable to complete style learning.');
       onUpdate(result);

@@ -1,0 +1,250 @@
+import Foundation
+
+// This session observes the localhost handoff but never follows an OAuth redirect.
+final class RustStopOAuthRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
+@main
+struct NativeRustChecks {
+    static let first = "first@native-rust.invalid"
+    static let second = "second@native-rust.invalid"
+
+    static func check(_ condition: Bool, _ message: String) throws {
+        if !condition { throw APIError("Native Rust acceptance: " + message) }
+    }
+
+    @MainActor static func collect(_ model: AppModel, expected: Int) async throws -> [JSON] {
+        try check(await model.loadMailPage(), "first page failed: \(model.error)")
+        var rows = [JSON](), seen = Set<String>()
+        for _ in 0..<5 {
+            let page = model.listedMessages
+            try check(model.mailPage["pageSize"].number == 50 && page.count <= 50, "mail pages must remain bounded")
+            try check(model.mailPage["total"].number == Double(expected), "mail page total differs from fixture")
+            try check(page.allSatisfy { $0["body"].isNull && $0["footer"].isNull }, "body or footer leaked into list metadata")
+            for row in page {
+                try check(seen.insert(row.viewID).inserted, "pagination repeated an account/message identity")
+            }
+            rows += page
+            if model.mailPage["nextCursor"].string.isEmpty { break }
+            await model.turnMailPage(next: true)
+            try check(model.error.isEmpty, "next page failed: \(model.error)")
+        }
+        try check(rows.count == expected, "pagination omitted fixture messages")
+        return rows
+    }
+
+    @MainActor static func expectFailure(_ model: AppModel, path: String, method: String = "POST", body: JSON = .object([:]), owner: String? = nil) async throws {
+        do { _ = try await model.request(path, method: method, body: method == "GET" ? nil : body, mailbox: owner) }
+        catch is APIError { return }
+        throw APIError("Native Rust acceptance: rejected operation unexpectedly succeeded: " + path)
+    }
+
+    static func waitForStop(_ base: URL) async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 0.5
+        config.timeoutIntervalForResource = 0.5
+        let probe = URLSession(configuration: config)
+        defer { probe.invalidateAndCancel() }
+        let url = base.appendingPathComponent("api/health")
+        for _ in 0..<100 {
+            do { _ = try await probe.data(from: url) }
+            catch let error as URLError where error.code == .cannotConnectToHost { return }
+            catch { /* A timeout or stale keep-alive connection does not prove exit. */ }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        throw APIError("Native Rust acceptance: stopped service still accepts requests")
+    }
+
+    @MainActor static func main() async throws {
+        let model = AppModel()
+        defer { model.stop() }
+        await model.start()
+        try check(model.baseURL != nil && !model.state.isNull && model.error.isEmpty, "service launch failed: \(model.error)")
+        try check(model.dataDirectory.path == ProcessInfo.processInfo.environment["MORROW_DATA_DIR"], "fixture workspace override was not retained")
+        try check(Bundle.main.object(forInfoDictionaryKey: "MorrowServiceRuntime") as? String == "rust", "bundle did not select Rust")
+        try check(model.accounts.count == 2 && model.account == first, "seeded account migration failed")
+        try check(model.preferences["syncInterval"].number == 0 && !model.policy["enabled"].bool, "fixture background network settings changed")
+        try check(model.state["settings"]["oauthClients"]["google"]["configured"].bool, "trusted bundled OAuth client was not loaded")
+        let publicState = String(decoding: try JSONEncoder().encode(model.state), as: UTF8.self)
+        try check(!publicState.contains("fixture-native-rust-"), "connection secrets appeared in public state")
+        try check(model.messages.count == 50 && model.messages.allSatisfy { $0["body"].isNull }, "startup state was not paged")
+        let health = try await model.request("/health")
+        try check(health["service"].string == "morrow-mail", "private service health contract changed")
+        let calendars = try await model.request("/calendars")
+        try check(calendars["calendars"].array.isEmpty && calendars["connections"].array.allSatisfy { !$0["connected"].bool }, "fixture unexpectedly connected a calendar")
+
+        for owner in [first, "all"] {
+            try await model.selectAccount(owner, folder: "inbox")
+            for (sort, _) in mailSortOptions {
+                model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["sort": .string(sort)]))
+                let rows = try await collect(model, expected: owner == "all" ? 130 : 65)
+                try check(rows.map(\.viewID) == sortedMail(rows, by: sort).map(\.viewID), "\(sort) ordering differs from native client for \(owner)")
+                try check(rows.allSatisfy { $0["accountId"].string != "demo" && (owner == "all" || $0["accountId"].string == owner) }, "account scope leaked rows")
+                if owner == "all" {
+                    try check(Set(rows.map(\.id)).count == 65 && Set(rows.map(\.viewID)).count == 130, "combined duplicate IDs lost their owner")
+                }
+                await model.turnMailPage(next: false)
+                try check(model.error.isEmpty && !model.listedMessages.isEmpty, "previous page navigation failed")
+            }
+        }
+        print("Native Rust: six sorts, bounded next/previous pages, combined identities and account scopes passed.")
+
+        model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["sort": .string("newest")]))
+        try check(await model.loadMailPage(), "could not reload combined inbox")
+        let duplicates = model.listedMessages.filter { $0.id == "google:shared" }
+        try check(duplicates.count == 2, "shared fixture messages were not on the first page")
+        for row in duplicates {
+            let detail = try await model.request("/messages/" + encodedPath(row.id), mailbox: row["accountId"].string)
+            try check(detail["message"]["body"].string.contains("Owned by " + row["accountId"].string), "detail routed through a different account")
+        }
+        let opened = duplicates.first { $0["accountId"].string == first }!
+        model.selectedMessage = opened.viewID
+        await model.loadMessage()
+        try check(model.current?["read"].bool == true && model.current?["body"].nonempty == true, "on-demand open did not load and mark read")
+        _ = try await model.request("/messages/" + encodedPath(opened.id), method: "PATCH", body: .object(["read": .bool(false)]), mailbox: first)
+        try await model.reload()
+        await model.loadMessage()
+        try check(model.current?["read"].bool == false, "refresh overrode a manual unread action")
+        model.selectedMessage = nil
+        model.selectedMessage = opened.viewID
+        await model.loadMessage()
+        try check(model.current?["read"].bool == true, "reopening did not mark read")
+        _ = try await model.request("/messages/" + encodedPath(opened.id), method: "PATCH", body: .object(["starred": .bool(true)]), mailbox: first)
+        let other = try await model.request("/messages/" + encodedPath(opened.id), mailbox: second)
+        try check(!other["message"]["starred"].bool && !other["message"]["read"].bool, "patch changed the other account's duplicate ID")
+        try await expectFailure(model, path: "/messages/" + encodedPath(opened.id), method: "PATCH", body: .object(["read": .bool(true)]), owner: "all")
+        model.unreadOnly = true
+        try await model.reload()
+        try check(await model.loadMailPage(), "unread filter failed")
+        try check(!model.listedMessages.isEmpty && model.listedMessages.allSatisfy { !$0["read"].bool }, "unread filter included read mail")
+        model.unreadOnly = false
+        print("Native Rust: owner-bound detail/patch and manual unread preservation passed.")
+
+        model.selectedMessage = nil
+        model.messageDetail = .null
+        model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["language": .string("繁體中文"), "translationLanguage": .string("日本語"), "signatureFormat": .string("html"), "signature": .string("<b>Native Rust signature</b>")]))
+        model.newDraft()
+        try check(model.compose?.accountID == first, "new combined draft chose an invalid From account")
+        model.compose = nil
+        model.newDraft(Draft(message: opened, reply: true))
+        try check(model.compose?.accountID == first && model.compose?.replyToID == opened.id, "reply lost original owner")
+        var draft = model.compose!
+        draft.subject = "Native Rust owned draft"
+        draft.body = "Saved fixture draft; no provider delivery is performed."
+        draft.to = "recipient@example.invalid"
+        draft.cc = "copy@example.invalid"
+        draft.bcc = "hidden@example.invalid"
+        model.compose = nil
+        try await model.selectAccount(second, folder: "inbox")
+        let saved = try await model.request("/drafts", method: "POST", body: draft.payload, mailbox: draft.accountID)
+        let savedDraft = Draft(message: saved["message"])
+        try check(savedDraft.accountID == first && savedDraft.bcc == draft.bcc && savedDraft.footer == draft.footer, "saved draft dropped owner, Bcc or footer")
+        model.newDraft(savedDraft)
+        try check(model.compose?.accountID == first && model.compose?.savedID == savedDraft.savedID, "saved draft changed owner with selected view")
+        model.compose = nil
+        try await expectFailure(model, path: "/messages/" + encodedPath(savedDraft.savedID), method: "GET", owner: second)
+        print("Native Rust: replies and saved draft ownership, Bcc and signature round trips passed.")
+
+        let oldBase = model.baseURL!
+        let oldRevision = model.state["revision"].string
+        model.stop()
+        try check(model.baseURL == nil, "stop retained a callable base URL")
+        try await waitForStop(oldBase)
+        await model.start()
+        try check(model.error.isEmpty && model.baseURL != nil && model.account == second, "service restart did not restore selection: \(model.error)")
+        try check(model.state["revision"].string != oldRevision, "restart did not replace revision epoch")
+        try check(model.preferences["language"].string == "繁體中文" && model.preferences["translationLanguage"].string == "日本語", "settings did not survive restart")
+        let restored = try await model.request("/messages/" + encodedPath(savedDraft.savedID), mailbox: first)
+        try check(Draft(message: restored["message"]).accountID == first && restored["message"]["body"].string == draft.body, "draft did not survive restart")
+        print("Native Rust: graceful service stop, restart, encrypted settings and draft persistence passed.")
+
+        let backupDirectory = model.dataDirectory.deletingLastPathComponent().appendingPathComponent("native-backup", isDirectory: true)
+        try await model.backup(to: backupDirectory)
+        let backupDatabase = backupDirectory.appendingPathComponent("genmail.sqlite")
+        let backupKey = backupDirectory.appendingPathComponent("encryption.key")
+        try check(FileManager.default.fileExists(atPath: backupDatabase.path) && FileManager.default.fileExists(atPath: backupKey.path), "online backup omitted database or encryption key")
+        let databaseSnapshot = try Data(contentsOf: backupDatabase)
+        let keySnapshot = try Data(contentsOf: backupKey)
+        try check(!databaseSnapshot.isEmpty && !keySnapshot.isEmpty, "online backup wrote an empty database or key")
+        var overwriteRejected = false
+        do { try await model.backup(to: backupDirectory) }
+        catch is APIError { overwriteRejected = true }
+        try check(overwriteRejected, "online backup overwrote an existing destination")
+        try check(try Data(contentsOf: backupDatabase) == databaseSnapshot && Data(contentsOf: backupKey) == keySnapshot, "rejected backup modified existing files")
+        let afterBackup = try await model.request("/health")
+        try check(afterBackup["status"].string == "ok", "service stopped responding after online backup")
+        let afterBackupDraft = try await model.request("/messages/" + encodedPath(savedDraft.savedID), mailbox: first)
+        try check(afterBackupDraft["message"] == restored["message"], "online backup changed the live draft")
+        print("Native Rust: online backup, database/key preservation, overwrite rejection and continued service availability passed.")
+
+        try await model.selectAccount("demo", folder: "inbox")
+        try check(await model.loadMailPage(), "demo inbox did not load")
+        let demo = model.listedMessages[0]
+        try await expectFailure(model, path: "/ai", body: .object(["action": .string("summary"), "messageId": .string(demo.id)]), owner: "demo")
+        model.state = try await model.request("/settings/policy", method: "POST", body: .object(["enabled": .bool(true)]))
+        let assistance = try await model.request("/ai", method: "POST", body: .object(["action": .string("summary"), "messageId": .string(demo.id)]), mailbox: "demo")
+        try check(assistance["source"].string == "demo" && assistance["text"].nonempty, "demo assistance did not stay local")
+        let preview = try await model.request("/workflows/preview", method: "POST", body: .object(["action": .string("schedule"), "messageId": .string(demo.id), "when": .string(utcDate(Date().addingTimeInterval(86400)))]), mailbox: "demo")
+        try check(preview["simulated"].bool && !preview["preview"].id.isEmpty, "workflow preview lost simulation label")
+        let applied = try await model.request("/workflows/apply", method: "POST", body: .object(["previewId": preview["preview"]["id"]]), mailbox: "demo")
+        try check(applied["simulated"].bool && applied["workspace"]["events"].array.contains { $0["simulated"].bool }, "simulated schedule was not stored locally")
+        try await expectFailure(model, path: "/workflows/apply", body: .object(["previewId": preview["preview"]["id"]]), owner: "demo")
+        model.state = try await model.request("/settings/policy", method: "POST", body: .object(["enabled": .bool(false)]))
+        print("Native Rust: disabled AI permissions, local demo assistance and one-use simulated workflow passed.")
+
+        let browser = URLSession(configuration: .ephemeral, delegate: RustStopOAuthRedirects(), delegateQueue: nil)
+        defer { browser.invalidateAndCancel() }
+        for calendar in [false, true] {
+            for provider in ["google", "microsoft"] {
+                let route = calendar ? "/calendars/\(provider)/connect" : "/oauth/\(provider)/start"
+                let credentials: JSON = provider == "google" ? .object(["useDefaultClient": .bool(true)]) : .object(["clientId": .string("fixture-client")])
+                let started = try await model.request(route, method: "POST", body: credentials)
+                let handoff = URL(string: started["url"].string)!
+                try check(handoff.host == "localhost" && handoff.port == model.baseURL?.port && handoff.path.hasSuffix("/authorize"), "OAuth handoff escaped the local service")
+                let (_, response) = try await browser.data(from: handoff)
+                let authorization = response as! HTTPURLResponse
+                try check(authorization.statusCode == 302 && authorization.url?.host == "localhost", "browser followed an external OAuth request")
+                let cookie = authorization.value(forHTTPHeaderField: "Set-Cookie") ?? ""
+                try check(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"), "browser binding cookie is missing")
+                let external = URLComponents(string: authorization.value(forHTTPHeaderField: "Location")!)!
+                try check(external.scheme == "https" && ["accounts.google.com", "login.microsoftonline.com"].contains(external.host ?? ""), "invalid external authorization target")
+                let items = external.queryItems ?? []
+                try check(items.first { $0.name == "code_challenge_method" }?.value == "S256", "OAuth omitted PKCE")
+                try check(!items.contains { $0.name == "client_secret" }, "OAuth secret leaked into authorization URL")
+                let scope = items.first { $0.name == "scope" }?.value ?? ""
+                try check(calendar ? !scope.contains("gmail") && !scope.contains("Mail.Read") : !scope.contains("calendar") && !scope.contains("Calendars"), "mail and calendar OAuth scopes mixed")
+                // Exercise a denied callback locally; never exchange an authorization code.
+                var callback = URLComponents(string: items.first { $0.name == "redirect_uri" }!.value!)!
+                callback.queryItems = [URLQueryItem(name: "state", value: items.first { $0.name == "state" }!.value), URLQueryItem(name: "error", value: "access_denied")]
+                let (_, denied) = try await browser.data(from: callback.url!)
+                let deniedResponse = denied as! HTTPURLResponse
+                let destination = URLComponents(string: deniedResponse.value(forHTTPHeaderField: "Location")!)!
+                try check(deniedResponse.statusCode == 302 && destination.queryItems?.contains { $0.name == (calendar ? "calendarError" : "connectionError") } == true, "denied OAuth callback failed")
+            }
+        }
+        try await model.reload()
+        try check(model.account == "demo" && model.accounts.count == 2, "uncompleted OAuth changed an account")
+        try check(model.state["settings"]["calendars"].array.allSatisfy { !$0["connected"].bool }, "uncompleted OAuth created a calendar connection")
+        print("Native Rust: trusted OAuth configuration and browser-bound PKCE handoff passed without external requests.")
+
+        try await model.selectAccount("all", folder: "inbox")
+        model.state = try await model.request("/account/disconnect", method: "POST", body: .object([:]), mailbox: first)
+        try check(model.combined && model.accounts.map(\.id) == [second], "disconnect altered the other connection or combined view")
+        let remaining = try await collect(model, expected: 65)
+        try check(remaining.allSatisfy { $0["accountId"].string == second }, "disconnected account remained visible")
+        try await expectFailure(model, path: "/messages/" + encodedPath(savedDraft.savedID), method: "GET", owner: first)
+        let finalBase = model.baseURL!
+        model.stop()
+        try await waitForStop(finalBase)
+        await model.start()
+        try check(model.error.isEmpty && model.accounts.map(\.id) == [second] && model.combined, "disconnect did not survive restart")
+        try check(!model.policy["enabled"].bool && model.preferences["syncInterval"].number == 0, "restart enabled background provider work")
+        let closing = model.baseURL!
+        model.stop()
+        try await waitForStop(closing)
+        print("Native Rust: disconnect isolation, cached draft retention and final shutdown passed.")
+    }
+}

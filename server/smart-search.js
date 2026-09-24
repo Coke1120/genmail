@@ -28,7 +28,7 @@ export async function fetchEmbeddings(config, input, signal) {
   if (!Array.isArray(result.data) || result.data.length !== input.length || new Set(result.data.map(item => item.index)).size !== input.length || result.data.some(item => !Number.isInteger(item.index) || item.index < 0 || item.index >= input.length)) searchFail('Embedding response does not match its inputs.', 502);
   return result.data.sort((a, b) => a.index - b.index).map(item => item.embedding);
 }
-export function createSmartSearch({ store, connections, apiBase, embed = fetchEmbeddings, now = Date.now }) {
+export function createSmartSearch({ store, connections, apiBase, embed = fetchEmbeddings, now = Date.now, lexical = (options, accounts, flags) => lexicalSearch(store, options, accounts, flags), cosine = null }) {
   const config = () => ({ ...defaults, ...store.getSettings().searchAI, folders: { ...defaults.folders, ...store.getSettings().searchAI?.folders }, content: { ...defaults.content, ...store.getSettings().searchAI?.content } });
   const stamp = () => digest([config(), resolvePolicy(store.getSettings().policy), config().accounts.map(account => [account, connections()[account]?.connectionId || connections()[account] || null])]);
   let controller, running, dimension = 0;
@@ -145,7 +145,7 @@ export function createSmartSearch({ store, connections, apiBase, embed = fetchEm
       if (!messages.has(key)) { const message = JSON.parse(row.data); messages.set(key, { message, hash: source(row.account, message, value, policy, live)?.hash }); }
       return messages.get(key).hash === row.hash;
     });
-    if (!valid.length) { const result = lexicalSearch(store, options, accounts); return { ...result, warning: 'No current semantic index matches this scope. Showing keyword matches; index permitted mail in Settings → Search.' }; }
+    if (!valid.length) { const result = await lexical(options, accounts); return { ...result, warning: 'No current semantic index matches this scope. Showing keyword matches; index permitted mail in Settings → Search.' }; }
     const query = options.terms.join(' '), key = digest([identity, query]);
     let cached = queryCache.get(key);
     if (!cached || cached.until < now()) {
@@ -156,19 +156,22 @@ export function createSmartSearch({ store, connections, apiBase, embed = fetchEm
     }
     if (identity !== stamp()) { reconcile(); searchFail('AI permissions, model or accounts changed. Search again.', 409); }
     if (snapshot !== digest(readEntries())) searchFail('Mail changed during search. Search again for current results.', 409);
+    let scores = null;
+    if (cosine) { try { scores = await cosine(cached.vector, valid); } catch { /* Pure local read: retain the Node fallback, never regenerate embeddings. */ } }
     const semantic = new Map();
-    for (const row of valid) {
+    for (const [index, row] of valid.entries()) {
       const vector = JSON.parse(row.vector);
       if (vector.length !== cached.vector.length) searchFail('Embedding dimensions changed. Clear the index and rebuild with one model.', 409);
-      const score = vector.reduce((sum, x, i) => sum + x * cached.vector[i], 0), id = JSON.stringify([row.account, row.id]);
+      const score = scores ? scores[index] : vector.reduce((sum, x, i) => sum + x * cached.vector[i], 0), id = JSON.stringify([row.account, row.id]);
       if (score > 0 && (!semantic.has(id) || semantic.get(id).score < score)) semantic.set(id, { message: messages.get(id).message, account: row.account, score });
     }
-    const lexical = lexicalSearch(store, { ...options, sort: 'relevance' }, accounts, { candidates: true }), merged = new Map();
+    const keywords = await lexical({ ...options, sort: 'relevance' }, accounts, { candidates: true }), merged = new Map();
+    if (identity !== stamp() || snapshot !== digest(readEntries())) searchFail('Search scope or source changed. Search again.', 409);
     const add = (row, i, match) => { const key = JSON.stringify([row.account, row.message.id]), previous = merged.get(key); merged.set(key, { ...row, score: (previous?.score || 0) + 1 / (60 + i + 1), match: previous ? 'keyword + semantic' : match }); };
-    lexical.rows.forEach((row, i) => add(row, i, 'keyword'));
+    keywords.rows.forEach((row, i) => add(row, i, 'keyword'));
     [...semantic.values()].sort((a, b) => b.score - a.score).slice(0, 200).forEach((row, i) => add(row, i, 'semantic'));
     const ranked = [...merged.values()].sort((a, b) => (options.sort === 'relevance' ? b.score - a.score : options.sort === 'oldest' ? a.message.date.localeCompare(b.message.date) : b.message.date.localeCompare(a.message.date)) || JSON.stringify([a.account, a.message.id]).localeCompare(JSON.stringify([b.account, b.message.id])));
-    return { total: ranked.length, rows: ranked.slice(options.page * 30, options.page * 30 + 30), warning: 'Ranked candidates: up to 200 keyword and 200 semantic matches. Semantic coverage is limited to your approved, indexed mail; use keyword mode for exhaustive results.' };
+    return { engine: cosine && scores && keywords.engine === 'rust' ? 'rust' : 'node', total: ranked.length, rows: ranked.slice(options.page * 30, options.page * 30 + 30), warning: 'Ranked candidates: up to 200 keyword and 200 semantic matches. Semantic coverage is limited to your approved, indexed mail; use keyword mode for exhaustive results.' };
   }
   const previous = store.getSettings().searchIndex;
   if (previous?.status === 'running') store.setSettings({ searchIndex: { ...previous, status: 'interrupted', error: 'Indexing was interrupted. No automatic retry was made; preview another batch.' } });

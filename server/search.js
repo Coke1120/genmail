@@ -1,3 +1,5 @@
+import { createRustSearch } from './rust-search.js';
+import { messageSummary } from './mail-pages.js';
 import { normalizeSearch, searchTokens } from './search-index.js';
 import { createSmartSearch } from './smart-search.js';
 
@@ -84,19 +86,41 @@ export function searchSegments(value, terms, limit = 180) {
   if (end < chars.length) segments.push({ text: '…', hit: false });
   return segments;
 }
-export function registerSearchRoutes({ app, store, connections, apiBase, embed }) {
-  const smartSearch = createSmartSearch({ store, connections, apiBase, embed });
+export function registerSearchRoutes({ app, store, connections, apiBase, embed, searchEngine = 'node' }) {
+  if (!['node', 'rust'].includes(searchEngine)) throw Error('Unknown development search engine.');
+  const worker = searchEngine === 'rust' ? createRustSearch(store.databasePath) : null;
+  async function lexical(options, accounts, flags = {}) {
+    if (!worker) return lexicalSearch(store, options, accounts, flags);
+    const revision = store.revision();
+    try {
+      const result = await worker.lexical(options, accounts, !!flags.candidates);
+      if (revision !== store.revision() || !Number.isSafeInteger(result.total) || result.total < 0 || !Array.isArray(result.rows) || result.rows.length > (flags.candidates ? 200 : 30)) throw Error('Stale or invalid search result.');
+      const seen = new Set();
+      const rows = result.rows.map(row => {
+        const key = JSON.stringify([row.account, row.id]);
+        if (!accounts.includes(row.account) || typeof row.id !== 'string' || seen.has(key)) throw Error('Invalid result owner.');
+        seen.add(key); const message = store.getMessage(row.account, row.id);
+        if (!message) throw Error('Source message changed.');
+        return { account: row.account, message, match: 'keyword' };
+      });
+      return { total: result.total, rows, engine: 'rust' };
+    } catch { return { ...lexicalSearch(store, options, accounts, flags), engine: 'node', warning: 'Using Node keyword search; the Rust development worker could not handle this query.' }; }
+  }
+  const smartSearch = createSmartSearch({ store, connections, apiBase, embed, lexical, cosine: worker ? (query, rows) => worker.cosine(query, rows) : null });
+  const stop = smartSearch.stop;
+  smartSearch.stop = () => Promise.all([worker?.stop(), stop()]);
+  smartSearch.worker = worker;
   const owner = req => { const value = req.get('X-Genmail-Account'); if (!value || (value !== 'all' && value !== 'demo' && !Object.hasOwn(connections(), value))) searchFail('Choose a connected search account.', 409); return value; };
   const accountsFor = (account, options) => options.scope === 'all' || account === 'all' ? Object.keys(connections()) : [account];
   app.post('/api/search', async (req, res) => {
     const account = owner(req), options = parseSearch(req.body), accounts = accountsFor(account, options);
-    let result = options.smart && options.terms.length ? await smartSearch.search(options, accounts) : lexicalSearch(store, options, accounts);
+    let result = options.smart && options.terms.length ? await smartSearch.search(options, accounts) : await lexical(options, accounts);
     // Account disconnection during a model request cannot expose its old results.
     if (accounts.some(id => id !== 'demo' && !connections()[id])) searchFail('Search accounts changed. Search again.', 409);
     const coverage = store.search.query(`SELECT account,count(*) AS count,min(date) AS oldest,max(date) AS newest FROM search_documents WHERE account IN (${accounts.map(() => '?').join(',') || 'NULL'}) GROUP BY account`, accounts);
-    const rows = result.rows.map(({ message, account: id, match }) => ({ ...message, accountId: id, viewId: JSON.stringify([id, message.id]), searchMatch: match,
+    const rows = result.rows.map(({ message, account: id, match }) => ({ ...(req.get('X-Morrow-View') === 'paged' ? messageSummary(message) : message), accountId: id, viewId: JSON.stringify([id, message.id]), searchMatch: match,
       searchSubject: searchSegments(message.subject, options.terms, 140), searchSnippet: searchSegments(message.body || message.preview, options.terms) }));
-    res.json({ messages: rows, total: result.total, page: options.page, pageSize: 30, chips: options.chips, coverage, warning: result.warning || '', mode: options.smart ? 'hybrid' : 'keyword' });
+    res.json({ messages: rows, total: result.total, page: options.page, pageSize: 30, chips: options.chips, coverage, warning: result.warning || '', mode: options.smart ? 'hybrid' : 'keyword', engine: result.engine || 'node' });
   });
   app.get('/api/search/preferences', (req, res) => { const account = owner(req); res.json(store.getSettings().searchHistory?.[account] || { recent: [], saved: [] }); });
   app.post('/api/search/preferences', (req, res) => {

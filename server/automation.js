@@ -34,10 +34,10 @@ export function createAutomation({ store, accounts, connection, generate, sync, 
       return { id, subject, body, fromName, fromEmail, to, date };
     }))).digest('hex');
   }
-  function eligible(account, kind) {
+  function eligible(account, kind, candidates) {
     const policy = resolvePolicy(store.getSettings().policy);
     if (!policy.enabled || !policy.triggers[kind === 'arrival' ? 'onArrival' : 'scheduledSummary'] || !policy.behaviors[kind === 'arrival' ? 'summary' : 'briefing']) return [];
-    return store.listMessages(account).filter(message => !['drafts', 'trash'].includes(message.folder) && policy.folders[message.folder] &&
+    return (candidates || store.listMessages(account)).filter(message => !['drafts', 'trash'].includes(message.folder) && policy.folders[message.folder] &&
       (!policy.triggers.inboxOnly || message.folder === 'inbox') && (!policy.triggers.starredOnly || message.starred) &&
       ['subject', 'body', 'sender'].some(key => policy.content[key]));
   }
@@ -54,8 +54,11 @@ export function createAutomation({ store, accounts, connection, generate, sync, 
   }
   function reports(account) {
     if (account === 'all' || !owners().includes(account)) return [];
-    const stamp = signature(account), allowed = Object.fromEntries(['arrival', 'scheduled'].map(kind => [kind, new Set(eligible(account, kind).map(message => message.id))]));
-    return read(account).jobs.filter(job => job.signature === stamp && job.messageIds.every(id => allowed[job.kind]?.has(id)) && job.sourceDigest === sourceDigest(account, job.messageIds))
+    const jobs = read(account).jobs;
+    if (!jobs.length) return [];
+    const candidates = [...new Set(jobs.flatMap(job => job.messageIds))].map(id => store.getMessage(account, id)).filter(Boolean);
+    const stamp = signature(account), allowed = Object.fromEntries(['arrival', 'scheduled'].map(kind => [kind, new Set(eligible(account, kind, candidates).map(message => message.id))]));
+    return jobs.filter(job => job.signature === stamp && job.messageIds.every(id => allowed[job.kind]?.has(id)) && job.sourceDigest === sourceDigest(account, job.messageIds))
       .slice(-20).reverse().map(({ id, kind, messageIds, createdAt, completedAt, status, source, text, items, error }) => ({ id, kind, messageIds, createdAt, completedAt, status, source, text, items, error }));
   }
   function updateJob(account, id, patch) {

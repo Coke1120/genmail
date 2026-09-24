@@ -2,8 +2,8 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell, session } = require('e
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const { createInterface } = require('node:readline');
-const { join, resolve } = require('node:path');
-const { mkdtempSync, rmSync, readFileSync, writeFileSync } = require('node:fs');
+const { join, resolve, isAbsolute } = require('node:path');
+const { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { clientState } = require('./client-state.cjs');
 const { isSignInURL, isExternalURL } = require('./security.cjs');
@@ -11,7 +11,14 @@ const { isSignInURL, isExternalURL } = require('./security.cjs');
 app.setName('Morrow Mail');
 const smoke = process.argv.includes('--smoke-test');
 const smokeDir = smoke ? mkdtempSync(join(tmpdir(), 'morrow-desktop-check-')) : null;
-if (smokeDir) app.setPath('userData', smokeDir);
+const workspaceOverride = process.env.MORROW_DATA_DIR;
+if (workspaceOverride && !isAbsolute(workspaceOverride)) throw new Error('MORROW_DATA_DIR must be an absolute workspace path.');
+if (smokeDir || workspaceOverride) {
+  const directory = smokeDir || workspaceOverride;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  app.setPath('userData', directory);
+  app.setPath('sessionData', directory);
+}
 const dataDirectory = app.getPath('userData');
 const boundsFile = join(dataDirectory, 'window.json');
 let window, child, origin, stopping = false, failed = false;
@@ -28,13 +35,17 @@ async function external(url) {
 }
 async function startService() {
   const backend = app.isPackaged ? join(__dirname, 'backend') : resolve(__dirname, '..');
-  const node = app.isPackaged ? join(__dirname, 'runtime', 'node.exe') : process.env.MORROW_NODE_BINARY;
-  if (!node) throw new Error('Set MORROW_NODE_BINARY to a standalone Node executable for desktop development.');
+  const runtime = app.isPackaged ? JSON.parse(readFileSync(join(__dirname, 'package.json'))).serviceRuntime || 'node' : process.env.MORROW_SERVICE_RUNTIME || 'node';
+  if (!['node', 'rust'].includes(runtime)) throw new Error('Invalid packaged service runtime.');
+  const executable = runtime === 'rust'
+    ? (app.isPackaged ? join(__dirname, 'runtime/morrow-service.exe') : resolve(__dirname, '../rust/target/release', process.platform === 'win32' ? 'morrow-service.exe' : 'morrow-service'))
+    : (app.isPackaged ? join(__dirname, 'runtime/node.exe') : process.env.MORROW_NODE_BINARY);
+  if (!executable) throw new Error('Set MORROW_NODE_BINARY to a standalone Node executable for desktop development.');
   const token = randomBytes(32).toString('hex');
   serviceToken = token; updateToken = randomBytes(32).toString('hex');
   const env = { ...process.env };
   delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.ELECTRON_RUN_AS_NODE;
-  child = spawn(node, [join(backend, 'server/native.js')], { cwd: backend, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  child = spawn(executable, runtime === 'rust' ? [] : [join(backend, 'server/native.js')], { cwd: backend, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   // Never echo provider errors, request bodies, or credentials to the renderer.
   child.stderr.on('data', () => {});
   child.stdin.on('error', () => {});
@@ -48,7 +59,7 @@ async function startService() {
       clearTimeout(timer); child.removeListener('exit', rejectExit);
       try { const { port } = JSON.parse(line); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(); origin = `http://127.0.0.1:${port}`; accept(); } catch { reject(new Error('Invalid service response.')); }
     });
-    child.stdin.write(JSON.stringify({ token, dataDirectory, parentPID: process.pid, updateToken }) + '\n');
+    child.stdin.write(JSON.stringify({ token, dataDirectory, parentPID: process.pid, updateToken, ...(runtime === 'rust' && !app.isPackaged ? { assetDirectory: join(backend, 'dist') } : {}) }) + '\n');
   });
   return token;
 }
@@ -156,6 +167,14 @@ app.whenReady().then(async () => {
       if (window.morrowDesktop.readState('morrow.account.collapsed.demo') !== 'true') throw new Error('Desktop state was not saved.');
       const response = await fetch('/api/state'); const state = await response.json();
       const until = async predicate => { const deadline = Date.now() + 10000; while (!predicate()) { if (Date.now() > deadline) throw new Error('Search UI did not settle.'); await new Promise(resolve => setTimeout(resolve, 50)); } };
+      await until(() => document.querySelector('button[aria-label="Mark unread locally"]') && !document.querySelector('.message-body [role="status"]'));
+      const opened = state.messages.find(message => message.subject === document.querySelector('.reader-heading h2').textContent);
+      document.querySelector('button[aria-label="Mark unread locally"]').click();
+      await until(() => document.querySelector('button[aria-label="Mark read locally"]'));
+      await new Promise(resolve => setTimeout(resolve, 250));
+      await until(() => document.querySelector('.message-list').getAttribute('aria-busy') === 'false');
+      const refreshed = await (await fetch('/api/messages/' + encodeURIComponent(opened.id), { headers: { 'X-Genmail-Account': 'demo' } })).json();
+      if (refreshed.message.read) throw new Error('Body refresh undid the manual mark-unread action.');
       const search = document.querySelector('input[aria-label="Search inbox"]');
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, 'Northstar');
       search.dispatchEvent(new Event('input', { bubbles: true }));
@@ -168,13 +187,28 @@ app.whenReady().then(async () => {
       if (history.saved[0]?.query !== 'Northstar') throw new Error('Saved search was not persisted.');
       document.querySelector('button[aria-label="Clear search"]').click();
       await until(() => !document.querySelector('.search-status'));
+      const metadata = await (await fetch('/api/state', { headers: { 'X-Morrow-View': 'paged' } })).json();
+      if (metadata.messages.some(message => 'body' in message || 'footer' in message)) throw new Error('Metadata included message bodies.');
+      for (let i = 0; i < 55; i++) {
+        const saved = await fetch('/api/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Genmail-Account': 'demo' }, body: JSON.stringify({ to: 'fixture@example.invalid', subject: 'Pagination fixture ' + i, body: 'Complete fixture draft body ' + i }) });
+        if (!saved.ok) throw new Error('Could not seed temporary drafts.');
+      }
+      [...document.querySelectorAll('.account-folders button')].find(button => button.textContent.startsWith('Drafts')).click();
+      await until(() => document.querySelectorAll('.message-row').length === 50 && document.querySelector('.list-footer').textContent.includes('Page 1'));
+      const firstKey = document.querySelector('.message-row h3').textContent;
+      [...document.querySelectorAll('.list-footer button')].find(button => button.textContent === 'Next').click();
+      await until(() => document.querySelector('.list-footer').textContent.includes('Page 2') && document.querySelectorAll('.message-row').length > 0 && document.querySelectorAll('.message-row').length < 50);
+      if (document.querySelector('.message-row h3').textContent === firstKey) throw new Error('Mail pagination repeated the first page.');
+      document.querySelector('.message-select').click();
+      await until(() => document.querySelector('.compose-body')?.value.startsWith('Complete fixture draft body'));
+      document.querySelector('button[aria-label="Close dialog"]').click();
       return { ok: response.ok, mode: state.account?.mode, count: state.messages?.length, node: typeof window.require, bridge: typeof window.morrowDesktop?.openSignIn, csp: !!document.querySelector('script[src]') };
     })()`);
     if (!result.ok || result.mode !== 'demo' || !result.count || result.node !== 'undefined' || result.bridge !== 'function' || !result.csp) throw new Error('Desktop smoke test failed.');
     if ((await fetch(`${origin}/api/state`)).status !== 401) throw new Error('Private API was exposed.');
     const health = await fetch(`${origin}/api/health`, { headers: { Authorization: `Bearer ${token}` } });
     if (!health.ok) throw new Error('Private service health check failed.');
-    console.log(`Desktop smoke passed: ${app.isPackaged ? 'bundled' : 'development'} service, authenticated renderer, demo inbox, indexed search/highlights/saved search, sandbox, private API.`);
+    console.log(`Desktop smoke passed: ${app.isPackaged ? 'bundled' : 'development'} service, authenticated renderer, demo inbox, indexed search/highlights/saved search, mail pagination and complete draft loading, sandbox, private API.`);
     stop();
   }
 }).catch(error => { if (smoke) console.error(error.message); fatal(); });

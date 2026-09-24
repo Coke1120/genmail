@@ -1,0 +1,932 @@
+use crate::{
+    content,
+    error::{Error, Result},
+    store::{merge, random_bytes, string},
+    validation,
+};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use chrono::{DateTime, SecondsFormat, Utc};
+use mail_parser::MessageParser;
+use reqwest::{Client, RequestBuilder};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashSet, VecDeque},
+    time::Duration,
+};
+
+pub struct Definition {
+    pub authorize: &'static str,
+    pub token: &'static str,
+    pub api: &'static str,
+    pub scope: &'static str,
+    pub organize: &'static str,
+    pub calendar: &'static str,
+}
+pub fn definition(provider: &str) -> Result<Definition> {
+    match provider {
+        "google" => Ok(Definition {
+            authorize: "https://accounts.google.com/o/oauth2/v2/auth",
+            token: "https://oauth2.googleapis.com/token",
+            api: "https://gmail.googleapis.com/gmail/v1/users/me",
+            scope: "openid email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send",
+            organize: "openid email https://www.googleapis.com/auth/gmail.modify",
+            calendar: "openid email https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.events",
+        }),
+        "microsoft" => Ok(Definition {
+            authorize: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            token: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            api: "https://graph.microsoft.com/v1.0/me",
+            scope: "offline_access User.Read Mail.Read Mail.Send",
+            organize: "offline_access User.Read Mail.ReadWrite Mail.Send",
+            calendar: "offline_access User.Read Calendars.ReadWrite",
+        }),
+        _ => Err(Error::invalid("Unsupported provider.")),
+    }
+}
+pub fn remote_error() -> Error {
+    Error::new(
+        502,
+        "The provider request could not be confirmed. Check your connection or reconnect this account.",
+    )
+}
+pub async fn request(request: RequestBuilder, limit: usize) -> Result<Value> {
+    let mut response = request.send().await.map_err(|_| remote_error())?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let mut error = Error::new(
+            502,
+            match status {
+                401 => "Authorization expired. Reconnect this account.",
+                429 => "The provider is rate limiting requests. Try again shortly.",
+                _ => {
+                    "The provider rejected the request. Check account authorization and app configuration."
+                }
+            },
+        );
+        error.provider_status = Some(status);
+        return Err(error);
+    }
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(Error::new(
+            502,
+            "The provider response exceeds the size limit.",
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| remote_error())? {
+        if bytes.len() + chunk.len() > limit {
+            return Err(Error::new(
+                502,
+                "The provider response exceeds the size limit.",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        Ok(Value::Null)
+    } else {
+        tokio::task::spawn_blocking(move || {
+            serde_json::from_slice(&bytes)
+                .map_err(|_| Error::new(502, "The provider returned an unreadable response."))
+        })
+        .await
+        .map_err(|_| remote_error())?
+    }
+}
+pub fn api(
+    client: &Client,
+    mail: &Value,
+    method: reqwest::Method,
+    path: &str,
+) -> Result<RequestBuilder> {
+    Ok(client
+        .request(
+            method,
+            format!("{}{path}", definition(string(mail, "provider"))?.api),
+        )
+        .bearer_auth(string(mail, "accessToken"))
+        .timeout(Duration::from_secs(30)))
+}
+pub async fn get(client: &Client, mail: &Value, path: &str) -> Result<Value> {
+    request(
+        api(client, mail, reqwest::Method::GET, path)?,
+        8 * 1024 * 1024,
+    )
+    .await
+}
+pub fn component(value: &str) -> String {
+    percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+pub fn oauth_start(provider: &str, config: &Value, redirect: &str, purpose: &str) -> Result<Value> {
+    let def = definition(provider)?;
+    if !["mail", "calendar"].contains(&purpose) {
+        return Err(Error::invalid("Invalid OAuth purpose."));
+    }
+    let mut saved = json!({"clientId":validation::text(&config["clientId"],"OAuth client ID",1024,false)?.trim()});
+    if purpose == "calendar" {
+        saved["purpose"] = purpose.into();
+    } else {
+        saved["mailScope"] = if config["organize"] == true {
+            def.organize
+        } else {
+            def.scope
+        }
+        .into();
+    }
+    if !string(config, "clientSecret").is_empty() {
+        saved["clientSecret"] =
+            validation::text(&config["clientSecret"], "Google client secret", 4096, false)?.into();
+    }
+    let state = URL_SAFE_NO_PAD.encode(random_bytes::<32>()?);
+    let verifier = URL_SAFE_NO_PAD.encode(random_bytes::<48>()?);
+    let mut url = url::Url::parse(def.authorize).unwrap();
+    url.query_pairs_mut().extend_pairs([
+        ("client_id", string(&saved, "clientId")),
+        ("redirect_uri", redirect),
+        ("response_type", "code"),
+        (
+            "scope",
+            if purpose == "calendar" {
+                def.calendar
+            } else {
+                string(&saved, "mailScope")
+            },
+        ),
+        ("state", &state),
+        (
+            "code_challenge",
+            &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+        ),
+        ("code_challenge_method", "S256"),
+        (
+            "prompt",
+            if provider == "google" {
+                "consent"
+            } else {
+                "select_account"
+            },
+        ),
+    ]);
+    if provider == "google" {
+        url.query_pairs_mut().append_pair("access_type", "offline");
+    }
+    Ok(
+        json!({"url":url.as_str(),"state":state,"verifier":verifier,"config":saved,"purpose":purpose}),
+    )
+}
+async fn exchange(
+    client: &Client,
+    provider: &str,
+    config: &Value,
+    mut fields: Vec<(String, String)>,
+) -> Result<Value> {
+    let def = definition(provider)?;
+    fields.push(("client_id".into(), string(config, "clientId").into()));
+    if !string(config, "clientSecret").is_empty() {
+        fields.push((
+            "client_secret".into(),
+            string(config, "clientSecret").into(),
+        ));
+    }
+    if provider == "microsoft" {
+        fields.push((
+            "scope".into(),
+            if config["purpose"] == "calendar" {
+                def.calendar
+            } else if !string(config, "mailScope").is_empty() {
+                string(config, "mailScope")
+            } else {
+                def.scope
+            }
+            .into(),
+        ));
+    }
+    let result = request(
+        client
+            .post(def.token)
+            .form(&fields)
+            .timeout(Duration::from_secs(30)),
+        8 * 1024 * 1024,
+    )
+    .await?;
+    let expiry = result["expires_in"]
+        .as_f64()
+        .or_else(|| result["expires_in"].as_str().and_then(|s| s.parse().ok()))
+        .filter(|v| v.is_finite() && *v > 0.0 && *v <= 31_536_000.0)
+        .ok_or_else(remote_error)?;
+    if string(&result, "access_token").is_empty() {
+        return Err(remote_error());
+    }
+    let scope = result
+        .get("scope")
+        .and_then(Value::as_str)
+        .or_else(|| config.get("grantedScopes").and_then(Value::as_str))
+        .or_else(|| config.get("mailScope").and_then(Value::as_str))
+        .unwrap_or(def.scope);
+    let mut tokens = json!({"accessToken":result["access_token"],"expiresAt":Utc::now().timestamp_millis()+(expiry*1000.0) as i64,"grantedScopes":scope});
+    if !string(&result, "refresh_token").is_empty() {
+        tokens["refreshToken"] = result["refresh_token"].clone();
+    }
+    Ok(tokens)
+}
+pub async fn oauth_finish(
+    client: &Client,
+    provider: &str,
+    pending: &Value,
+    code: &str,
+) -> Result<Value> {
+    let verifier = string(pending, "verifier");
+    if !(43..=128).contains(&verifier.len())
+        || !verifier
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    {
+        return Err(Error::invalid("Invalid OAuth callback."));
+    }
+    let tokens = exchange(
+        client,
+        provider,
+        &pending["config"],
+        vec![
+            ("grant_type".into(), "authorization_code".into()),
+            ("code".into(), code.into()),
+            ("code_verifier".into(), verifier.into()),
+            ("redirect_uri".into(), string(pending, "redirectUri").into()),
+        ],
+    )
+    .await?;
+    let mut mail = merge(
+        merge(json!({"provider":provider}), &pending["config"]),
+        &tokens,
+    );
+    let calendar = mail["purpose"] == "calendar";
+    let profile = if provider == "google" && calendar {
+        request(
+            client
+                .get("https://openidconnect.googleapis.com/v1/userinfo")
+                .bearer_auth(string(&mail, "accessToken")),
+            8 * 1024 * 1024,
+        )
+        .await?
+    } else {
+        get(
+            client,
+            &mail,
+            if provider == "google" {
+                "/profile"
+            } else {
+                "?$select=mail,userPrincipalName"
+            },
+        )
+        .await?
+    };
+    let email = if provider == "google" {
+        &profile[if calendar { "email" } else { "emailAddress" }]
+    } else if !string(&profile, "mail").is_empty() {
+        &profile["mail"]
+    } else {
+        &profile["userPrincipalName"]
+    };
+    mail["email"] = validation::email(email)?.to_lowercase().into();
+    Ok(mail)
+}
+pub async fn refresh(client: &Client, mail: &Value) -> Result<Value> {
+    let provider = string(mail, "provider");
+    definition(provider)?;
+    if !string(mail, "accessToken").is_empty()
+        && mail["expiresAt"].as_i64().unwrap_or(0) > Utc::now().timestamp_millis() + 60000
+    {
+        return Ok(mail.clone());
+    }
+    if string(mail, "refreshToken").is_empty() {
+        return Err(Error::new(
+            401,
+            "Authorization expired. Reconnect this account.",
+        ));
+    }
+    Ok(merge(
+        mail.clone(),
+        &exchange(
+            client,
+            provider,
+            mail,
+            vec![
+                ("grant_type".into(), "refresh_token".into()),
+                ("refresh_token".into(), string(mail, "refreshToken").into()),
+            ],
+        )
+        .await?,
+    ))
+}
+pub fn iso(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .map(|v| v.with_timezone(&Utc))
+        .unwrap_or_else(|_| DateTime::<Utc>::from_timestamp(0, 0).unwrap())
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+pub fn preview(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(180)
+        .collect()
+}
+fn category(subject: &str, headers: &Value) -> &'static str {
+    if headers.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            ["list-id", "list-unsubscribe"]
+                .contains(&string(row, "name").to_ascii_lowercase().as_str())
+        })
+    }) {
+        "newsletters"
+    } else {
+        static TERMS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?i)\b(receipt|invoice|order|delivery|notification|verification|security alert|payment|shipping)\b").unwrap()
+        });
+        if TERMS.is_match(subject) {
+            "updates"
+        } else {
+            "primary"
+        }
+    }
+}
+pub fn automated(headers: &Value) -> bool {
+    headers.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            ["auto-submitted", "list-id", "list-unsubscribe"]
+                .contains(&string(row, "name").to_ascii_lowercase().as_str())
+                && row["value"] != "no"
+        })
+    })
+}
+fn address_text(value: Option<&mail_parser::Address<'_>>) -> String {
+    value
+        .map(|a| {
+            a.iter()
+                .filter_map(|a| a.address())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+pub fn mime(raw: &[u8]) -> Result<Value> {
+    let parsed = MessageParser::default()
+        .parse(raw)
+        .ok_or_else(remote_error)?;
+    let from = parsed.from().and_then(|v| v.first());
+    let body = parsed
+        .body_text(0)
+        .map(|s| s.replace("\r\n", "\n"))
+        .unwrap_or_else(|| "(This message has no readable text.)".into());
+    let body: String = body.chars().take(100000).collect();
+    let headers = parsed
+        .headers_raw()
+        .map(|(name, value)| json!({"name":name,"value":value.trim()}))
+        .collect::<Vec<_>>();
+    let subject = parsed.subject().unwrap_or("(No subject)");
+    Ok(
+        json!({"fromName":from.and_then(|a|a.name().or(a.address())).unwrap_or("Unknown sender"),"fromEmail":from.and_then(|a|a.address()).unwrap_or(""),"to":address_text(parsed.to()),"cc":address_text(parsed.cc()),"bcc":address_text(parsed.bcc()),"subject":subject,"body":body,"preview":preview(&body),"date":DateTime::<Utc>::from_timestamp(parsed.date().map(|d|d.to_timestamp()).unwrap_or(0),0).unwrap_or_default().to_rfc3339_opts(SecondsFormat::Millis,true),"messageId":parsed.message_id().map(|id|format!("<{id}>")).unwrap_or_default(),"automated":automated(&json!(headers)),"category":category(subject,&json!(headers)),"labels":[]}),
+    )
+}
+pub fn normalize_google(message: &Value) -> Result<Value> {
+    let headers = message["payload"]["headers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut raw = String::new();
+    for header in &headers {
+        let name = string(header, "name");
+        if !name.is_empty()
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !name.to_ascii_lowercase().starts_with("content-")
+            && !name.eq_ignore_ascii_case("mime-version")
+        {
+            raw.push_str(&format!(
+                "{name}: {}\r\n",
+                string(header, "value").replace(['\r', '\n'], " ")
+            ));
+        }
+    }
+    raw.push_str("\r\n");
+    let mut result = mime(raw.as_bytes())?;
+    let mut stack = vec![&message["payload"]];
+    let mut plain = Vec::new();
+    let mut html = Vec::new();
+    let mut count = 0;
+    while let Some(part) = stack.pop() {
+        count += 1;
+        if count > 2000 {
+            return Err(remote_error());
+        }
+        if !string(part, "filename").is_empty()
+            || part["headers"].as_array().is_some_and(|h| {
+                h.iter().any(|h| {
+                    string(h, "name").eq_ignore_ascii_case("content-disposition")
+                        && string(h, "value")
+                            .to_ascii_lowercase()
+                            .starts_with("attachment")
+                })
+            })
+        {
+            continue;
+        }
+        if ["text/plain", "text/html"].contains(&string(part, "mimeType"))
+            && !string(&part["body"], "data").is_empty()
+        {
+            let data = URL_SAFE_NO_PAD
+                .decode(string(&part["body"], "data").trim_end_matches('='))
+                .map_err(|_| remote_error())?;
+            let content_type = part["headers"]
+                .as_array()
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|h| string(h, "name").eq_ignore_ascii_case("content-type"))
+                })
+                .map(|v| string(v, "value").to_owned())
+                .unwrap_or_else(|| format!("{}; charset=utf-8", string(part, "mimeType")));
+            let raw = format!(
+                "Content-Type: {}\r\nContent-Transfer-Encoding: base64\r\n\r\n{}",
+                content_type.replace(['\r', '\n'], " "),
+                STANDARD.encode(data)
+            );
+            let parsed = mime(raw.as_bytes())?;
+            if part["mimeType"] == "text/plain" {
+                plain.push(string(&parsed, "body").to_owned());
+            } else {
+                html.push(string(&parsed, "body").to_owned());
+            }
+        }
+        if let Some(parts) = part["parts"].as_array() {
+            stack.extend(parts.iter().rev());
+        }
+    }
+    let body = if plain.is_empty() { html } else { plain }
+        .join("\n\n")
+        .trim()
+        .chars()
+        .take(100000)
+        .collect::<String>();
+    let body = if body.is_empty() {
+        "(No inline text was available. Open this message in your original mailbox to read any attachments or large message bodies.)".into()
+    } else {
+        body
+    };
+    result["id"] = format!("google:{}", string(message, "id")).into();
+    result["body"] = body.clone().into();
+    result["preview"] = preview(&body).into();
+    if let Some(ms) = message["internalDate"]
+        .as_str()
+        .and_then(|s| s.parse::<i64>().ok())
+        .or(message["internalDate"].as_i64())
+        .filter(|n| *n != 0)
+    {
+        result["date"] = DateTime::<Utc>::from_timestamp_millis(ms)
+            .unwrap_or_default()
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+            .into();
+    }
+    let labels = message["labelIds"].as_array().cloned().unwrap_or_default();
+    result = merge(
+        result,
+        &json!({"folder":"inbox","providerSent":labels.contains(&json!("SENT")),"read":!labels.contains(&json!("UNREAD")),"starred":labels.contains(&json!("STARRED")),"automated":automated(&json!(headers)),"providerLabelIds":labels}),
+    );
+    Ok(result)
+}
+pub fn normalize_microsoft(message: &Value) -> Result<Value> {
+    let from = message.get("from").unwrap_or(&message["sender"]);
+    let from = &from["emailAddress"];
+    let body = string(&message["body"], "content");
+    let body = if string(&message["body"], "contentType").eq_ignore_ascii_case("html") {
+        content::plain_html(body)?
+    } else {
+        body.to_owned()
+    };
+    let body: String = body.chars().take(100000).collect();
+    let body = if body.is_empty() {
+        "(This message has no readable text.)".into()
+    } else {
+        body
+    };
+    let subject = message["subject"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(No subject)");
+    let mut result = json!({"id":format!("microsoft:{}",string(message,"id")),"fromName":from["name"].as_str().filter(|s|!s.is_empty()).or(from["address"].as_str()).unwrap_or("Unknown sender"),"fromEmail":string(from,"address"),"subject":subject,"body":body,"preview":preview(&body),"date":iso(string(message,"receivedDateTime")),"folder":"inbox","read":message["isRead"]==true,"starred":message["flag"]["flagStatus"]=="flagged","category":category(subject,&message["internetMessageHeaders"]),"automated":automated(&message["internetMessageHeaders"]),"labels":[],"messageId":string(message,"internetMessageId")});
+    for field in ["to", "cc", "bcc"] {
+        result[field] = message[format!("{field}Recipients")]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| string(&r["emailAddress"], "address"))
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+            .into();
+    }
+    Ok(result)
+}
+pub async fn fetch_page(client: &Client, mail: &Value, options: &Value) -> Result<Value> {
+    let folder = options["folder"].as_str().unwrap_or("inbox");
+    if !["inbox", "sent"].contains(&folder) {
+        return Err(Error::invalid("Unsupported import folder."));
+    }
+    let provider = string(mail, "provider");
+    definition(provider)?;
+    if provider == "google" {
+        let query = {
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query
+                .append_pair("maxResults", "50")
+                .append_pair("labelIds", if folder == "sent" { "SENT" } else { "INBOX" });
+            let mut filter = Vec::new();
+            for (key, operator) in [("since", "after"), ("before", "before")] {
+                if !string(options, key).is_empty() {
+                    let ms = DateTime::parse_from_rfc3339(string(options, key))
+                        .map_err(|_| Error::invalid("Invalid import date."))?
+                        .timestamp_millis();
+                    let seconds = if key == "before" {
+                        (ms as f64 / 1000.0).ceil() as i64
+                    } else {
+                        ms.div_euclid(1000)
+                    };
+                    filter.push(format!("{operator}:{seconds}"));
+                }
+            }
+            if !filter.is_empty() {
+                query.append_pair("q", &filter.join(" "));
+            }
+            if !string(options, "cursor").is_empty() {
+                query.append_pair("pageToken", string(options, "cursor"));
+            }
+            query.finish()
+        };
+        let list = get(client, mail, &format!("/messages?{query}")).await?;
+        let entries = list["messages"].as_array().cloned().unwrap_or_default();
+        if entries.len() > 50 {
+            return Err(remote_error());
+        }
+        let mut messages = Vec::new();
+        for entries in entries.chunks(5) {
+            let results = futures_util::future::join_all(entries.iter().map(|item| async {
+                let raw = get(
+                    client,
+                    mail,
+                    &format!("/messages/{}?format=full", component(string(item, "id"))),
+                )
+                .await?;
+                let mut value = tokio::task::spawn_blocking(move || normalize_google(&raw))
+                    .await
+                    .map_err(|_| remote_error())??;
+                value["folder"] = folder.into();
+                Ok::<_, Error>(value)
+            }))
+            .await;
+            for result in results {
+                messages.push(result?);
+            }
+        }
+        return Ok(
+            json!({"messages":messages,"nextCursor":list.get("nextPageToken").unwrap_or(&Value::Null)}),
+        );
+    }
+    let date = if folder == "sent" {
+        "sentDateTime"
+    } else {
+        "receivedDateTime"
+    };
+    let path = format!(
+        "/v1.0/me/mailFolders/{}/messages",
+        if folder == "sent" {
+            "sentitems"
+        } else {
+            "inbox"
+        }
+    );
+    let mut url = url::Url::parse(&format!("https://graph.microsoft.com{path}")).unwrap();
+    url.query_pairs_mut().extend_pairs([("$top","50"),("$orderby",&format!("{date} desc")),("$select","id,from,sender,toRecipients,ccRecipients,bccRecipients,subject,body,receivedDateTime,sentDateTime,isRead,flag,internetMessageId,internetMessageHeaders")]);
+    let mut filters = Vec::new();
+    for (key, operator) in [("since", "ge"), ("before", "lt")] {
+        if !string(options, key).is_empty() {
+            let instant = DateTime::parse_from_rfc3339(string(options, key))
+                .map_err(|_| Error::invalid("Invalid import date."))?
+                .to_rfc3339_opts(SecondsFormat::Millis, true);
+            filters.push(format!("{date} {operator} {instant}"));
+        }
+    }
+    if !filters.is_empty() {
+        url.query_pairs_mut()
+            .append_pair("$filter", &filters.join(" and "));
+    }
+    if !string(options, "cursor").is_empty() {
+        url = validated_next(string(options, "cursor"), &url)?;
+    }
+    let result = request(
+        client
+            .get(url)
+            .bearer_auth(string(mail, "accessToken"))
+            .header(
+                "Prefer",
+                "outlook.body-content-type=\"text\", IdType=\"ImmutableId\"",
+            ),
+        8 * 1024 * 1024,
+    )
+    .await?;
+    let folder = folder.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let entries = result["value"].as_array().ok_or_else(remote_error)?;
+        if entries.len() > 50 { return Err(remote_error()); }
+        let mut messages = Vec::new();
+        for raw in entries {
+            let mut value = normalize_microsoft(raw)?;
+            value["folder"] = folder.clone().into();
+            value["date"] = iso(string(raw, date)).into();
+            messages.push(value);
+        }
+        Ok(json!({"messages":messages,"nextCursor":result.get("@odata.nextLink").unwrap_or(&Value::Null)}))
+    }).await.map_err(|_| remote_error())?
+}
+pub fn validated_next(next: &str, original: &url::Url) -> Result<url::Url> {
+    if next.len() > 8192 {
+        return Err(remote_error());
+    }
+    let next = url::Url::parse(next).map_err(|_| remote_error())?;
+    if next.origin() != original.origin()
+        || next.path() != original.path()
+        || !next.username().is_empty()
+        || next.password().is_some()
+        || next.fragment().is_some()
+    {
+        return Err(Error::new(
+            502,
+            "The provider returned an unsafe next page.",
+        ));
+    }
+    Ok(next)
+}
+pub fn compose(mail: &Value, message: &Value, keep_bcc: bool) -> Result<(lettre::Message, String)> {
+    let address = validation::email(&mail["email"])?;
+    let sender = address
+        .parse()
+        .map_err(|_| Error::invalid("Invalid sender."))?;
+    let mut builder = lettre::Message::builder()
+        .from(lettre::message::Mailbox::new(
+            Some(string(message, "fromName").into()),
+            sender,
+        ))
+        .subject(validation::text(&message["subject"], "Subject", 500, true)?);
+    let addresses = content::recipients(message, false)?;
+    for field in ["to", "cc", "bcc"] {
+        for address in string(&addresses, field)
+            .split(", ")
+            .filter(|s| !s.is_empty())
+        {
+            let mailbox = address
+                .parse()
+                .map_err(|_| Error::invalid("Invalid recipient."))?;
+            builder = match field {
+                "to" => builder.to(mailbox),
+                "cc" => builder.cc(mailbox),
+                _ => builder.bcc(mailbox),
+            };
+        }
+    }
+    let id = format!(
+        "<{}@{}>",
+        uuid::Uuid::new_v4(),
+        address.split('@').nth(1).unwrap()
+    );
+    builder = builder.message_id(Some(id.clone()));
+    let reply = string(message, "replyMessageId");
+    if !reply.is_empty() {
+        if reply.contains(['\r', '\n', '\0']) {
+            return Err(Error::invalid("Invalid reply message ID."));
+        }
+        builder = builder.in_reply_to(reply.into()).references(reply.into());
+    }
+    if keep_bcc {
+        builder = builder.keep_bcc();
+    }
+    let (text, html) = content::message_content(message)?;
+    let message = if let Some(html) = html {
+        builder.multipart(lettre::message::MultiPart::alternative_plain_html(
+            text, html,
+        ))
+    } else {
+        builder.body(text)
+    }
+    .map_err(|_| Error::invalid("This email could not be composed."))?;
+    Ok((message, id))
+}
+pub async fn send(client: &Client, mail: &Value, message: &Value) -> Result<String> {
+    let provider = string(mail, "provider");
+    definition(provider)?;
+    let (message, id) = compose(mail, message, true)?;
+    let raw = message.formatted();
+    let outgoing = if provider == "google" {
+        api(client, mail, reqwest::Method::POST, "/messages/send")?
+            .json(&json!({"raw":URL_SAFE_NO_PAD.encode(raw)}))
+    } else {
+        api(client, mail, reqwest::Method::POST, "/sendMail")?
+            .header("Content-Type", "text/plain")
+            .body(STANDARD.encode(raw))
+    };
+    request(outgoing, 8 * 1024 * 1024).await?;
+    Ok(id)
+}
+pub fn can_organize(mail: &Value) -> bool {
+    let provider = string(mail, "provider");
+    if provider.is_empty() || provider == "imap" {
+        return !string(mail, "email").is_empty();
+    }
+    let scopes = mail["grantedScopes"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(string(mail, "mailScope"));
+    scopes.split_whitespace().any(|s| {
+        s == if provider == "google" {
+            "https://www.googleapis.com/auth/gmail.modify"
+        } else {
+            "Mail.ReadWrite"
+        }
+    })
+}
+pub async fn folders(client: &Client, mail: &Value) -> Result<Vec<Value>> {
+    if !can_organize(mail) {
+        return Err(Error::new(
+            403,
+            "Reconnect with permission to move mail and manage labels.",
+        ));
+    }
+    if mail["provider"] == "google" {
+        let result = get(client, mail, "/labels").await?;
+        let labels = result["labels"]
+            .as_array()
+            .filter(|v| v.len() <= 1000)
+            .ok_or_else(remote_error)?;
+        let mut folders = vec![
+            json!({"id":"INBOX","name":"Inbox","kind":"inbox"}),
+            json!({"id":"__archive","name":"Archive (remove Inbox)","kind":"archive"}),
+        ];
+        folders.extend(
+            labels
+                .iter()
+                .filter(|v| v["type"] == "user" && v["id"].is_string())
+                .map(|v| json!({"id":v["id"],"name":string(v,"name"),"kind":"label"})),
+        );
+        return Ok(folders);
+    }
+    let mut folders = Vec::new();
+    let mut pending = VecDeque::from([("/mailFolders".to_owned(), String::new())]);
+    let mut seen = HashSet::new();
+    while let Some((path, prefix)) = pending.pop_front() {
+        let original = url::Url::parse(&format!("{}{path}", definition("microsoft")?.api)).unwrap();
+        let mut next = format!("{path}?$top=100&$select=id,displayName,childFolderCount");
+        let mut pages = 0;
+        while !next.is_empty() {
+            pages += 1;
+            if pages > 10 || !seen.insert(next.clone()) {
+                return Err(remote_error());
+            }
+            let result = get(client, mail, &next).await?;
+            for folder in result["value"].as_array().ok_or_else(remote_error)? {
+                let id = string(folder, "id");
+                if id.is_empty() {
+                    return Err(remote_error());
+                }
+                let name = format!(
+                    "{prefix}{}",
+                    folder["displayName"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Untitled folder")
+                );
+                folders.push(json!({"id":id,"name":name,"kind":"folder"}));
+                if folders.len() > 300 {
+                    return Err(Error::new(
+                        502,
+                        "This mailbox exceeds the 300 folder limit.",
+                    ));
+                }
+                if folder["childFolderCount"].as_u64().unwrap_or(0) > 0 {
+                    pending.push_back((
+                        format!("/mailFolders/{}/childFolders", component(id)),
+                        format!("{name} / "),
+                    ));
+                }
+            }
+            next = String::new();
+            if !string(&result, "@odata.nextLink").is_empty() {
+                let url = validated_next(string(&result, "@odata.nextLink"), &original)?;
+                next = format!(
+                    "{}?{}",
+                    url.path()
+                        .strip_prefix("/v1.0/me")
+                        .ok_or_else(remote_error)?,
+                    url.query().unwrap_or("")
+                );
+            }
+        }
+    }
+    let inbox = get(client, mail, "/mailFolders/inbox?$select=id").await?;
+    for folder in &mut folders {
+        if folder["id"] == inbox["id"] {
+            folder["kind"] = "inbox".into();
+        }
+    }
+    Ok(folders)
+}
+pub async fn organize(
+    client: &Client,
+    mail: &Value,
+    message: &Value,
+    destination: &Value,
+    mode: &str,
+) -> Result<Value> {
+    if !can_organize(mail) {
+        return Err(Error::new(
+            403,
+            "Mailbox organization permission is required.",
+        ));
+    }
+    let provider = string(mail, "provider");
+    let remote = message["remoteId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(string(message, "id"));
+    let remote = remote
+        .strip_prefix(&format!("{provider}:"))
+        .ok_or_else(|| Error::invalid("Only imported messages can be organized."))?;
+    let path = format!("/messages/{}", component(remote));
+    if provider == "google" {
+        if mode != "move" && destination["kind"] != "label" {
+            return Err(Error::invalid("Choose a custom Gmail label."));
+        }
+        let add = if mode == "removeLabel" || destination["kind"] == "archive" {
+            vec![]
+        } else {
+            vec![destination["id"].clone()]
+        };
+        let remove = if mode == "removeLabel" {
+            vec![destination["id"].clone()]
+        } else if mode == "move" && destination["id"] != "INBOX" {
+            vec![json!("INBOX")]
+        } else {
+            vec![]
+        };
+        let result = request(
+            api(
+                client,
+                mail,
+                reqwest::Method::POST,
+                &format!("{path}/modify"),
+            )?
+            .json(&json!({"addLabelIds":add,"removeLabelIds":remove})),
+            8 * 1024 * 1024,
+        )
+        .await?;
+        let labels = result["labelIds"].as_array().ok_or_else(remote_error)?;
+        let inbox = labels.contains(&json!("INBOX"));
+        return Ok(
+            json!({"providerLabelIds":labels,"folder":if inbox{"inbox"}else{"archive"},"providerFolderName":if inbox{"Inbox"}else{"Gmail · outside Inbox"}}),
+        );
+    }
+    if mode != "move" {
+        return Err(Error::invalid("Outlook supports folder moves."));
+    }
+    let current = request(
+        api(
+            client,
+            mail,
+            reqwest::Method::GET,
+            &format!("{path}?$select=id,parentFolderId"),
+        )?
+        .header("Prefer", "IdType=\"ImmutableId\""),
+        8 * 1024 * 1024,
+    )
+    .await?;
+    let moved = if current["parentFolderId"] == destination["id"] {
+        current
+    } else {
+        request(
+            api(client, mail, reqwest::Method::POST, &format!("{path}/move"))?
+                .header("Prefer", "IdType=\"ImmutableId\"")
+                .json(&json!({"destinationId":destination["id"]})),
+            8 * 1024 * 1024,
+        )
+        .await?
+    };
+    if string(&moved, "id").is_empty() {
+        return Err(remote_error());
+    }
+    Ok(
+        json!({"remoteId":format!("microsoft:{}",string(&moved,"id")),"providerFolderId":destination["id"],"providerFolderName":destination["name"],"folder":if destination["kind"]=="inbox"{"inbox"}else{"archive"}}),
+    )
+}

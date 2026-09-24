@@ -13,6 +13,7 @@ test-results/
 build/
 macos/.build/
 macos/.swiftpm/
+rust/target/
 
 .agents/
 .codex/

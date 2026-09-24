@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createDemoMessages } from './demo.js';
 import { initializeSearchIndex } from './search-index.js';
+import { createMailPages } from './mail-pages.js';
 
 export function createStore(dataDir) {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -55,6 +56,9 @@ export function createStore(dataDir) {
       );
     `);
     const search = initializeSearchIndex(db);
+    const epoch = randomBytes(16).toString('hex');
+    const revision = () => `${epoch}:${db.prepare('SELECT total_changes() AS n').get().n}:${db.prepare('PRAGMA data_version').get().data_version}`;
+    const mailPages = createMailPages(db, revision);
     const readSettings = db.prepare('SELECT value FROM settings WHERE id = 1');
     const writeSettings = db.prepare('INSERT INTO settings (id, value) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET value = excluded.value');
     const list = db.prepare("SELECT data FROM messages WHERE account = ? ORDER BY json_extract(data, '$.date') DESC, id");
@@ -64,6 +68,10 @@ export function createStore(dataDir) {
 
     const store = {
       search,
+      databasePath,
+      revision,
+      messagePage: mailPages.page,
+      messageStats: mailPages.stats,
       getSettings() {
         return decrypt(readSettings.get().value);
       },

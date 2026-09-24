@@ -1,0 +1,378 @@
+use crate::{
+    error::{Error, Result},
+    store::Store,
+};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
+use icu_collator::{
+    Collator,
+    options::{CollatorOptions, Strength},
+    preferences::CollationNumericOrdering,
+};
+use rusqlite::{functions::FunctionFlags, params_from_iter, types::Value as Sql};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+const FIELDS: &[(&str, usize)] = &[
+    ("id", 0),
+    ("fromName", 254),
+    ("fromEmail", 254),
+    ("to", 4096),
+    ("subject", 1000),
+    ("preview", 240),
+    ("date", 40),
+    ("folder", 20),
+    ("category", 40),
+    ("remoteId", 0),
+    ("deliveryStatus", 40),
+];
+const FOLDERS: &[&str] = &["inbox", "starred", "sent", "drafts", "archive", "trash"];
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+pub struct Options {
+    pub folder: String,
+    pub category: String,
+    pub unread_only: bool,
+    pub sort: String,
+    pub cursor: String,
+    pub page_size: usize,
+    pub locale: String,
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            folder: String::new(),
+            category: "all".into(),
+            unread_only: false,
+            sort: "newest".into(),
+            cursor: String::new(),
+            page_size: 50,
+            locale: "en".into(),
+        }
+    }
+}
+pub fn summary(message: &Value) -> Value {
+    let mut result = json!({});
+    for &(key, max) in FIELDS {
+        if let Some(value) = message.get(key) {
+            result[key] = if max == 0 {
+                value.clone()
+            } else {
+                Value::String(value.as_str().unwrap_or("").chars().take(max).collect())
+            };
+        }
+    }
+    result["read"] = json!(message["read"] == true || message["read"] == 1);
+    result["starred"] = json!(message["starred"] == true || message["starred"] == 1);
+    result
+}
+pub fn owned(account: &str, mut message: Value) -> Value {
+    message["accountId"] = account.into();
+    message["viewId"] = serde_json::to_string(&json!([account, message["id"]]))
+        .expect("message identity")
+        .into();
+    message
+}
+fn index_ready(store: &Store) -> Result<bool> {
+    Ok(store.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM search_meta WHERE version=1)",
+        [],
+        |row| row.get(0),
+    )?)
+}
+fn documents(store: &Store) -> Result<String> {
+    let indexed = index_ready(store)?;
+    // Legacy mail remains readable while the background worker rebuilds derived FTS data.
+    Ok(if indexed {
+        "SELECT * FROM search_documents".into()
+    } else {
+        "WITH missing AS MATERIALIZED (SELECT m.rowid FROM messages m WHERE NOT EXISTS(SELECT 1 FROM search_documents d WHERE d.account=m.account AND d.id=m.id)) SELECT rowid,account,id,date,folder,unread,starred,category FROM search_documents UNION ALL SELECT m.rowid,m.account,m.id,COALESCE(json_extract(m.data,'$.date'),''),COALESCE(json_extract(m.data,'$.folder'),''),NOT COALESCE(json_extract(m.data,'$.read'),0),COALESCE(json_extract(m.data,'$.starred'),0),COALESCE(json_extract(m.data,'$.category'),'') FROM missing p JOIN messages m ON m.rowid=p.rowid".into()
+    })
+}
+pub fn stats(store: &Store, accounts: &[String]) -> Result<Value> {
+    let mut result = json!({});
+    for account in accounts {
+        let mut counts = json!({});
+        for folder in FOLDERS {
+            counts[folder] = 0.into();
+        }
+        result[account] = json!({"unread":0,"total":0,"counts":counts});
+    }
+    // Aggregate the indexed rows on the covering counts index before combining
+    // missing rows. Sorting the whole mixed projection spills to disk during rebuilds.
+    let scope = placeholders(accounts.len());
+    let indexed = format!(
+        "SELECT account,folder,count(*),sum(unread),sum(starred) FROM search_documents WHERE account IN ({scope}) GROUP BY account,folder"
+    );
+    let mut params = accounts.to_vec();
+    let sql = if index_ready(store)? {
+        indexed
+    } else {
+        params.extend_from_slice(accounts);
+        format!(
+            "WITH missing AS MATERIALIZED (SELECT m.rowid FROM messages m WHERE NOT EXISTS(SELECT 1 FROM search_documents d WHERE d.account=m.account AND d.id=m.id)) {indexed} UNION ALL SELECT m.account,COALESCE(json_extract(m.data,'$.folder'),''),count(*),sum(NOT COALESCE(json_extract(m.data,'$.read'),0)),sum(COALESCE(json_extract(m.data,'$.starred'),0)) FROM missing p JOIN messages m ON m.rowid=p.rowid WHERE m.account IN ({scope}) GROUP BY m.account,COALESCE(json_extract(m.data,'$.folder'),'')"
+        )
+    };
+    let mut statement = store.conn.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(&params))?;
+    while let Some(row) = rows.next()? {
+        let account: String = row.get(0)?;
+        let folder: String = row.get(1)?;
+        let count: i64 = row.get(2)?;
+        let unread: i64 = row.get(3)?;
+        let starred: i64 = row.get(4)?;
+        let entry = &mut result[&account];
+        entry["total"] = (entry["total"].as_i64().unwrap_or(0) + count).into();
+        if FOLDERS.contains(&folder.as_str()) && folder != "starred" {
+            entry["counts"][&folder] =
+                (entry["counts"][&folder].as_i64().unwrap_or(0) + count).into();
+        }
+        if folder == "inbox" {
+            entry["unread"] = (entry["unread"].as_i64().unwrap_or(0) + unread).into();
+        }
+        if folder != "trash" {
+            entry["counts"]["starred"] =
+                (entry["counts"]["starred"].as_i64().unwrap_or(0) + starred).into();
+        }
+    }
+    Ok(result)
+}
+fn placeholders(length: usize) -> String {
+    if length == 0 {
+        "NULL".into()
+    } else {
+        vec!["?"; length].join(",")
+    }
+}
+pub fn page(store: &Store, accounts: &[String], input: &Value, secret: &[u8; 32]) -> Result<Value> {
+    let options: Options =
+        serde_json::from_value(input.clone()).map_err(|_| Error::invalid("Invalid mail page."))?;
+    if (!options.folder.is_empty() && !FOLDERS.contains(&options.folder.as_str()))
+        || !["all", "primary", "updates", "newsletters"].contains(&options.category.as_str())
+        || !["newest", "oldest", "sender", "subject", "unread", "starred"]
+            .contains(&options.sort.as_str())
+        || !(1..=100).contains(&options.page_size)
+        || options.cursor.len() > 8192
+        || options.locale.len() > 100
+        || accounts.len() > 100
+    {
+        return Err(Error::invalid("Invalid mail folder, sorting or page size."));
+    }
+    let revision = store.revision()?;
+    let scope = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&json!([
+            accounts,
+            options.folder,
+            options.category,
+            options.unread_only,
+            options.sort,
+            options.page_size,
+            options.locale,
+            revision
+        ]))?)
+    );
+    let mut conditions = vec![format!("d.account IN ({})", placeholders(accounts.len()))];
+    let mut params: Vec<Sql> = accounts.iter().cloned().map(Sql::Text).collect();
+    if options.folder == "starred" {
+        conditions.push("d.starred=1 AND d.folder<>'trash'".into());
+    } else if !options.folder.is_empty() {
+        conditions.push("d.folder=?".into());
+        params.push(options.folder.clone().into());
+    }
+    if options.category != "all" {
+        conditions.push("d.category=?".into());
+        params.push(options.category.clone().into());
+    }
+    if options.unread_only {
+        conditions.push("d.unread=1".into());
+    }
+    let locale: icu_locale::Locale = options
+        .locale
+        .parse()
+        .map_err(|_| Error::invalid("Invalid sorting locale."))?;
+    let text_sort = ["sender", "subject"].contains(&options.sort.as_str());
+    let mut order = Vec::new();
+    if text_sort {
+        let mut preferences: icu_collator::CollatorPreferences = locale.into();
+        preferences.numeric_ordering = Some(CollationNumericOrdering::True);
+        let mut settings = CollatorOptions::default();
+        settings.strength = Some(Strength::Primary);
+        let collator = Collator::try_new(preferences, settings)
+            .map_err(|_| Error::invalid("Unsupported sorting locale."))?;
+        store.conn.create_scalar_function(
+            "mail_order",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            move |ctx| {
+                let text = ctx.get::<Option<String>>(0)?.unwrap_or_default();
+                let mut key = Vec::new();
+                let Ok(()) = collator.write_sort_key_to(&text, &mut key);
+                Ok(key.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            },
+        )?;
+        order.push((
+            if options.sort == "sender" {
+                "mail_order(json_extract(m.data,'$.fromName'))"
+            } else {
+                "mail_order(json_extract(m.data,'$.subject'))"
+            },
+            "ASC",
+        ));
+    }
+    if options.sort == "unread" {
+        order.push(("d.unread", "DESC"));
+    }
+    if options.sort == "starred" {
+        order.push(("d.starred", "DESC"));
+    }
+    order.extend([
+        (
+            "d.date",
+            if options.sort == "oldest" {
+                "ASC"
+            } else {
+                "DESC"
+            },
+        ),
+        ("d.account", "ASC"),
+        ("d.id", "ASC"),
+    ]);
+    let docs = documents(store)?;
+    let total: i64 = store.conn.query_row(
+        &format!(
+            "WITH d AS NOT MATERIALIZED ({docs}) SELECT count(*) FROM d WHERE {}",
+            conditions.join(" AND ")
+        ),
+        params_from_iter(&params),
+        |row| row.get(0),
+    )?;
+    if !options.cursor.is_empty() {
+        let invalid = || Error::conflict("Mail changed or the cursor expired. Refresh the list.");
+        let (payload, signature) = options.cursor.split_once('.').ok_or_else(invalid)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC key");
+        mac.update(payload.as_bytes());
+        mac.verify_slice(&URL_SAFE_NO_PAD.decode(signature).map_err(|_| invalid())?)
+            .map_err(|_| invalid())?;
+        let previous: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).map_err(|_| invalid())?)
+                .map_err(|_| invalid())?;
+        if previous["scope"] != scope {
+            return Err(invalid());
+        }
+        let rowid = previous["rowid"]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or_else(invalid)?;
+        // Resolve ordering keys from the signed identity: long provider subjects never inflate cursors.
+        let key_sql = format!(
+            "WITH d AS NOT MATERIALIZED ({docs}) SELECT {} FROM d JOIN messages m ON m.account=d.account AND m.id=d.id WHERE d.rowid=?",
+            order
+                .iter()
+                .map(|(column, _)| *column)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let keys = store
+            .conn
+            .query_row(&key_sql, [rowid], |row| {
+                (0..order.len())
+                    .map(|i| row.get::<_, Sql>(i))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .map_err(|_| invalid())?;
+        let mut branches = Vec::new();
+        for (i, (column, direction)) in order.iter().enumerate() {
+            let mut branch = Vec::new();
+            for (j, (column, _)) in order.iter().take(i).enumerate() {
+                branch.push(format!("{column}=?"));
+                params.push(keys[j].clone());
+            }
+            branch.push(format!(
+                "{column}{}?",
+                if *direction == "ASC" { ">" } else { "<" }
+            ));
+            params.push(keys[i].clone());
+            branches.push(format!("({})", branch.join(" AND ")));
+        }
+        conditions.push(format!("({})", branches.join(" OR ")));
+    }
+    let projection = FIELDS
+        .iter()
+        .map(|(field, max)| {
+            let value = format!("json_extract(m.data,'$.{field}')");
+            format!(
+                "'{field}',{}",
+                if *max == 0 {
+                    value
+                } else {
+                    format!("substr({value},1,{max})")
+                }
+            )
+        })
+        .chain([
+            "'read',json_extract(m.data,'$.read')".into(),
+            "'starred',json_extract(m.data,'$.starred')".into(),
+        ])
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "WITH d AS NOT MATERIALIZED ({docs}), page AS MATERIALIZED (SELECT d.rowid,d.account AS owner,d.id AS id,{} FROM d {} WHERE {} ORDER BY {} LIMIT ?) SELECT json_object({projection}),p.owner,p.rowid FROM page p JOIN messages m ON m.account=p.owner AND m.id=p.id ORDER BY {}",
+        order
+            .iter()
+            .enumerate()
+            .map(|(i, (column, _))| format!("{column} AS k{i}"))
+            .collect::<Vec<_>>()
+            .join(","),
+        if text_sort {
+            "JOIN messages m ON m.account=d.account AND m.id=d.id"
+        } else {
+            ""
+        },
+        conditions.join(" AND "),
+        order
+            .iter()
+            .map(|(column, direction)| format!("{column} {direction}"))
+            .collect::<Vec<_>>()
+            .join(","),
+        order
+            .iter()
+            .enumerate()
+            .map(|(i, (_, direction))| format!("p.k{i} {direction}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    params.push(Sql::Integer((options.page_size + 1) as i64));
+    let mut statement = store.conn.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(&params))?;
+    let mut messages = Vec::new();
+    let mut last = 0_i64;
+    let mut more = false;
+    while let Some(row) = rows.next()? {
+        if messages.len() == options.page_size {
+            more = true;
+            break;
+        }
+        let message: Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
+        let account: String = row.get(1)?;
+        let message = summary(&message);
+        messages.push(owned(&account, message));
+        last = row.get(2)?;
+    }
+    let cursor = if more {
+        let payload =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({"scope":scope,"rowid":last}))?);
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC key");
+        mac.update(payload.as_bytes());
+        format!(
+            "{payload}.{}",
+            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        )
+    } else {
+        String::new()
+    };
+    Ok(
+        json!({"messages":messages,"total":total,"pageSize":options.page_size,"nextCursor":cursor,"revision":revision}),
+    )
+}

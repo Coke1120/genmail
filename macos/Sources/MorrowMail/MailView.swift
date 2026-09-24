@@ -4,13 +4,9 @@ import AppKit
 struct MailWorkspace: View {
     @AppStorage("collapsedMailAccounts") private var collapsedAccounts = "[]"
     @EnvironmentObject var model: AppModel
-    @State private var unreadOnly = false
     var filtered: [JSON] {
         if !model.searchResponse.isNull { return model.searchResponse["messages"].array }
-        return sortedMail(model.messages.filter { message in
-            let folder = model.section == "starred" ? message["starred"].bool && message["folder"].string != "trash" : message["folder"].string == model.section
-            return folder && (!unreadOnly || !message["read"].bool)
-        }, by: model.preferences["sort"].string)
+        return model.listedMessages
     }
     var body: some View {
         Group {
@@ -38,7 +34,15 @@ struct MailWorkspace: View {
                           NativeMailSearch().id(model.account + ":" + model.section)
                           HSplitView {
                             messageList.frame(minWidth: 260, idealWidth: 310, maxWidth: 360)
-                            if let message = model.current, filtered.contains(where: { $0.viewID == message.viewID }) { MessageReader(message: message).frame(minWidth: 320) }
+                            if let message = model.current {
+                                if model.messageDetail.viewID == message.viewID { MessageReader(message: message).frame(minWidth: 320) }
+                                else {
+                                    VStack {
+                                        if model.error.isEmpty { ProgressView("Loading message…") }
+                                        else { Button("Retry loading message") { Task { await model.loadMessage() } } }
+                                    }.frame(minWidth: 320, maxWidth: .infinity)
+                                }
+                            }
                             else { EmptyPane(title: "A little room to think", detail: "Choose a message to read, or compose something new.", symbol: "envelope.open").frame(minWidth: 320) }
                           }
                         }
@@ -57,6 +61,9 @@ struct MailWorkspace: View {
               }
             }
         }
+        .task(id: model.mailQueryKey) { await model.loadMailPage() }
+        .task(id: (model.current?.viewID ?? "") + model.state["revision"].string) { await model.loadMessage() }
+        .onChange(of: model.section) { section in if section != "studio" { model.selectedMessage = nil; model.messageDetail = .null }; model.mailPage = .null }
         .sheet(item: $model.compose) { draft in ComposeView(initial: draft).environmentObject(model) }
         .sheet(item: $model.organizing) { message in OrganizeMailView(message: message).environmentObject(model) }
         .sheet(isPresented: $model.showSettings) { NativeSettingsView().environmentObject(model) }
@@ -124,12 +131,12 @@ struct MailWorkspace: View {
         }
     }
     func folderCount(_ account: String, _ folder: String) -> Int {
-        if account == "demo" { return model.account == "demo" ? model.messages.filter { $0["folder"].string == folder && (folder != "inbox" || !$0["read"].bool) }.count : 0 }
+        if account == "demo" { return Int(folder == "inbox" ? model.state["demoStats"]["unread"].number : model.state["demoStats"]["counts"][folder].number) }
         return model.accounts.filter { account == "all" || $0.id == account }.reduce(0) { $0 + Int(folder == "inbox" ? $1["unread"].number : $1["counts"][folder].number) }
     }
     var messageList: some View {
         VStack(spacing: 0) {
-            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.title2.bold()); Text(model.combined ? "All accounts" : model.account == "demo" ? "Demo workspace" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Toggle(isOn: $unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).help("Show unread only").accessibilityLabel("Show unread only").disabled(!model.searchResponse.isNull) }.padding(16)
+            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.title2.bold()); Text(model.combined ? "All accounts" : model.account == "demo" ? "Demo workspace" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Toggle(isOn: $model.unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).help("Show unread only").accessibilityLabel("Show unread only").disabled(!model.searchResponse.isNull) }.padding(16)
             HStack {
                 Menu {
                     ForEach(["compact", "comfortable", "spacious"], id: \.self) { density in
@@ -145,8 +152,8 @@ struct MailWorkspace: View {
             Divider()
             if filtered.isEmpty {
                 VStack {
-                    EmptyPane(title: model.searchResponse.isNull && !unreadOnly ? "All clear" : "No matching messages", detail: model.searchResponse.isNull ? "There are no messages in this view." : "Adjust the search filters or import more mail.", symbol: "tray")
-                    if unreadOnly { Button("Clear Unread Filter") { unreadOnly = false }.padding(.bottom, 24) }
+                    EmptyPane(title: model.searchResponse.isNull && !model.unreadOnly ? "All clear" : "No matching messages", detail: model.searchResponse.isNull ? "There are no messages in this view." : "Adjust the search filters or import more mail.", symbol: "tray")
+                    if model.unreadOnly { Button("Clear Unread Filter") { model.unreadOnly = false }.padding(.bottom, 24) }
                 }
             }
             else {
@@ -173,12 +180,19 @@ struct MailWorkspace: View {
                         Button("Move to Local Trash") { model.patch(message, .object(["folder": .string("trash")])) }
                     }
                 }.listStyle(.inset).disabled(model.busy)
-                .onChange(of: model.selectedMessage) { _ in
-                    if let message = model.current, model.preferences["markReadOnOpen"].bool && !message["read"].bool { model.patch(message, .object(["read": .bool(true)])) }
-                }
+
             }
             Divider()
-            Text("\(filtered.count) messages · \(model.preferences["density"].string) · local cache").font(.caption2).foregroundStyle(.secondary).padding(10)
+            if model.searchResponse.isNull {
+                HStack {
+                    Button("Previous") { Task { await model.turnMailPage(next: false) } }.disabled(model.mailCursors.count < 2 || model.mailLoading)
+                    Spacer()
+                    if model.mailLoading { ProgressView().controlSize(.small) }
+                    else { Text("Page \(model.mailCursors.count) · \(Int(model.mailPage["total"].number)) messages").font(.caption2) }
+                    Spacer()
+                    Button("Next") { Task { await model.turnMailPage(next: true) } }.disabled(!model.mailPage["nextCursor"].nonempty || model.mailLoading)
+                }.padding(10)
+            }
         }
     }
     func statusBar(_ text: String, error: Bool) -> some View {

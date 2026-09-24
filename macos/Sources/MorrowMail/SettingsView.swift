@@ -433,14 +433,7 @@ struct NativeSettingsView: View {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         run {
-            let resources = Bundle.main.resourceURL!
-            let process = Process(); process.executableURL = resources.appendingPathComponent("node")
-            process.arguments = [resources.appendingPathComponent("backend/scripts/backup.js").path, destination.path]
-            process.environment = ["DATA_DIR": model.dataDirectory.path, "PATH": "/usr/bin:/bin"]
-            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-            try process.run()
-            await Task.detached { process.waitUntilExit() }.value
-            guard process.terminationStatus == 0 else { throw APIError("Backup failed. Choose a new destination that does not already exist.") }
+            try await model.backup(to: destination)
             status = "Verified backup saved."; NSWorkspace.shared.activateFileViewerSelecting([destination])
         }
     }

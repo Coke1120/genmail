@@ -1,5 +1,53 @@
 # Verification — 23 September 2026
 
+## Rust service candidate — 25 September 2026 (local, unreleased)
+
+M0 measurement tools, M1 paged clients, M2 read worker and M3–M5 service functionality are implemented. **The packaged default remains Node; Rust selection is explicit and fails closed.** This is a tested candidate, not a claim of stable production distribution or M6 Tauri completion. See [the compatibility inventory and remaining gates](docs/RUST_MIGRATION_INVENTORY.md).
+
+- Local `npm run check`: 109 Node test entries, 107 passed and two explicitly gated Rust HTTP tests skipped; React production build passed. Rust-only contracts run separately under `npm run rust:test`.
+- Rust fixtures cover Gmail/Graph and IMAP/SMTP over isolated TLS, OAuth, all AI catalog workflows, learning, imports, schedules, search/index cancellation and budgets, original retry fingerprints, duplicate-owner IDs, shutdown, panic/disk-full transaction rollback, writer exclusion and verified backup restore. `npm run rust:test` passed: rustfmt, clippy with warnings denied, 70 Rust tests, locked release/debug builds and all six Node/Rust contracts.
+- `npm run macos:test` and `npm run macos:rust:test` passed. The new harness launches the actual AppModel against a production Rust service in an isolated temporary bundle, exercises all six sorts across 130 colliding-ID rows, full-body/draft ownership, unread state, Bcc, permissions, simulated AI/workflows, localhost OAuth handoff, disconnect/cache retention and two clean restarts. Node reopens the Rust-written encrypted settings. The visible backup control now calls the engine-aware AppModel helper; its online backup preserves both connections, duplicate-owner mail and the saved Bcc draft, rejects overwrite without changing bytes, and keeps the service available. Node successfully opens/decrypts this snapshot after service shutdown. Native locale uses BCP47, including region extensions.
+- Actual Electron/React development smoke passed with both Node and Rust backends. Rust packaged Windows execution is a separate CI gate; native API harnesses do not replace manual UI/IME/accessibility acceptance.
+- Rust updater unit/integration fixtures passed, as did the original Node updater suite. `updater:rust-upgrade:test` passed on macOS: the unchanged Node installer verified and installed a copy of the actual Rust candidate, waited for both PIDs, restarted production SwiftUI/Rust, preserved the fixture workspace and old app, and restored a backup made by the installed service. Workspace path preservation is also asserted on a real Rust-helper restart.
+- The macOS candidate passed ad-hoc deep/strict codesign, bundle metadata and common-version checks. It contains the Rust service and dependency notices, without a backend Node runtime. This is not Developer ID signing or notarization. Windows notices collection passed; Windows execution awaits CI.
+- Locked dependency audit (`cargo-audit 0.22.2`) reported zero vulnerabilities and zero warnings locally. Packaging collects normal/build dependency notices and source links, including OpenCC and nested upstream notices.
+
+All provider/model traffic used isolated generated fixtures, with no real send, calendar write, paid inference or owner workspace. Production cutover, signing/notarization, minimum-OS/manual UI and live-account acceptance remain explicit gates. Cross-platform CI is configured to run both default Node and explicit Rust candidates; its exact run status will be recorded separately.
+
+### M0/M1 historical baseline and read-worker comparison
+
+The following was measured before the complete service port and is retained as a data-flow baseline. It must not be used as a direct RSS ratio against the standalone Rust service: the Node sample includes its driver.
+
+On this Apple M4 / Darwin 27.0.0 / Node 26.7.0 host, the state request changed as follows. The new response contains 50 metadata rows; the baseline contains the entire selected mailbox, including bodies.
+
+| Fixture messages | Baseline bytes | Paged bytes | Baseline warm p50 / p95 (ms) | Paged warm p50 / p95 (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 1,000 | 1,436,833 | 26,686 | 12.05 / 14.04 | 1.89 / 3.37 |
+| 10,000 | 14,344,355 | 26,849 | 151.74 / 154.11 | 2.59 / 3.47 |
+| 50,000 | 71,819,978 | 27,006 | 906.54 / 910.22 | 5.39 / 7.16 |
+
+At 50,000 messages, the measured request stopped calling `listMessages` (formerly four calls); settings reads fell from 29 to 15. Warm lexical HTTP p50/p95 was 42.42/42.80 ms on the revised Node path and 29.17/29.40 ms with the release Rust worker. Sampled Node/driver plus worker RSS was about 173.9 MB, of which the worker was 6.9 MB, with two service processes. The Rust round trip on the first query was 16.40 ms including its SQL execution. These figures do not isolate IPC or establish overall application memory/latency.
+
+Each size uses a new process and workspace, two fictional accounts, colliding IDs, mixed English/Chinese text and 1 KiB bodies. Five warm samples are descriptive, not a statistical performance guarantee. The benchmark includes the in-process HTTP driver, excludes UI/parent harness, does not flush OS file caches, and measures Node CPU rather than total worker CPU. It uses unchanged SQLite FULL/DELETE durability. The complete service now has separate locale, indexing and idle fixtures; whole-app RSS, MainActor/slow-account UI traces and minimum-OS acceptance remain separate gates.
+
+### Complete Rust service performance
+
+The service benchmark uses a copied immutable release binary, two fictional accounts, 1 KiB bodies and 1,000 / 10,000 / 50,000 rows. It records migration and restart separately, five warm requests, service PID RSS/CPU separately from the Node driver, 30 seconds idle and recovery of 1,000 missing derived index rows. Exact final measurements are stored under ignored `test-results/migration-rust-service.json`.
+
+Final standalone service measurements on Apple M4 / Darwin 27, release SHA `6cf1f961820e2b670e7cb2e90b12d1c23280076ad5bfda8e198ffa5738bdc3db` (22,120,768 bytes):
+
+| Rows | Warm state p95 ms | Lexical p95 ms | Page p95 ms | Sender p95 ms | Migration / restart ms | Service sampled RSS MiB | CPU over 30s idle ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 2.67 | 11.22 | 1.02 | 3.37 | 41.91 / 6.68 | 24.19 | 50 |
+| 10,000 | 7.48 | 24.78 | 1.40 | 28.13 | 376.71 / 12.81 | 24.34 | 30 |
+| 50,000 | 30.97 | 45.16 | 1.99 | 130.19 | 1740.32 / 19.35 | 24.03 | 50 |
+
+At 50k, state/search/page/revision payloads were 26,932 / 22,733 / 20,764 / 73 bytes. All count, sender ordering, distinct-owner cursor, bounded metadata and single-writer assertions passed. This binary predates the later native online-backup and development asset-path integration; neither changes the measured query paths. The reports identify the immutable binary rather than attributing measurements to an untested final artifact.
+
+A 50,000-row partial rebuild initially delayed one state request by 3.81 seconds. Repeated traces identified SQLite sorting/JSON reads blocking the shared DB queue; HTTP body transfer/decoding was below 0.2 ms. Covering anti-joins and separate indexed/missing aggregation removed the whole-index sort spill. Matched runs without native profiling reduced state requests from 351–471 ms to 164–198 ms, concurrent revision probes from maxima 384–503 ms to 191–193 ms, and recovery from 2.29–2.82 s to 1.38–1.39 s. Counts, metadata-only responses and paging stayed correct. This comparison covers **1,000 missing rows in a 50,000-row workspace**, not complete index loss or arbitrary body sizes; it does not establish UI responsiveness.
+
+## Original alpha artifact — 23 September 2026
+
 Artifact: `build/macos/Morrow Mail.app`, Apple silicon, minimum macOS 13.5 for the bundled runtime. Native SwiftUI interface; no web view. The generated app contains its runtime, production dependencies, original icon, setup documentation, and license notices.
 
 ## Passed

@@ -1,3 +1,4 @@
+import { useMailPage } from './mail-page';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, Bell, BookOpen, Brain, CalendarDays, Check, CheckCheck, ChevronRight, FilePenLine, FolderCheck, Languages, ListFilter, LoaderCircle, Mail, MessageSquare, NotebookPen, Paperclip, Pencil, Plus, Save, Search, ShieldCheck, Sparkles, Star, Tag, Trash2, UserRound, WandSparkles, X } from 'lucide-react';
 import { AI_BEHAVIORS, DEFAULT_POLICY } from '../shared/features';
@@ -51,13 +52,17 @@ export default function Studio({ state, selectedMessage, onUpdate, onCompose, on
   const [output, setOutput] = useState(null);
   const [preview, setPreview] = useState(null);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const permitted = (state.messages || []).filter(message => policy.folders[message.folder]);
+  const mail = useMailPage(accountKey, state.revision);
+  const contextRows = selectedMessage?.accountId === accountKey && !mail.messages.some(m => m.id === selectedMessage.id) ? [selectedMessage, ...mail.messages] : mail.messages;
+  const permitted = contextRows.filter(message => policy.folders[message.folder]);
+  const counts = accountKey === 'demo' ? state.demoStats?.counts || {} : state.accounts.find(item => item.id === accountKey)?.counts || {};
+  const permittedCount = Object.entries(counts).filter(([folder]) => folder !== 'starred' && policy.folders[folder]).reduce((sum, [, count]) => sum + count, 0);
   const chosen = permitted.find(message => message.id === messageId) || permitted.find(message => message.id === selectedMessage?.id) || permitted[0];
   const feature = AI_BEHAVIORS.find(item => item.id === action);
   const usesDraft = action === 'rewrite' || (action === 'translate' && translateSource === 'draft');
   const usesSelected = feature.context === 'selected' && !usesDraft;
   const chosenSkill = skills.find(skill => skill.id === skillId) || skills[0];
-  const skillMessages = permitted.filter(message => !chosenSkill?.folders || chosenSkill.folders[message.folder]);
+  const skillCount = Object.entries(counts).filter(([folder]) => folder !== 'starred' && policy.folders[folder] && (!chosenSkill?.folders || chosenSkill.folders[folder])).reduce((sum, [, count]) => sum + count, 0);
 
   useEffect(() => {
     pending.current?.controller.abort(); pending.current = null;
@@ -83,10 +88,10 @@ export default function Studio({ state, selectedMessage, onUpdate, onCompose, on
     if (item.id === 'batchReplies' && (!policy.content.sender || !policy.content.body)) return 'Batch replies require sender and message body permissions.';
     if ((item.id === 'rewrite' || drafting) && (!policy.folders.drafts || !policy.content.body)) return 'Draft actions require Drafts and message body permissions.';
     if (item.context !== 'none' && item.context !== 'draft' && !drafting && !['subject', 'body', 'sender'].some(key => policy.content[key])) return 'Allow subject, body, or sender context in AI permissions.';
-    if (item.context !== 'none' && item.context !== 'draft' && !drafting && !permitted.length && !(choosing && item.id === 'translate' && policy.folders.drafts && policy.content.body)) return 'No messages are in your permitted folders.';
+    if (item.context !== 'none' && item.context !== 'draft' && !drafting && !permittedCount && !(choosing && item.id === 'translate' && policy.folders.drafts && policy.content.body)) return 'No messages are in your permitted folders.';
     return '';
   }
-  const skillReason = action === 'skill' && chosenSkill ? chosenSkill.enabled === false ? 'This skill is disabled. Enable it in My skills.' : !skillMessages.length ? 'This skill has no messages in its allowed folders. Edit its scope in My skills or change AI permissions.' : '' : '';
+  const skillReason = action === 'skill' && chosenSkill ? chosenSkill.enabled === false ? 'This skill is disabled. Enable it in My skills.' : !skillCount ? 'This skill has no messages in its allowed folders. Edit its scope in My skills or change AI permissions.' : '' : '';
   const blockReason = blocked(feature, usesDraft) || skillReason;
   const modelMissing = !feature.mock && state.account.mode !== 'demo' && !state.settings.ai?.configured;
   const invalid = (usesSelected && !chosen) || (usesDraft && !draftText.trim()) || (['ask', 'write'].includes(action) && !prompt.trim()) || (action === 'skill' && !chosenSkill);
@@ -98,7 +103,7 @@ export default function Studio({ state, selectedMessage, onUpdate, onCompose, on
     const token = { controller: new AbortController() };
     pending.current = token; setBusy(label); setError('');
     try {
-      const response = await fetch(`/api${path}`, { method, signal: token.controller.signal, headers: { 'Content-Type': 'application/json', 'X-Genmail-Account': accountKey }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+      const response = await fetch(`/api${path}`, { method, signal: token.controller.signal, headers: { 'Content-Type': 'application/json', 'X-Morrow-View': 'paged', 'X-Genmail-Account': accountKey }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || `Request failed (${response.status}). Please try again.`);
       if (currentContext.current === requestContext && pending.current === token) success(result);
@@ -171,8 +176,8 @@ export default function Studio({ state, selectedMessage, onUpdate, onCompose, on
         <div className="studio-section-heading"><div><span className="eyebrow">{feature.mock ? 'PREVIEW FIRST. APPLY LOCALLY.' : 'A STARTING POINT, SHAPED BY YOU.'}</span><h2 id="studio-action-title">{feature.label}</h2><p>{feature.description}</p></div><span className={`studio-badge ${feature.mock ? 'simulation' : ''}`}>{feature.mock ? 'Local simulation' : 'On-demand AI'}</span></div>
         <form onSubmit={run} className="studio-action-form">
           {action === 'translate' && <label className="studio-field">Translate from<select value={translateSource} onChange={event => { setTranslateSource(event.target.value); setOutput(null); }} disabled={!!busy}><option value="message">An email</option><option value="draft">Text I’m writing</option></select></label>}
-          {usesSelected && <label className="studio-field">Email context<select value={chosen?.id || ''} onChange={event => { setMessageId(event.target.value); setOutput(null); setPreview(null); }} disabled={!!busy || !!blockReason} required>{!permitted.length && <option value="">No permitted messages</option>}{permitted.map(message => <option key={message.id} value={message.id}>{messageLabel(message)}</option>)}</select><small>Only messages in your permitted folders are available.</small></label>}
-          {feature.context === 'mailbox' && <p className="studio-context"><Mail size={15} />Uses up to {Math.min(action === 'skill' ? skillMessages.length : permitted.length, policy.maxMessages)} permitted messages. Hidden content stays excluded.</p>}
+          {usesSelected && <label className="studio-field">Email context<select value={chosen?.id || ''} onChange={event => { setMessageId(event.target.value); setOutput(null); setPreview(null); }} disabled={!!busy || !!blockReason} required>{!permitted.length && <option value="">No permitted messages</option>}{permitted.map(message => <option key={message.id} value={message.id}>{messageLabel(message)}</option>)}</select><small>Only messages in your permitted folders are available.</small><span className="search-actions"><button type="button" disabled={!!busy || mail.loading || !mail.previous} onClick={mail.previous}>Previous messages</button><span>Page {mail.page}</span><button type="button" disabled={!!busy || mail.loading || !mail.next} onClick={mail.next}>Next messages</button></span>{mail.error && <small role="alert">{mail.error}</small>}</label>}
+          {feature.context === 'mailbox' && <p className="studio-context"><Mail size={15} />Uses up to {Math.min(action === 'skill' ? skillCount : permittedCount, policy.maxMessages)} permitted messages. Hidden content stays excluded.</p>}
           {action === 'skill' && <div className="studio-field"><label className="studio-skill-selector">Saved skill<select value={chosenSkill?.id || ''} onChange={event => { setSkillId(event.target.value); setOutput(null); }} disabled={!!busy || !!blocked(feature)} required>{!skills.length && <option value="">Create a skill first</option>}{skills.map(skill => <option key={skill.id} value={skill.id} disabled={skill.enabled === false}>{skill.name}{skill.enabled === false ? ' (disabled)' : ''}</option>)}</select></label>{chosenSkill && <small>{chosenSkill.instructions}</small>}<button type="button" className="studio-text-button" onClick={() => setTab('skills')}>Manage my skills<ArrowRight size={13} /></button></div>}
           {usesDraft && <label className="studio-field">Your draft<textarea rows={6} value={draftText} onChange={event => { setDraftText(event.target.value); setOutput(null); }} placeholder="Paste the text you want to work on…" required disabled={!!busy || !!blockReason} maxLength={100000} /></label>}
           {!feature.mock && <label className="studio-field">{action === 'write' ? 'What would you like to say?' : action === 'ask' ? 'Your question' : action === 'translate' ? 'Language or translation instructions' : 'Additional instructions (optional)'}<textarea rows={action === 'write' ? 4 : 2} value={prompt} onChange={event => setPrompt(event.target.value)} required={['write', 'ask'].includes(action)} disabled={!!busy || !!blockReason} maxLength={2000} placeholder={action === 'write' ? 'Write a warm follow-up about our conversation…' : action === 'ask' ? 'Which messages need a response from me?' : action === 'translate' ? `Translate to ${state.settings.preferences?.translationLanguage || state.settings.preferences?.language || 'English'}` : 'A little context or a preferred tone…'} /></label>}

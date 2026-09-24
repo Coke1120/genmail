@@ -1,0 +1,863 @@
+//! Persistent, account-bound history imports and summary scheduling.
+use crate::{
+    ai,
+    error::{Error, Result},
+    mail, policy,
+    service::{App, Context, connections, workspace},
+    store::{Store, catalog, merge, now, string},
+};
+use axum::{
+    Json,
+    response::{IntoResponse, Response},
+};
+use chrono::{DateTime, Months, SecondsFormat, Utc};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashSet,
+    sync::{
+        LazyLock,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
+};
+use tokio::sync::{Mutex, Notify};
+
+pub struct Runtime {
+    gate: Mutex<()>,
+    stopped: AtomicBool,
+    shutdown: Notify,
+    last_sync: AtomicI64,
+}
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            gate: Mutex::new(()),
+            stopped: AtomicBool::new(false),
+            shutdown: Notify::new(),
+            last_sync: AtomicI64::new(Utc::now().timestamp_millis()),
+        }
+    }
+}
+
+pub const PRIORITY_GUIDE: &str = "P0: explicit emergency requiring immediate attention. P1: explicit action due today. P2: normal action or follow-up. P3: information with no action requested. P4: low-priority bulk/promotional mail. Use P2 when urgency is unclear; never invent a deadline or emergency. Priorities are suggestions for human review.";
+
+pub fn priority_summary(raw: &str, messages: &[Value]) -> Result<Value> {
+    let invalid = || {
+        Error::new(
+            502,
+            "The model returned an incomplete P0–P4 summary. Try fewer context messages or a higher response token limit.",
+        )
+    };
+    static FENCE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?s)^```(?:json)?\s*\n(.*?)\n```$").unwrap());
+    let raw = FENCE.replace(raw.trim(), "$1");
+    let parsed: Value = serde_json::from_str(&raw).map_err(|_| invalid())?;
+    let entries = parsed["items"].as_array().ok_or_else(invalid)?;
+    let ids: HashSet<&str> = messages.iter().map(|m| string(m, "id")).collect();
+    let mut seen = HashSet::new();
+    if entries.len() != ids.len() {
+        return Err(invalid());
+    }
+    let mut items = Vec::new();
+    for entry in entries {
+        let id = string(entry, "messageId");
+        let priority = string(entry, "priority");
+        let summary = entry["summary"].as_str().ok_or_else(invalid)?;
+        if !ids.contains(id)
+            || !seen.insert(id)
+            || !["P0", "P1", "P2", "P3", "P4"].contains(&priority)
+            || summary.trim().is_empty()
+            || summary.encode_utf16().count() > 4000
+        {
+            return Err(invalid());
+        }
+        items.push(json!({"messageId":id,"priority":priority,"summary":summary.trim()}));
+    }
+    items.sort_by(|a, b| string(a, "priority").cmp(string(b, "priority")));
+    let text = ["P0", "P1", "P2", "P3", "P4"]
+        .into_iter()
+        .map(|priority| {
+            let selected: Vec<_> = items
+                .iter()
+                .filter(|item| item["priority"] == priority)
+                .collect();
+            let lines = if selected.is_empty() {
+                "—".into()
+            } else {
+                selected
+                    .iter()
+                    .map(|item| format!("• {}", string(item, "summary")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            format!("{priority} ({})\n{lines}", selected.len())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(json!({"items":items,"text":text}))
+}
+
+fn digest(value: &Value) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+}
+fn write_owner(db: &Store, group: &str, account: &str, value: Value) -> Result<()> {
+    let mut entries = merge(json!({}), &db.settings()?[group]);
+    entries[account] = value;
+    db.set_settings(&json!({group:entries}))?;
+    Ok(())
+}
+
+pub fn import_options(input: &Value) -> Result<Value> {
+    let fields = input
+        .as_object()
+        .ok_or_else(|| Error::invalid("Invalid import options."))?;
+    if fields
+        .keys()
+        .any(|key| !["months", "inbox", "sent"].contains(&key.as_str()))
+    {
+        return Err(Error::invalid("Invalid import options."));
+    }
+    let options = merge(json!({"months":3,"inbox":true,"sent":true}), input);
+    if !options["months"]
+        .as_u64()
+        .is_some_and(|months| [1, 3, 6, 12].contains(&months))
+        || !options["inbox"].is_boolean()
+        || !options["sent"].is_boolean()
+        || (options["inbox"] != true && options["sent"] != true)
+    {
+        return Err(Error::invalid(
+            "Choose 1, 3, 6, or 12 months and at least one folder.",
+        ));
+    }
+    Ok(options)
+}
+pub fn months_ago(months: u32, timestamp: i64) -> Result<String> {
+    DateTime::from_timestamp_millis(timestamp)
+        .and_then(|date| date.checked_sub_months(Months::new(months)))
+        .map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true))
+        .ok_or_else(|| Error::invalid("Invalid import date."))
+}
+pub fn start_import(db: &Store, account: &str, input: &Value) -> Result<()> {
+    let options = import_options(input)?;
+    let config = db.settings()?;
+    let live = connections(&config);
+    let connection = live
+        .get(account)
+        .ok_or_else(|| Error::invalid("Choose a connected mailbox."))?;
+    let timestamp = Utc::now();
+    let before = timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut job = json!({"id":uuid::Uuid::new_v4().to_string(),"options":options,"since":months_ago(options["months"].as_u64().unwrap() as u32,timestamp.timestamp_millis())?,"before":before,"folderIndex":0,"cursor":null,"visited":[],"status":"running","imported":0,"updatedAt":before});
+    if let Some(identity) = connection.get("connectionId") {
+        job["connectionId"] = identity.clone();
+    }
+    write_owner(db, "imports", account, job)
+}
+pub fn control_import(db: &Store, account: &str, action: &str) -> Result<()> {
+    let config = db.settings()?;
+    let job = &config["imports"][account];
+    if !job.is_object() || job["status"] == "complete" || !["pause", "resume"].contains(&action) {
+        return Err(Error::invalid("No import to pause or resume."));
+    }
+    if action == "resume"
+        && (connections(&config).get(account).is_none()
+            || job["connectionId"] != connections(&config)[account]["connectionId"])
+    {
+        return Err(Error::invalid("Start a new import for this connection."));
+    }
+    write_owner(
+        db,
+        "imports",
+        account,
+        merge(
+            job.clone(),
+            &json!({"id":uuid::Uuid::new_v4().to_string(),"status":if action=="pause"{"paused"}else{"running"},"error":"","updatedAt":now()}),
+        ),
+    )
+}
+pub fn import_status(db: &Store, account: &str) -> Result<Value> {
+    Ok(import_status_from(&db.settings()?, account))
+}
+pub fn import_status_from(config: &Value, account: &str) -> Value {
+    let job = &config["imports"][account];
+    if !job.is_object() {
+        return Value::Null;
+    }
+    project(
+        job,
+        &[
+            "options",
+            "since",
+            "before",
+            "status",
+            "imported",
+            "updatedAt",
+            "error",
+        ],
+    )
+}
+pub fn import_config(db: &Store, account: &str) -> Result<Value> {
+    Ok(db.settings()?["imports"][account]["options"].clone())
+}
+fn project(value: &Value, keys: &[&str]) -> Value {
+    let mut result = json!({});
+    for key in keys {
+        if let Some(value) = value.get(*key) {
+            result[key] = value.clone();
+        }
+    }
+    result
+}
+fn import_current(config: &Value, account: &str, job: &Value) -> bool {
+    config["imports"][account]["id"] == job["id"]
+        && config["imports"][account]["status"] == "running"
+        && connections(config)
+            .get(account)
+            .is_some_and(|mail| mail["connectionId"] == job["connectionId"])
+}
+fn import_folders(job: &Value) -> Vec<&'static str> {
+    ["inbox", "sent"]
+        .into_iter()
+        .filter(|folder| job["options"][folder] == true)
+        .collect()
+}
+
+/// Commit the provider page and checkpoint together; stale network results never write.
+pub fn apply_import_page(db: &Store, account: &str, job: &Value, result: &Value) -> Result<()> {
+    db.transaction(|db| {
+        let config = db.settings()?;
+        if !import_current(&config,account,job) { return Ok(()); }
+        let messages = result["messages"].as_array().filter(|messages| messages.len() <= 50).ok_or_else(|| Error::new(502,"Invalid import page."))?;
+        let cursor = result.get("nextCursor").filter(|cursor| !cursor.is_null() && **cursor != false && **cursor != "");
+        let hash = cursor.map(digest).transpose()?;
+        if cursor.is_some_and(|cursor| *cursor == job["cursor"]) || hash.as_ref().is_some_and(|hash| job["visited"].as_array().is_some_and(|visited| visited.contains(&json!(hash)))) { return Err(Error::new(502,"Repeated import page.")); }
+        let messages: Vec<_> = messages.iter().filter(|message| string(message,"date") >= string(job,"since") && string(message,"date") < string(job,"before")).cloned().collect();
+        let imported = mail::import_messages(db,&connections(&config)[account],&messages)?.len();
+        let folder_index = job["folderIndex"].as_u64().unwrap_or(0) + u64::from(cursor.is_none());
+        let mut visited = job["visited"].as_array().cloned().unwrap_or_default();
+        if let Some(hash) = hash { visited.push(hash.into()); } else { visited.clear(); }
+        write_owner(db,"imports",account,merge(job.clone(), &json!({"imported":job["imported"].as_u64().unwrap_or(0)+imported as u64,"cursor":cursor,"visited":visited,"folderIndex":folder_index,"status":if folder_index as usize>=import_folders(job).len(){"complete"}else{"running"},"error":"","updatedAt":now()})))
+    })
+}
+
+async fn history_tick(app: &App) -> Result<()> {
+    let Ok(_mailbox) = app.0.mailbox.try_lock() else {
+        return Ok(());
+    };
+    let entry = app
+        .db(|db| {
+            let config = db.settings()?;
+            let live = connections(&config);
+            Ok(config["imports"]
+                .as_object()
+                .into_iter()
+                .flat_map(|entries| entries.iter())
+                .filter(|(account, job)| live.get(*account).is_some() && job["status"] == "running")
+                .min_by(|a, b| string(a.1, "updatedAt").cmp(string(b.1, "updatedAt")))
+                .map(|(account, job)| (account.clone(), job.clone())))
+        })
+        .await?;
+    let Some((account, job)) = entry else {
+        return Ok(());
+    };
+    if connections(&app.settings().await?)[&account]["connectionId"] != job["connectionId"] {
+        return app.db(move |db| {
+            let current=db.settings()?;
+            if current["imports"][&account]["id"]==job["id"] && current["imports"][&account]["status"]=="running" && connections(&current)[&account]["connectionId"]!=job["connectionId"] {
+                write_owner(db,"imports",&account,merge(job,&json!({"status":"paused","error":"Connection changed. Start a new import.","updatedAt":now()})))?;
+            }
+            Ok(())
+        }).await;
+    }
+    let work = async {
+        let mail = mail::current_mail(app,&account).await?;
+        if !import_current(&app.settings().await?,&account,&job) { return Ok(()); }
+        let folders = import_folders(&job);
+        let folder = folders.get(job["folderIndex"].as_u64().unwrap_or(0) as usize).ok_or_else(|| Error::invalid("Invalid import folder."))?;
+        let result = mail::fetch_page(app,&mail,&json!({"folder":folder,"since":job["since"],"before":job["before"],"cursor":job["cursor"]})).await?;
+        let (account,job) = (account.clone(),job.clone());
+        app.db(move |db| apply_import_page(db,&account,&job,&result)).await
+    }.await;
+    if work.is_err() {
+        app.db(move |db| {
+            if import_current(&db.settings()?,&account,&job) { write_owner(db,"imports",&account,merge(job,&json!({"status":"failed","error":"Import stopped. Check the connection and Sent folder support, then resume. If the mailbox changed, start again.","updatedAt":now()})))?; }
+            Ok(())
+        }).await?;
+    }
+    Ok(())
+}
+
+pub async fn handle(app: &App, ctx: &Context) -> Result<Option<Response>> {
+    if ctx.method != axum::http::Method::POST
+        || ctx.path.len() != 2
+        || !ctx.path[0].eq_ignore_ascii_case("imports")
+    {
+        return Ok(None);
+    }
+    let context = ctx.clone();
+    let owner = app
+        .db(move |db| {
+            let config = db.settings()?;
+            let account = context.read_owner(&config, false)?;
+            if connections(&config).get(&account).is_none() {
+                return Err(Error::conflict("Choose a connected mailbox."));
+            }
+            if context.path[1].eq_ignore_ascii_case("start") {
+                start_import(db, &account, &context.body)?;
+            } else {
+                control_import(db, &account, &context.path[1].to_ascii_lowercase())?;
+            }
+            Ok(account)
+        })
+        .await?;
+    Ok(Some(
+        Json(app.state(&owner, ctx.paged).await?).into_response(),
+    ))
+}
+
+/// Calendar-day keys avoid duplicate daily runs during a repeated DST hour.
+pub fn summary_due(schedule: &Value, previous: &Value, timestamp: i64) -> Result<Value> {
+    let config = serde_json::to_string(schedule)?;
+    let same = previous["config"] == config;
+    if schedule["cadence"] == "interval" {
+        let last = if same {
+            previous["lastAt"].as_i64()
+        } else {
+            Some(timestamp)
+        };
+        let hours = schedule["everyHours"]
+            .as_i64()
+            .filter(|hours| (1..=168).contains(hours))
+            .ok_or_else(|| Error::invalid("Invalid summary interval."))?;
+        return Ok(
+            json!({"due":last.is_some_and(|last|timestamp>=last.saturating_add(hours*3600000)),"state":{"config":config,"lastAt":last.unwrap_or(timestamp)}}),
+        );
+    }
+    let zone: chrono_tz::Tz = string(schedule, "timeZone")
+        .parse()
+        .map_err(|_| Error::invalid("Invalid summary time zone."))?;
+    let date = DateTime::from_timestamp_millis(timestamp)
+        .ok_or_else(|| Error::invalid("Invalid summary time."))?
+        .with_timezone(&zone);
+    let day = date.format("%Y-%m-%d").to_string();
+    let previous_day = if same { string(previous, "day") } else { "" };
+    Ok(
+        json!({"due":date.format("%H:%M").to_string().as_str()>=string(schedule,"time") && day.as_str()>previous_day,"day":day,"state":{"config":config,"day":previous_day}}),
+    )
+}
+fn owners(config: &Value) -> Vec<String> {
+    let live = connections(config);
+    if live.as_object().is_none_or(|live| live.is_empty()) {
+        vec!["demo".into()]
+    } else {
+        live.as_object().unwrap().keys().cloned().collect()
+    }
+}
+fn automation(config: &Value, account: &str) -> Value {
+    merge(
+        json!({"jobs":[],"schedule":{}}),
+        &config["automation"][account],
+    )
+}
+fn signature(config: &Value, account: &str) -> Result<String> {
+    let preferences = merge(catalog()["preferences"].clone(), &config["preferences"]);
+    let live = connections(config);
+    let connection = &live[account];
+    let identity = [
+        string(connection, "connectionId"),
+        string(connection, "email"),
+        account,
+    ]
+    .into_iter()
+    .find(|value| !value.is_empty())
+    .unwrap_or(account);
+    digest(&json!([
+        policy::resolve(&config["policy"]),
+        config["ai"],
+        preferences["language"],
+        preferences["translationLanguage"],
+        preferences["replyTone"],
+        identity
+    ]))
+}
+fn enabled(policy: &Value, kind: &str) -> bool {
+    let (trigger, behavior) = match kind {
+        "arrival" => ("onArrival", "summary"),
+        "scheduled" => ("scheduledSummary", "briefing"),
+        _ => return false,
+    };
+    policy["enabled"] == true
+        && policy["triggers"][trigger] == true
+        && policy["behaviors"][behavior] == true
+        && ["subject", "body", "sender"]
+            .iter()
+            .any(|field| policy["content"][field] == true)
+}
+fn eligible(policy: &Value, kind: &str, message: &Value) -> bool {
+    enabled(policy, kind)
+        && message.is_object()
+        && !["drafts", "trash"].contains(&string(message, "folder"))
+        && policy["folders"][string(message, "folder")] == true
+        && (policy["triggers"]["inboxOnly"] != true || message["folder"] == "inbox")
+        && (policy["triggers"]["starredOnly"] != true || message["starred"] == true)
+}
+fn sources(db: &Store, account: &str, ids: &[Value]) -> Result<Vec<Value>> {
+    ids.iter()
+        .map(|id| {
+            db.get(account, id.as_str().unwrap_or(""))
+                .map(|message| message.unwrap_or(Value::Null))
+        })
+        .collect()
+}
+fn source_digest(messages: &[Value], policy: &Value) -> Result<String> {
+    let values: Vec<_> = messages
+        .iter()
+        .map(|message| {
+            if message.is_null() {
+                Value::Null
+            } else {
+                project(
+                    &policy::redact(message, policy),
+                    &[
+                        "id",
+                        "subject",
+                        "body",
+                        "fromName",
+                        "fromEmail",
+                        "to",
+                        "date",
+                    ],
+                )
+            }
+        })
+        .collect();
+    digest(&json!(values))
+}
+fn brain_digest(db: &Store, account: &str, brain: &Value, policy: &Value) -> Result<String> {
+    let messages = sources(
+        db,
+        account,
+        brain["sourceMessageIds"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    )?;
+    digest(&json!(
+        messages
+            .iter()
+            .map(|message| policy::redact(message, policy))
+            .collect::<Vec<_>>()
+    ))
+}
+fn pending(job: &Value) -> bool {
+    ["queued", "running"].contains(&string(job, "status"))
+}
+fn append(db: &Store, account: &str, kind: &str, ids: &[Value]) -> Result<()> {
+    let config = db.settings()?;
+    let mut value = automation(&config, account);
+    let jobs = value["jobs"].as_array().cloned().unwrap_or_default();
+    let current: Vec<_> = jobs.iter().filter(|job| pending(job)).cloned().collect();
+    // ponytail: 100 pending jobs/account; overflow is visible for manual handling.
+    if current.len() >= 100 {
+        value["overflow"] = (value["overflow"].as_u64().unwrap_or(0) + 1).into();
+    } else {
+        let mut history: Vec<_> = jobs
+            .iter()
+            .filter(|job| !pending(job))
+            .rev()
+            .take(20)
+            .cloned()
+            .collect();
+        history.reverse();
+        history.extend(current);
+        history.push(json!({"id":uuid::Uuid::new_v4().to_string(),"kind":kind,"messageIds":ids,"signature":signature(&config,account)?,"generation":config["aiGeneration"].as_u64().unwrap_or(0),"sourceDigest":source_digest(&sources(db,account,ids)?,&policy::resolve(&config["policy"]))?,"createdAt":now(),"status":"queued"}));
+        value["jobs"] = history.into();
+    }
+    write_owner(db, "automation", account, value)
+}
+pub fn arrivals(db: &Store, account: &str, ids: &[String]) -> Result<()> {
+    let config = db.settings()?;
+    if !owners(&config).iter().any(|owner| owner == account) {
+        return Ok(());
+    }
+    let policy = policy::resolve(&config["policy"]);
+    if !enabled(&policy, "arrival") {
+        return Ok(());
+    }
+    let mut seen = HashSet::new();
+    for id in ids {
+        if seen.insert(id)
+            && db
+                .get(account, id)?
+                .is_some_and(|message| policy::matches_trigger(&policy, "onArrival", &message))
+        {
+            append(db, account, "arrival", &[json!(id)])?;
+        }
+    }
+    Ok(())
+}
+fn valid_job(db: &Store, account: &str, job: &Value, config: &Value) -> Result<bool> {
+    if !owners(config).iter().any(|owner| owner == account)
+        || job["signature"] != signature(config, account)?
+        || job.get("generation").is_some_and(|generation| {
+            generation.as_u64() != Some(config["aiGeneration"].as_u64().unwrap_or(0))
+        })
+    {
+        return Ok(false);
+    }
+    let Some(ids) = job["messageIds"].as_array() else {
+        return Ok(false);
+    };
+    let policy = policy::resolve(&config["policy"]);
+    if ids.is_empty()
+        || ids.len() > policy["maxMessages"].as_u64().unwrap_or(8) as usize
+        || !enabled(&policy, string(job, "kind"))
+    {
+        return Ok(false);
+    }
+    let messages = sources(db, account, ids)?;
+    if messages
+        .iter()
+        .any(|message| !eligible(&policy, string(job, "kind"), message))
+    {
+        return Ok(false);
+    }
+    Ok(job["sourceDigest"] == source_digest(&messages, &policy)?)
+}
+pub fn reports(db: &Store, account: &str) -> Result<Value> {
+    let config = db.settings()?;
+    if account == "all" || !owners(&config).iter().any(|owner| owner == account) {
+        return Ok(json!([]));
+    }
+    let value = automation(&config, account);
+    let mut result = Vec::new();
+    for job in value["jobs"].as_array().into_iter().flatten().rev() {
+        if valid_job(db, account, job, &config)? {
+            result.push(project(
+                job,
+                &[
+                    "id",
+                    "kind",
+                    "messageIds",
+                    "createdAt",
+                    "completedAt",
+                    "status",
+                    "source",
+                    "text",
+                    "items",
+                    "error",
+                ],
+            ));
+            if result.len() == 20 {
+                break;
+            }
+        }
+    }
+    Ok(result.into())
+}
+pub fn overflow(db: &Store, account: &str) -> Result<u64> {
+    let config = db.settings()?;
+    Ok(if owners(&config).iter().any(|owner| owner == account) {
+        config["automation"][account]["overflow"]
+            .as_u64()
+            .unwrap_or(0)
+    } else {
+        0
+    })
+}
+pub fn state(db: &Store, account: &str) -> Result<Value> {
+    Ok(json!({"summaries":reports(db,account)?,"summaryOverflow":overflow(db,account)?}))
+}
+fn update_job(db: &Store, account: &str, id: &str, patch: &Value) -> Result<()> {
+    let mut value = automation(&db.settings()?, account);
+    let jobs: Vec<_> = value["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|job| {
+            if job["id"] == id {
+                merge(job.clone(), patch)
+            } else {
+                job.clone()
+            }
+        })
+        .collect();
+    let recent: HashSet<_> = jobs
+        .iter()
+        .filter(|job| !pending(job))
+        .rev()
+        .take(20)
+        .map(|job| string(job, "id"))
+        .collect();
+    value["jobs"] = jobs
+        .iter()
+        .filter(|job| pending(job) || recent.contains(string(job, "id")))
+        .cloned()
+        .collect();
+    write_owner(db, "automation", account, value)
+}
+/// Claimed work may already have spent tokens; a restart must not replay it.
+pub fn recover(db: &Store) -> Result<()> {
+    let config = db.settings()?;
+    for (account, value) in config["automation"].as_object().into_iter().flatten() {
+        for job in value["jobs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|job| job["status"] == "running")
+        {
+            update_job(
+                db,
+                account,
+                string(job, "id"),
+                &json!({"status":"interrupted","error":"Interrupted by app shutdown. Generate again manually if needed."}),
+            )?;
+        }
+    }
+    Ok(())
+}
+pub fn reset_schedules(db: &Store) -> Result<()> {
+    reset_schedules_at(db, Utc::now().timestamp_millis())
+}
+fn reset_schedules_at(db: &Store, timestamp: i64) -> Result<()> {
+    let config = db.settings()?;
+    let schedule = &policy::resolve(&config["policy"])["summarySchedule"];
+    for account in owners(&config) {
+        let mut value = automation(&db.settings()?, &account);
+        value["schedule"] = summary_due(schedule, &json!({}), timestamp)?["state"].clone();
+        write_owner(db, "automation", &account, value)?;
+    }
+    Ok(())
+}
+pub fn schedule(db: &Store, timestamp: i64) -> Result<()> {
+    let config = db.settings()?;
+    let policy = policy::resolve(&config["policy"]);
+    if !enabled(&policy, "scheduled") {
+        return Ok(());
+    }
+    let folders: Vec<_> = ["inbox", "sent", "archive"]
+        .into_iter()
+        .filter(|folder| {
+            policy["folders"][folder] == true
+                && (policy["triggers"]["inboxOnly"] != true || *folder == "inbox")
+        })
+        .collect();
+    if folders.is_empty() {
+        return Ok(());
+    }
+    let sql = format!(
+        "SELECT id FROM messages WHERE account=? AND json_extract(data,'$.folder') IN ({}) {} ORDER BY json_extract(data,'$.date') DESC,id LIMIT ?",
+        vec!["?"; folders.len()].join(","),
+        if policy["triggers"]["starredOnly"] == true {
+            "AND json_extract(data,'$.starred')=1"
+        } else {
+            ""
+        }
+    );
+    for account in owners(&config) {
+        let mut params: Vec<rusqlite::types::Value> = vec![account.clone().into()];
+        params.extend(
+            folders
+                .iter()
+                .map(|folder| rusqlite::types::Value::Text((*folder).into())),
+        );
+        params.push(
+            policy["maxMessages"]
+                .as_i64()
+                .unwrap_or(8)
+                .clamp(1, 50)
+                .into(),
+        );
+        let ids = db
+            .conn
+            .prepare(&sql)?
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                row.get::<_, String>(0)
+            })?
+            .map(|row| row.map(Value::String))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if ids.is_empty() {
+            continue;
+        }
+        let mut value = automation(&db.settings()?, &account);
+        let due = summary_due(&policy["summarySchedule"], &value["schedule"], timestamp)?;
+        if due["due"] == true {
+            db.transaction(|db| {
+                value["schedule"] = due["state"].clone();
+                if let Some(day) = due.get("day") {
+                    value["schedule"]["day"] = day.clone();
+                }
+                value["schedule"]["lastAt"] = timestamp.into();
+                write_owner(db, "automation", &account, value)?;
+                append(db, &account, "scheduled", &ids)
+            })?;
+        } else if value["schedule"] != due["state"] {
+            value["schedule"] = due["state"].clone();
+            write_owner(db, "automation", &account, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn claim(db: &Store, account: &str, job: &Value) -> Result<Option<Value>> {
+    db.transaction(|db| {
+        let config = db.settings()?;
+        let value = automation(&config,account);
+        if !value["jobs"].as_array().into_iter().flatten().any(|current|current["id"]==job["id"]&&current["status"]=="queued") { return Ok(None); }
+        if !valid_job(db,account,job,&config)? {
+            update_job(db,account,string(job,"id"),&json!({"status":"skipped","error":"Permissions, model, account or source messages changed."}))?;
+            return Ok(None);
+        }
+        let policy = policy::resolve(&config["policy"]);
+        // Authorize all sources before constructing any model context.
+        let messages = job["messageIds"].as_array().unwrap().iter().map(|id|db.get(account,id.as_str().unwrap_or("")).map(|message|policy::redact(&message.unwrap_or(Value::Null),&policy))).collect::<Result<Vec<_>>>()?;
+        let brain = workspace(&config,account)["brain"].clone();
+        let mut use_brain = policy["behaviors"]["memory"]==true && ["contacts","sender","body","subject"].iter().all(|field|policy["content"][field]==true) && brain.is_object();
+        for id in brain["sourceMessageIds"].as_array().into_iter().flatten() {
+            if !db.get(account,id.as_str().unwrap_or(""))?.is_some_and(|message|policy["folders"][string(&message,"folder")]==true) { use_brain=false; }
+        }
+        let options = json!({"preferences":merge(catalog()["preferences"].clone(),&config["preferences"]),"brain":if use_brain {brain}else{Value::Null},"styleVoice":"","structuredSummary":true,"timeZone":policy["summarySchedule"]["timeZone"]});
+        update_job(db,account,string(job,"id"),&json!({"status":"running"}))?;
+        let brain_sources=if use_brain {brain_digest(db,account,&options["brain"],&policy)?}else{String::new()};
+        Ok(Some(json!({"ai":config["ai"],"messages":messages,"options":options,"generation":ai::generation(&config,account),"brain":options["brain"],"brainSources":brain_sources})))
+    })
+}
+async fn generate(app: &App, account: &str, job: &Value, context: &Value) -> Result<Value> {
+    let messages = context["messages"]
+        .as_array()
+        .ok_or_else(|| Error::invalid("Invalid summary context."))?;
+    let configured = !string(&context["ai"], "model").is_empty()
+        && !string(&context["ai"], "baseUrl").is_empty();
+    if !configured {
+        if account != "demo" {
+            return Err(Error::conflict(
+                "Choose an AI model in Settings to use assistance with your mailbox.",
+            ));
+        }
+        let text = ai::demo_assistance("summary", messages, "", &context["options"]);
+        return Ok(merge(
+            priority_summary(&text, messages)?,
+            &json!({"source":"demo"}),
+        ));
+    }
+    let action = if job["kind"] == "arrival" {
+        "summary"
+    } else {
+        "briefing"
+    };
+    let result = ai::run_model(
+        &app.0.client,
+        &context["ai"],
+        action,
+        messages,
+        "",
+        &context["options"],
+    )
+    .await?;
+    Ok(merge(
+        priority_summary(string(&result, "text"), messages)?,
+        &json!({"source":"model"}),
+    ))
+}
+fn finish(
+    db: &Store,
+    account: &str,
+    job: &Value,
+    context: &Value,
+    result: Result<Value>,
+) -> Result<()> {
+    db.transaction(|db| {
+        let config = db.settings()?;
+        let value = automation(&config,account);
+        if !value["jobs"].as_array().into_iter().flatten().any(|current|current["id"]==job["id"]&&current["status"]=="running") { return Ok(()); }
+        let brain_changed=if !context["brain"].is_null() {
+            let policy=policy::resolve(&config["policy"]);
+            let brain=workspace(&config,account)["brain"].clone();
+            brain!=context["brain"] || brain_digest(db,account,&brain,&policy)?!=context["brainSources"]
+        }else{false};
+        let patch = if !valid_job(db,account,job,&config)? || ai::generation(&config,account)!=context["generation"] || brain_changed {
+            json!({"status":"skipped","error":"Context changed; the result was discarded."})
+        } else {
+            match result {
+                Ok(value)=>merge(value,&json!({"status":"completed","completedAt":now()})),
+                Err(_)=>json!({"status":"failed","error":"Summary could not be generated. Check model settings and permissions; try a manual summary."}),
+            }
+        };
+        update_job(db,account,string(job,"id"),&patch)
+    })
+}
+async fn automation_tick(app: &App) -> Result<()> {
+    let queued = app
+        .db(|db| {
+            schedule(db, Utc::now().timestamp_millis())?;
+            let config = db.settings()?;
+            let mut queued = Vec::new();
+            for account in owners(&config) {
+                for job in automation(&config, &account)["jobs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|job| job["status"] == "queued")
+                {
+                    queued.push((account.clone(), job.clone()));
+                }
+            }
+            queued.sort_by(|a, b| string(&a.1, "createdAt").cmp(string(&b.1, "createdAt")));
+            Ok(queued)
+        })
+        .await?;
+    let mut count = 0;
+    for (account, job) in queued {
+        if app.0.background.stopped.load(Ordering::Acquire) || count >= 4 {
+            break;
+        }
+        let (owner, queued_job) = (account.clone(), job.clone());
+        let Some(context) = app.db(move |db| claim(db, &owner, &queued_job)).await? else {
+            continue;
+        };
+        count += 1;
+        let result = generate(app, &account, &job, &context).await;
+        app.db(move |db| finish(db, &account, &job, &context, result))
+            .await?;
+    }
+    Ok(())
+}
+/// Called by the sole service lifecycle owner, normally every thirty seconds.
+pub async fn tick(app: &App) -> Result<()> {
+    let runtime = &app.0.background;
+    let Ok(_guard) = runtime.gate.try_lock() else {
+        return Ok(());
+    };
+    if runtime.stopped.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let shutdown = runtime.shutdown.notified();
+    tokio::pin!(shutdown);
+    shutdown.as_mut().enable();
+    if runtime.stopped.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => Ok(()),
+        result = async {
+            let config = app.settings().await?;
+            let interval = config["preferences"]["syncInterval"].as_i64().unwrap_or(0);
+            let timestamp = Utc::now().timestamp_millis();
+            if interval>0 && timestamp>=runtime.last_sync.load(Ordering::Acquire).saturating_add(interval.saturating_mul(60000)) {
+                // Claim before provider calls, including failures: no hidden retry loop.
+                runtime.last_sync.store(timestamp,Ordering::Release);
+                if let Ok(_mailbox) = app.0.mailbox.try_lock() {
+                    let accounts: Vec<_> = connections(&config).as_object().unwrap().keys().cloned().collect();
+                    let _ = mail::sync_accounts(app,&accounts).await;
+                }
+            }
+            history_tick(app).await?;
+            crate::learning::scheduled_tick(app).await?;
+            automation_tick(app).await
+        } => result,
+    }
+}
+pub fn stop(app: &App) {
+    app.0.background.stopped.store(true, Ordering::Release);
+    app.0.background.shutdown.notify_waiters();
+}

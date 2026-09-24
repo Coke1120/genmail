@@ -19,7 +19,7 @@ struct StudioView: View {
     @State private var skillEditor: SkillEdit?
     var feature: JSON { model.features.first { $0.id == action } ?? .null }
     var workspace: JSON { model.state["workspace"] }
-    var permitted: [JSON] { model.messages.filter { model.policy["folders"][$0["folder"].string].bool } }
+    var permitted: [JSON] { (model.listedMessages + (model.current.map { current in model.listedMessages.contains { $0.viewID == current.viewID } ? [] : [current] } ?? [])).filter { model.policy["folders"][$0["folder"].string].bool } }
     var chosen: JSON { permitted.first { $0.id == messageID } ?? .null }
     var brainDirty: Bool { voice != savedVoice || notes != savedNotes }
     var blocked: Bool {
@@ -59,6 +59,7 @@ struct StudioView: View {
         }
         .onChange(of: action) { _ in clearResult() }
         .onChange(of: messageID) { _ in clearResult() }
+        .onChange(of: model.mailPage) { _ in if !permitted.contains(where: { $0.id == messageID }) { messageID = permitted.first?.id ?? "" } }
         .onChange(of: skillID) { _ in clearResult() }
         .onChange(of: prompt) { _ in clearResult() }
         .onChange(of: draftText) { _ in clearResult() }
@@ -111,6 +112,13 @@ struct StudioView: View {
                         Picker("Email context", selection: $messageID) {
                             if permitted.isEmpty { Text("No permitted messages").tag("") }
                             ForEach(permitted) { item in Text(model.policy["content"]["subject"].bool ? item["subject"].string : "Subject withheld · " + dateLabel(item["date"].string)).tag(item.id) }
+                        }
+                    }
+                    if feature["context"].string == "selected" {
+                        HStack {
+                            Button("Previous messages") { Task { await model.turnMailPage(next: false) } }.disabled(model.mailCursors.count < 2 || model.mailLoading)
+                            Text("Page \(model.mailCursors.count)").font(.caption)
+                            Button("Next messages") { Task { await model.turnMailPage(next: true) } }.disabled(!model.mailPage["nextCursor"].nonempty || model.mailLoading)
                         }
                     }
                     if feature["context"].string == "mailbox" {
