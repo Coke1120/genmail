@@ -1,6 +1,6 @@
 import StyleLearning from './StyleLearning';
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Check, CalendarDays, Info, LoaderCircle, Mail, Settings2, ShieldCheck, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, CalendarDays, ExternalLink, Info, LoaderCircle, Mail, Settings2, ShieldCheck, Sparkles } from 'lucide-react';
 import { AI_BEHAVIORS, DEFAULT_POLICY, DEFAULT_PREFERENCES } from '../shared/features';
 import Modal from './Modal';
 import FooterPreview from './FooterPreview';
@@ -43,6 +43,9 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   const [tab, setTab] = useState(TABS.some(([id]) => id === initialTab) ? initialTab : 'general');
   const [provider, setProvider] = useState(savedMail.configured ? savedMail.provider || 'imap' : 'google');
   const [oauth, setOauth] = useState({ google: { clientId: '', clientSecret: '' }, microsoft: { clientId: '' } });
+  const [customGoogleClient, setCustomGoogleClient] = useState(false);
+  const hasDefaultGoogleClient = !!state.settings.oauthClients?.google?.configured;
+  const useDefaultGoogleClient = provider === 'google' && hasDefaultGoogleClient && !customGoogleClient;
   const [busy, setBusy] = useState('');
   const [importOptions, setImportOptions] = useState({ months: 3, inbox: true, sent: true });
   const [learningDirty, setLearningDirty] = useState(false);
@@ -76,6 +79,24 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
     return () => window.removeEventListener('beforeunload', warn);
   }, [isDirty, operationBusy]);
   useEffect(() => { setTestResult(''); }, [ai]);
+  useEffect(() => {
+    if (!window.morrowDesktop || tab !== 'mail' || isDirty || operationBusy) return;
+    let controller;
+    const refresh = () => {
+      controller?.abort(); controller = new AbortController();
+      const signal = controller.signal;
+      refreshMailConnections(signal).catch(() => { if (!signal.aborted) setError('Could not refresh connections. Please try again.'); });
+    };
+    window.addEventListener('focus', refresh);
+    return () => { controller?.abort(); window.removeEventListener('focus', refresh); };
+  }, [tab, isDirty, operationBusy, onUpdate]);
+
+  async function refreshMailConnections(signal) {
+    const response = await fetch('/api/state', { signal });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error);
+    if (!signal?.aborted) onUpdate(result);
+  }
 
   function closeSettings() {
     if (operationBusy || (isDirty && !window.confirm('Discard your unsaved settings and return to your inbox?'))) return;
@@ -112,7 +133,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         if (window.morrowDesktop) {
           await window.morrowDesktop.openSignIn(result.url);
           setOauth({ google: { clientId: '', clientSecret: '' }, microsoft: { clientId: '' } });
-          notify('Complete sign-in in your browser, then click Refresh connections.');
+          notify('Browser opened. Complete sign-in, then return to Morrow to refresh your connections.');
           return;
         }
         allowUnload.current = true;
@@ -177,7 +198,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
       </div>
 
       {window.morrowDesktop && tab === 'mail' && <button className="button secondary" disabled={operationBusy} onClick={async () => {
-        try { const response = await fetch('/api/state'); const result = await response.json(); if (!response.ok) throw new Error(result.error); onUpdate(result); notify('Mailbox connections refreshed.'); }
+        try { await refreshMailConnections(); notify('Mailbox connections refreshed.'); }
         catch { setError('Could not refresh connections. Please try again.'); }
       }}>Refresh connections</button>}
 
@@ -279,25 +300,23 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         </div>
         {provider !== 'imap' ? <form onSubmit={(event) => {
           event.preventDefault();
-          save(`oauth/${provider}/start`, { ...oauth[provider], importOptions }, 'oauth');
+          save(`oauth/${provider}/start`, { ...(useDefaultGoogleClient ? { useDefaultClient: true, organize: !!oauth.google.organize } : oauth[provider]), importOptions }, 'oauth');
         }}>
           <fieldset className="settings-fields" disabled={operationBusy}>
             <legend className="settings-section-title">Connect {provider === 'google' ? 'your Gmail' : 'your Microsoft mailbox'}.</legend>
-            <p className="settings-intro">Sign in securely with {provider === 'google' ? 'Google' : 'Microsoft'}. Morrow imports your chosen history in the background.</p>
-            <div className="settings-oauth-setup">
+            <p className="settings-intro">Use the sign-in button below to open {provider === 'google' ? 'Google' : 'Microsoft'} in your browser. Keep Morrow open while you approve access, then return to the app. Morrow imports your chosen history in the background.</p>
+            {useDefaultGoogleClient ? <p className="settings-help">Google sign-in is ready. No client ID or secret is needed. If Google limits access to test users, the publisher must add your account or complete app verification.</p> : <div className="settings-oauth-setup">
               <strong>Register your own OAuth app first</strong>
               <p>{provider === 'google'
                 ? 'Create a Desktop app OAuth client in Google Cloud, then enter its client ID and client secret below.'
                 : 'Create a desktop app registration in Microsoft Entra, then enter its application (client) ID below. No client secret is needed.'} See README.md in the project folder for setup instructions.</p>
-              <span>Redirect URL</span>
-              <code>{window.morrowDesktop ? `http://localhost:${window.location.port}` : 'http://localhost:3001'}/api/oauth/{provider}/callback</code>
-            </div>
-            <label className="settings-field">Client ID
+            </div>}
+            {!useDefaultGoogleClient && <label className="settings-field">Client ID
               <input required value={oauth[provider].clientId} autoComplete="off" autoCapitalize="none" spellCheck={false}
                 placeholder={provider === 'google' ? 'Your Google OAuth client ID' : 'Your Microsoft application (client) ID'}
                 onChange={(event) => setOauth({ ...oauth, [provider]: { ...oauth[provider], clientId: event.target.value } })} />
-            </label>
-            {provider === 'google' && <label className="settings-field">Client secret
+            </label>}
+            {provider === 'google' && !useDefaultGoogleClient && <label className="settings-field">Client secret
               <input type="password" required autoComplete="new-password" value={oauth.google.clientSecret} placeholder="Your Google desktop app client secret"
                 onChange={(event) => setOauth({ ...oauth, google: { ...oauth.google, clientSecret: event.target.value } })} />
             </label>}
@@ -306,10 +325,15 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
             <div className="settings-actions">
               <span><ShieldCheck size={15} /> Credentials encrypted on disk</span>
               <button className="button primary" type="submit">
-                {busy === 'oauth' ? <LoaderCircle size={16} className="settings-spinner" /> : <ArrowRight size={16} />}
-                {busy === 'oauth' ? 'Opening sign-in…' : `Continue with ${provider === 'google' ? 'Google' : 'Microsoft'}`}
+                {busy === 'oauth' ? <LoaderCircle size={16} className="settings-spinner" /> : <ExternalLink size={16} />}
+                {busy === 'oauth' ? 'Opening sign-in…' : `Sign in with ${provider === 'google' ? 'Google' : 'Microsoft'} in browser`}
               </button>
             </div>
+            <details className="settings-oauth-setup"><summary>Advanced: callback URL for app registration</summary>
+              {provider === 'google' && hasDefaultGoogleClient && <label className="settings-permission"><input type="checkbox" checked={customGoogleClient} onChange={event => setCustomGoogleClient(event.target.checked)} /><span>Use my own Google OAuth client</span></label>}
+              <p>Do not open this URL to sign in. Your browser returns here automatically after authorization.</p>
+              <code>{window.morrowDesktop ? `http://localhost:${window.location.port}` : 'http://localhost:3001'}/api/oauth/{provider}/callback</code>
+            </details>
           </fieldset>
         </form> : <form onSubmit={(event) => {
           event.preventDefault();

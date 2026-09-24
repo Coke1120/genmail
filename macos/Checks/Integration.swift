@@ -1,5 +1,10 @@
 import Foundation
 
+// Observe redirects without ever contacting a real OAuth provider.
+final class StopOAuthRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
+
 // Runs the actual native API client against a private bundled-service fixture.
 // No UI automation and no real provider requests are used by these checks.
 @main
@@ -9,6 +14,9 @@ struct NativeClientChecks {
         await model.start()
         defer { model.stop() }
         guard !model.state.isNull else { throw APIError(model.error) }
+        assert(model.state["settings"]["oauthClients"]["google"]["configured"].bool)
+        let publicState = try JSONEncoder().encode(model.state)
+        assert(!String(decoding: publicState, as: UTF8.self).contains("fixture-bundled-secret"))
         assert(model.features.count == 19)
         let update = try await model.request("/updates?includePrereleases=true")
         assert(update["updateAvailable"].bool && update["latestVersion"].string == "0.5.0-alpha.2")
@@ -134,6 +142,42 @@ struct NativeClientChecks {
         model.state = try await model.request("/style/profile", method: "DELETE", body: .object([:]))
         assert(model.state["workspace"]["styleLearning"]["profile"].isNull)
         print("Native import controls and writing-style preview, review, save and delete checks passed.")
+        let browser = URLSession(configuration: .ephemeral, delegate: StopOAuthRedirects(), delegateQueue: nil)
+        defer { browser.invalidateAndCancel() }
+        for calendar in [false, true] {
+            for provider in ["google", "microsoft"] {
+                try await model.selectAccount("demo")
+                let route = calendar ? "/calendars/\(provider)/connect" : "/oauth/\(provider)/start"
+                let credentials: JSON = provider == "google" ? .object(["useDefaultClient": .bool(true)]) : .object(["clientId": .string("fixture-client")])
+                let started = try await model.request(route, method: "POST", body: credentials)
+                let handoff = URL(string: started["url"].string)!
+                assert(handoff.host == "localhost" && handoff.port == model.baseURL?.port && handoff.path.hasSuffix("/authorize"))
+                let (_, authorization) = try await browser.data(from: handoff)
+                let authResponse = authorization as! HTTPURLResponse
+                assert(authResponse.statusCode == 302)
+                let external = URLComponents(string: authResponse.value(forHTTPHeaderField: "Location")!)!
+                assert(external.queryItems?.first(where: { $0.name == "code_challenge_method" })?.value == "S256")
+                let callback = external.queryItems!.first(where: { $0.name == "redirect_uri" })!.value!
+                let state = external.queryItems!.first(where: { $0.name == "state" })!.value!
+                var callbackURL = URLComponents(string: callback)!
+                callbackURL.queryItems = [URLQueryItem(name: "state", value: state), URLQueryItem(name: "code", value: "fixture-code")]
+                let (_, completion) = try await browser.data(from: callbackURL.url!)
+                let completed = completion as! HTTPURLResponse
+                assert(completed.statusCode == 302)
+                let destination = URLComponents(string: completed.value(forHTTPHeaderField: "Location")!)!
+                assert(destination.queryItems?.first(where: { $0.name == (calendar ? "calendarConnected" : "connected") })?.value == provider)
+                let (page, _) = try await browser.data(from: destination.url!)
+                assert(String(decoding: page, as: UTF8.self).contains("Return to Morrow Mail"))
+                try await model.reload()
+                if calendar {
+                    assert(model.account == "demo") // Calendar sign-in does not switch the mailbox.
+                    assert(model.state["settings"]["calendars"].array.contains { $0["provider"].string == provider && $0["email"].string == "oauth-\(provider)@example.com" })
+                } else {
+                    assert(model.account == "oauth-\(provider)@example.com" && model.state["account"]["mode"].string == "live")
+                }
+            }
+        }
+        print("Native browser OAuth handoff and callback passed for both mail and calendar providers; mail returns to the connected inbox.")
         print("Native client integration passed: 19 behaviors, permissions, both calendars, send recovery, multi-account routing, combined IDs, and disconnect isolation.")
     }
 }

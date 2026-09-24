@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { createApp } from '../server/app.js';
 import { createStore } from '../server/store.js';
 
-async function workspace(t, services = {}) {
+async function workspace(t, services = {}, options = {}) {
   const directory = mkdtempSync(`${tmpdir()}/genmail-api-`);
   const store = createStore(directory);
   const server = createServer();
@@ -21,7 +21,7 @@ async function workspace(t, services = {}) {
   const port = server.address().port;
   const origin = `http://127.0.0.1:${port}`;
   const unexpected = () => { throw new Error('Unexpected external integration call'); };
-  const application = () => createApp({ store, port, appUrl: origin, services: {
+  const application = () => createApp({ store, port, appUrl: origin, googleOAuth: options.googleOAuth || null, services: {
     verifySmtp: unexpected, fetchImapMessages: unexpected, sendSmtpMessage: unexpected,
     oauthFinish: unexpected, refreshMail: unexpected, fetchProviderMessages: unexpected,
     sendProviderMessage: unexpected, runModel: unexpected, ...services,
@@ -296,6 +296,48 @@ test('explicit demo requests cannot send live mail and drafts cannot change duri
   assert.equal(delivered.body, content.body);
   assert.equal(calls, 1);
   assert.equal(store.getMessage('live@example.com', draft.id), null);
+});
+
+test('built-in Google OAuth works for mail and calendar without exposing credentials or replacing custom clients', async t => {
+  const googleOAuth = { clientId: 'bundled.apps.googleusercontent.com', clientSecret: 'fixture-bundled-private' };
+  const exchanges = [];
+  const { request, post, port } = await workspace(t, {
+    oauthFinish: (provider, input) => {
+      exchanges.push(input);
+      return { provider, ...input.config, email: 'bundled@example.com', accessToken: 'fixture-user-token' };
+    }, fetchProviderMessages: () => [], listCalendars: () => [],
+  }, { googleOAuth });
+  const state = await request('/api/state');
+  assert.equal(state.data.settings.oauthClients.google.configured, true);
+  assert.equal((await request('/api/calendars')).data.connections.find(item => item.provider === 'google').hasDefaultClient, true);
+  for (const [route, callbackKind, cookieName] of [['/api/oauth/google/start', 'oauth', 'genmail_oauth'], ['/api/calendars/google/connect', 'calendar-oauth', 'morrow_calendar_google']]) {
+    for (const body of [{ useDefaultClient: 'true' }, { useDefaultClient: true, clientId: 'custom' }, { useDefaultClient: true, clientSecret: 'custom' }]) assert.equal((await post(route, body)).status, 400);
+    const start = await post(route, { useDefaultClient: true, organize: true });
+    assert.equal(start.status, 200);
+    const handoff = new URL(start.data.url);
+    const authorize = await request(handoff.pathname + handoff.search, { headers: { Host: `localhost:${port}` } });
+    assert.equal(authorize.status, 302);
+    const googleURL = new URL(authorize.headers.get('location'));
+    assert.equal(googleURL.searchParams.get('client_id'), googleOAuth.clientId);
+    assert.equal(googleURL.searchParams.get('code_challenge_method'), 'S256');
+    assert.equal(googleURL.searchParams.get('client_secret'), null);
+    const cookie = authorize.headers.get('set-cookie').split(';')[0];
+    assert.ok(cookie.startsWith(cookieName + '='));
+    const callback = await request(`/api/${callbackKind}/google/callback?state=${encodeURIComponent(handoff.searchParams.get('state'))}&code=fixture-code`, { headers: { Host: `localhost:${port}`, Cookie: cookie } });
+    assert.equal(callback.status, 302);
+    assert.equal(new URL(callback.headers.get('location')).searchParams.get(callbackKind === 'oauth' ? 'connected' : 'calendarConnected'), 'google');
+    assert.equal(exchanges.at(-1).config.clientSecret, googleOAuth.clientSecret);
+    const customStart = await post(route, { clientId: 'custom-client', clientSecret: 'custom-secret' });
+    const customURL = new URL(customStart.data.url);
+    const customRedirect = await request(customURL.pathname + customURL.search);
+    assert.equal(new URL(customRedirect.headers.get('location')).searchParams.get('client_id'), 'custom-client');
+    for (const response of [state, start, callback, await request('/api/state'), await request('/api/calendars')]) assert.doesNotMatch(response.raw, /fixture-bundled-private|fixture-user-token|custom-secret/);
+  }
+  assert.equal((await post('/api/oauth/microsoft/start', { useDefaultClient: true })).status, 400);
+  assert.equal((await post('/api/calendars/microsoft/connect', { useDefaultClient: true })).status, 400);
+  const unconfigured = await workspace(t);
+  assert.equal((await unconfigured.request('/api/state')).data.settings.oauthClients.google.configured, false);
+  for (const route of ['/api/oauth/google/start', '/api/calendars/google/connect']) assert.equal((await unconfigured.post(route, { useDefaultClient: true })).status, 400);
 });
 
 test('OAuth binds the callback browser, rejects replay, and hands 127.0.0.1 clients to localhost', async t => {

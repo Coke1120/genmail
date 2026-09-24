@@ -296,30 +296,48 @@ struct NativeSettingsView: View {
         let credentials = Binding<JSON>(get: { calendar ? calendarOAuth[id] : mailOAuth[id] }, set: { if calendar { calendarOAuth[id] = $0 } else { mailOAuth[id] = $0 } })
         let clientID = Binding<String>(get: { credentials.wrappedValue["clientId"].string }, set: { credentials.wrappedValue["clientId"] = .string($0) })
         let secret = Binding<String>(get: { credentials.wrappedValue["clientSecret"].string }, set: { credentials.wrappedValue["clientSecret"] = .string($0) })
+        let hasDefault = id == "google" && model.state["settings"]["oauthClients"]["google"]["configured"].bool
+        let useDefault = hasDefault && !credentials.wrappedValue["useCustomClient"].bool
         let port = model.baseURL?.port ?? 3001
+        let callback = "http://localhost:\(port)/api/\(calendar ? "calendar-oauth" : "oauth")/\(id)/callback"
         return VStack(alignment: .leading, spacing: 12) {
-            Text(id == "google" ? "Register a Desktop app OAuth client in Google Cloud. Enable the \(calendar ? "Calendar" : "Gmail") API and add yourself as a test user." : "Register a Mobile and desktop application in Microsoft Entra. Enable public client flows; no client secret is needed.").font(.callout).foregroundStyle(.secondary)
-            Text("Callback URL").font(.caption.bold())
-            Text("http://localhost:\(port)/api/\(calendar ? "calendar-oauth" : "oauth")/\(id)/callback").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-            Text("Desktop loopback ports change each launch. Microsoft matches this localhost path independently of the port.").font(.caption).foregroundStyle(.secondary)
-            TextField("Application / client ID", text: clientID)
-            if id == "google" { SecureField("Desktop client secret", text: secret) }
+            Text("Sign in through your browser").font(.headline)
+            Text(useDefault ? "Google sign-in is ready. No client ID or secret is needed. Keep Morrow open while you approve access in your browser, then return here." : "Enter your OAuth app credentials below, then use the sign-in button. Keep Morrow open while you approve access in your browser, then return here.").font(.callout).foregroundStyle(.secondary)
+            if !useDefault {
+                Text(id == "google" ? "Register a Desktop app OAuth client in Google Cloud. Enable the \(calendar ? "Calendar" : "Gmail") API and add yourself as a test user." : "Register a Mobile and desktop application in Microsoft Entra. Enable public client flows; no client secret is needed.").font(.callout).foregroundStyle(.secondary)
+                TextField("Application / client ID", text: clientID)
+                if id == "google" { SecureField("Desktop client secret", text: secret) }
+            }
             if !calendar {
                 Toggle("Allow moving mail and managing labels", isOn: Binding(get: { credentials.wrappedValue["organize"].bool }, set: { credentials.wrappedValue["organize"] = .bool($0) })).toggleStyle(.checkbox)
                 Text("Adds Gmail modify or Outlook Mail.ReadWrite permission. Reconnect an existing account to enable provider moves.").font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                Button("Connect \(providerLabel(id))\(calendar ? " Calendar" : " Mail")") {
+                Button {
                     run {
                         let path = calendar ? "/calendars/\(id)/connect" : "/oauth/\(id)/start"
-                        var body = credentials.wrappedValue
+                        var body = credentials.wrappedValue.picking(useDefault ? ["organize"] : ["clientId", "clientSecret", "organize"])
+                        if useDefault { body["useDefaultClient"] = .bool(true) }
                         if !calendar { body["importOptions"] = importSettings }
                         let result = try await model.request(path, method: "POST", body: body)
                         try model.openOAuth(result, provider: id, calendar: calendar)
-                        credentials.wrappedValue = .object([:]); status = "Complete sign-in in your browser, then return here."
+                        credentials.wrappedValue = .object([:]); status = "Browser opened. Complete sign-in, then return to Morrow to refresh your connections."
                     }
-                }.buttonStyle(.borderedProminent).disabled(clientID.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty || (id == "google" && secret.wrappedValue.isEmpty))
+                } label: {
+                    Label("Sign in with \(id == "google" ? "Google" : "Microsoft") in browser", systemImage: "arrow.up.right.square")
+                }.buttonStyle(.borderedProminent).disabled(!useDefault && (clientID.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty || (id == "google" && secret.wrappedValue.isEmpty)))
                 Button("Refresh Status") { run { try await model.reload(); status = "Connection status refreshed." } }
+            }
+            Text(useDefault ? "If Google says access is restricted to test users, the publisher must add your account or complete app verification." : "The sign-in button becomes available after the required credentials are entered.").font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup("Advanced: callback URL for app registration") {
+                VStack(alignment: .leading, spacing: 8) {
+                    if hasDefault {
+                        Toggle("Use my own Google OAuth client", isOn: Binding(get: { credentials.wrappedValue["useCustomClient"].bool }, set: { credentials.wrappedValue["useCustomClient"] = .bool($0) })).toggleStyle(.checkbox)
+                    }
+                    Text(callback).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    Button("Copy Callback URL") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(callback, forType: .string); status = "Callback URL copied for app registration." }
+                    Text("Do not open this URL to sign in. Your browser returns here automatically after authorization. Desktop loopback ports change each launch; Microsoft matches this localhost path independently of the port.").font(.caption).foregroundStyle(.secondary)
+                }.padding(.top, 6)
             }
         }
     }

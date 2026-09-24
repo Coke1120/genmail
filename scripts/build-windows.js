@@ -3,6 +3,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { packager } from '@electron/packager';
+import { bundleOAuth } from './bundle-oauth.js';
 
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Build the Windows x64 app on Windows x64 using the official Node distribution.');
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -20,6 +21,7 @@ for (const name of ['main.cjs', 'preload.cjs', 'security.cjs', 'client-state.cjs
 cpSync(node, resolve(stage, 'runtime/node.exe'));
 cpSync(license, resolve(stage, 'NODE-LICENSE.txt'));
 for (const name of ['server', 'shared', 'dist', 'package.json', 'package-lock.json', 'LICENSE', 'README.md', 'FEATURE_COVERAGE.md', 'VERIFICATION.md']) cpSync(resolve(root, name), resolve(stage, 'backend', name), { recursive: true });
+bundleOAuth(resolve(stage, 'backend'));
 cpSync(resolve(root, 'scripts/backup.js'), resolve(stage, 'backend/scripts/backup.js'));
 if (!process.env.npm_execpath) throw new Error('Run this builder through npm run windows:build.');
 execFileSync(process.execPath, [process.env.npm_execpath, 'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: resolve(stage, 'backend'), stdio: 'inherit' });

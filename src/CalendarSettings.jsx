@@ -8,6 +8,7 @@ const emptyForms = () => ({ google: { clientId: '', clientSecret: '' }, microsof
 export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange, onBeforeConnect }) {
   const [connections, setConnections] = useState([]);
   const [forms, setForms] = useState(emptyForms);
+  const [customGoogleClient, setCustomGoogleClient] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -25,6 +26,12 @@ export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty, busy]);
   useEffect(() => () => { pending.current?.abort(); }, []);
+  useEffect(() => {
+    if (!window.morrowDesktop || dirty || busy || loading) return;
+    const refresh = () => setRevision(value => value + 1);
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, [dirty, busy, loading]);
   useEffect(() => {
     const controller = new AbortController(); setLoading(true); setError('');
     fetch('/api/calendars', { signal: controller.signal }).then(async response => {
@@ -49,7 +56,8 @@ export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange
     const controller = new AbortController(); pending.current = controller;
     setBusy(`connect-${provider}`); setError('');
     try {
-      const response = await fetch(`/api/calendars/${provider}/connect`, { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: forms[provider].clientId.trim(), clientSecret: forms[provider].clientSecret.trim() }) });
+      const useDefault = provider === 'google' && !customGoogleClient && connections.some(item => item.provider === provider && item.hasDefaultClient);
+      const response = await fetch(`/api/calendars/${provider}/connect`, { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(useDefault ? { useDefaultClient: true } : { clientId: forms[provider].clientId.trim(), clientSecret: forms[provider].clientSecret.trim() }) });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || 'Unable to start calendar sign-in.');
       if (controller.signal.aborted) return;
@@ -60,7 +68,10 @@ export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange
       setForms(value => ({ ...value, [provider]: { ...value[provider], clientSecret: '' } }));
       if (window.morrowDesktop) {
         await window.morrowDesktop.openSignIn(url.href);
-        onNotify?.('Complete sign-in in your browser, then click Refresh connections.');
+        const used = { clientId: forms[provider].clientId.trim(), clientSecret: '' };
+        saved.current = { ...saved.current, [provider]: used };
+        setForms(value => ({ ...value, [provider]: used }));
+        onNotify?.('Browser opened. Complete sign-in, then return to Morrow to refresh your connections.');
         return;
       }
       allowUnload.current = true;
@@ -88,27 +99,33 @@ export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange
 
   return <div className="calendar-settings">
     <h2 className="settings-section-title">A calendar for every part of your day.</h2>
-    <p className="settings-intro">Connect Google and Outlook at the same time. These connections are separate from your email account, including while you explore the demo inbox.</p>
+    <p className="settings-intro">Connect Google and Outlook at the same time. Use the sign-in button to open your browser and keep Morrow open until you finish. Calendar connections are separate from email.</p>
     {window.morrowDesktop && <button className="button secondary" disabled={loading || !!busy} onClick={() => { if (!dirty || window.confirm('Refresh connections and discard unsaved calendar credentials?')) setRevision(value => value + 1); }}>Refresh connections</button>}
     <div className="settings-privacy"><CalendarDays size={19} /><div><strong>Your calendar is live.</strong><p>View calendar events and explicitly create events after reviewing them. Calendar data is not sent to your AI model. AI Studio’s calendar exercises remain local simulations.</p></div></div>
     {error && <div className="settings-error" role="alert"><p>{error}</p>{!connections.length && <button type="button" className="button secondary" disabled={loading || !!busy} onClick={() => setRevision(value => value + 1)}>Retry connections</button>}</div>}
     {loading ? <p className="calendar-status" role="status"><LoaderCircle className="calendar-spinner" size={16} />Loading connections…</p> : Object.entries(PROVIDERS).map(([provider, name]) => {
       const connection = connections.find(item => item.provider === provider);
       const form = forms[provider];
+      const useDefault = provider === 'google' && connection?.hasDefaultClient && !customGoogleClient;
       const preservedSecret = !!connection?.hasClientSecret && connection.clientId === form.clientId.trim();
       const redirect = connection?.redirectUri || `http://localhost:3001/api/calendar-oauth/${provider}/callback`;
       return <section className="calendar-connection" key={provider} aria-labelledby={`calendar-connection-${provider}`}>
         <div className="calendar-connection-heading"><h3 id={`calendar-connection-${provider}`}>{name}</h3><span className={`calendar-connection-status ${connection?.connected ? 'connected' : ''}`}>{connection?.connected ? <><Check size={13} />Connected</> : 'Not connected'}</span></div>
         {connection?.connected && <div className="calendar-connection-account"><p>{connection.email}</p><button type="button" className="button secondary" disabled={!!busy} onClick={() => disconnect(connection)}>{busy === `disconnect-${provider}` ? <LoaderCircle size={14} className="calendar-spinner" /> : <Unplug size={14} />}Disconnect</button></div>}
-        <details className="calendar-setup" open={!connection?.connected}><summary>{connection?.connected ? 'Reconnect or change account' : 'Set up your OAuth application'}</summary>
-          <div className="settings-oauth-setup">
+        <details className="calendar-setup" open={!connection?.connected}><summary>{connection?.connected ? 'Reconnect or change account' : 'Sign in through your browser'}</summary>
+          {useDefault ? <p className="settings-help">Google sign-in is ready. No client ID or secret is needed. If Google limits access to test users, the publisher must add your account or complete app verification.</p> : <div className="settings-oauth-setup">
             {provider === 'google' ? <><strong>Google Cloud setup</strong><p>Enable the Google Calendar API, configure your OAuth consent screen, and create a Desktop app OAuth client. Copy its client ID and client secret. Add your Google account as a test user if the app is in Testing.</p><p>Requested access: your account identity, calendar list, and calendar events.</p><a href="https://developers.google.com/workspace/calendar/api/quickstart/nodejs" target="_blank" rel="noopener noreferrer">Google Calendar setup guide <ExternalLink size={12} /></a></> : <><strong>Microsoft Entra setup</strong><p>Register an app supporting the accounts you want to connect (personal and organizational accounts are supported). Add a Mobile and desktop applications platform with the redirect below. Enable public client flows; a client secret is not required.</p><p>Delegated permissions: User.Read, Calendars.ReadWrite, and offline_access. Your organization may require administrator approval.</p><a href="https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-registration" target="_blank" rel="noopener noreferrer">Microsoft desktop app registration guide <ExternalLink size={12} /></a></>}
-            <span>{provider === 'google' ? 'Loopback redirect used by Morrow' : 'Register this exact redirect URI'}</span><code>{redirect}</code>
-          </div>
+          </div>}
           <form onSubmit={event => connect(event, provider)}><fieldset className="settings-fields" disabled={!!busy}>
-            <label className="settings-field">{name} client ID<input autoComplete="off" required maxLength={500} spellCheck="false" value={form.clientId} onChange={event => setForms(value => ({ ...value, [provider]: { ...value[provider], clientId: event.target.value } }))} /></label>
-            <label className="settings-field">{name} client secret{provider === 'microsoft' ? ' (optional)' : ''}<input type="password" autoComplete="new-password" required={provider === 'google' && !preservedSecret} maxLength={2000} value={form.clientSecret} placeholder={preservedSecret ? 'Leave blank to keep the saved secret' : provider === 'microsoft' ? 'Not needed for a public desktop client' : 'Client secret value'} onChange={event => setForms(value => ({ ...value, [provider]: { ...value[provider], clientSecret: event.target.value } }))} /><span className="settings-help">Stored encrypted on this device. {preservedSecret ? 'A blank value keeps the saved secret for this client ID.' : provider === 'microsoft' ? 'Leave blank for the recommended public desktop client.' : 'Use the secret from your Google Desktop app client.'}</span></label>
-            <button className="button primary" type="submit">{busy === `connect-${provider}` ? <LoaderCircle size={15} className="calendar-spinner" /> : <ExternalLink size={15} />}{busy === `connect-${provider}` ? 'Opening sign-in…' : `Connect ${name}`}</button>
+            {!useDefault && <>
+              <label className="settings-field">{name} client ID<input autoComplete="off" required maxLength={500} spellCheck="false" value={form.clientId} onChange={event => setForms(value => ({ ...value, [provider]: { ...value[provider], clientId: event.target.value } }))} /></label>
+              <label className="settings-field">{name} client secret{provider === 'microsoft' ? ' (optional)' : ''}<input type="password" autoComplete="new-password" required={provider === 'google' && !preservedSecret} maxLength={2000} value={form.clientSecret} placeholder={preservedSecret ? 'Leave blank to keep the saved secret' : provider === 'microsoft' ? 'Not needed for a public desktop client' : 'Client secret value'} onChange={event => setForms(value => ({ ...value, [provider]: { ...value[provider], clientSecret: event.target.value } }))} /><span className="settings-help">Stored encrypted on this device. {preservedSecret ? 'A blank value keeps the saved secret for this client ID.' : provider === 'microsoft' ? 'Leave blank for the recommended public desktop client.' : 'Use the secret from your Google Desktop app client.'}</span></label>
+            </>}
+            <button className="button primary" type="submit">{busy === `connect-${provider}` ? <LoaderCircle size={15} className="calendar-spinner" /> : <ExternalLink size={15} />}{busy === `connect-${provider}` ? 'Opening sign-in…' : `Sign in to ${name} in browser`}</button>
+            <details><summary>Advanced: callback URL for app registration</summary>
+              {provider === 'google' && connection?.hasDefaultClient && <label className="settings-permission"><input type="checkbox" checked={customGoogleClient} onChange={event => setCustomGoogleClient(event.target.checked)} /><span>Use my own Google OAuth client</span></label>}
+              <code>{redirect}</code><p>Do not open this URL to sign in. Your browser returns here automatically after authorization.</p>
+            </details>
           </fieldset></form>
         </details>
       </section>;

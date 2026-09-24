@@ -143,7 +143,9 @@ final class AppModel: ObservableObject {
     func reload() async throws {
         guard !refreshing else { return }
         refreshing = true; defer { refreshing = false }
-        let next = try await request("/state")
+        // OAuth selects its newly connected mailbox on the service. Read that view;
+        // message mutations still carry their explicitly captured owner.
+        let next = try await request("/state", mailbox: "")
         guard !next["account"].isNull, !next["messages"].isNull else { throw APIError("Morrow received an incomplete workspace.") }
         state = next
         if let selectedMessage, !messages.contains(where: { $0.viewID == selectedMessage }) { self.selectedMessage = nil }

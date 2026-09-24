@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, cpSync, symlinkSync, readFileSync, writ
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createStore } from '../server/store.js';
+import { bundleOAuth } from './bundle-oauth.js';
 const directory = mkdtempSync(join(tmpdir(), 'morrow-swift-check-'));
 try {
   const executable = join(directory, 'checks');
@@ -13,6 +14,7 @@ try {
   mkdirSync(join(bundle, 'MacOS'), { recursive: true });
   mkdirSync(backend, { recursive: true });
   for (const path of ['server', 'shared', 'package.json']) cpSync(resolve(path), join(backend, path), { recursive: true });
+  bundleOAuth(backend, { MORROW_GOOGLE_OAUTH_JSON: JSON.stringify({ installed: { client_id: 'fixture.apps.googleusercontent.com', client_secret: 'fixture-bundled-secret' } }) });
   symlinkSync(resolve('node_modules'), join(backend, 'node_modules'), 'dir');
   symlinkSync(process.execPath, join(resources, 'node'));
   cpSync('macos/Checks/providers.js', join(backend, 'server/fixtures.js'));

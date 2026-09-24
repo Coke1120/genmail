@@ -2,6 +2,7 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, e
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { bundleOAuth } from './bundle-oauth.js';
 
 if (process.platform !== 'darwin') throw new Error('Build the native application on macOS with the Swift command-line tools installed.');
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -29,6 +30,7 @@ mkdirSync(backend, { recursive: true });
 cpSync(resolve(bin, 'MorrowMail'), resolve(contents, 'MacOS/MorrowMail'));
 cpSync(node, resolve(resources, 'node'));
 for (const path of ['server', 'shared', 'package.json', 'package-lock.json', 'LICENSE', 'README.md', 'FEATURE_COVERAGE.md', 'VERIFICATION.md']) cpSync(resolve(root, path), resolve(backend, path), { recursive: true });
+bundleOAuth(backend);
 cpSync(nodeLicense, resolve(resources, 'NODE-LICENSE.txt'));
 mkdirSync(resolve(backend, 'scripts'));
 cpSync(resolve(root, 'scripts/backup.js'), resolve(backend, 'scripts/backup.js'));

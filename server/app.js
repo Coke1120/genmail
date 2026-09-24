@@ -1,5 +1,6 @@
 import { createHistory, importOptions } from './history.js';
 import { createLearning } from './learning.js';
+import { bundledGoogleOAuth, oauthCredentials } from './oauth-client.js';
 import express from 'express';
 import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -53,7 +54,7 @@ function safeEqual(a, b) {
   return first.length === second.length && timingSafeEqual(first, second);
 }
 
-export function createApp({ store, port = 3001, appUrl = `http://localhost:${port}`, services = {}, nativeToken = '' }) {
+export function createApp({ store, port = 3001, appUrl = `http://localhost:${port}`, services = {}, nativeToken = '', googleOAuth = bundledGoogleOAuth() }) {
   let uiUrl;
   try { uiUrl = new URL(appUrl); } catch { throw new Error('APP_URL must be a localhost HTTP origin.'); }
   if (uiUrl.protocol !== 'http:' || !isLoopbackHost(uiUrl.host) || uiUrl.origin !== appUrl || uiUrl.username || uiUrl.password) throw new Error('APP_URL must be a localhost HTTP origin without a path.');
@@ -144,6 +145,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
       syncErrors: config.backgroundSyncErrors || [],
       messages: view === 'all' ? Object.keys(accounts).flatMap(rows).sort((a, b) => b.date.localeCompare(a.date) || a.viewId.localeCompare(b.viewId)) : rows(view),
       settings: {
+        oauthClients: { google: { configured: !!googleOAuth } },
         mail: safeMail(mail),
         ai: { configured: !!(ai.baseUrl && ai.model), baseUrl: ai.baseUrl || 'http://127.0.0.1:11434/v1', model: ai.model || '', hasApiKey: !!ai.apiKey, temperature: ai.temperature ?? 0.3, maxTokens: ai.maxTokens ?? 1200 },
         policy: resolvePolicy(config.policy), preferences, footer: preferencesFooter(preferences), calendars: calendarState(config),
@@ -317,8 +319,9 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.post('/api/oauth/:provider/start', (req, res) => {
     const provider = req.params.provider;
     if (!['google', 'microsoft'].includes(provider)) fail('Unknown mail provider.');
-    const config = { clientId: text(req.body?.clientId, 'OAuth client ID', 1024).trim(), organize: req.body?.organize === true };
-    if (provider === 'google') config.clientSecret = text(req.body?.clientSecret, 'Google client secret', 4096).trim();
+    const credentials = oauthCredentials(provider, req.body, googleOAuth);
+    const config = { clientId: text(credentials.clientId, 'OAuth client ID', 1024).trim(), organize: req.body?.organize === true };
+    if (provider === 'google') config.clientSecret = text(credentials.clientSecret, 'Google client secret', 4096).trim();
     const redirectUri = `http://localhost:${port}/api/oauth/${provider}/callback`;
     const pending = api.oauthStart(provider, config, redirectUri);
     const browserToken = randomBytes(32).toString('hex');
@@ -665,7 +668,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.locals.automation = automation;
   app.locals.history = history;
   app.locals.learning = learning;
-  registerCalendarRoutes(app, { store, port, appUrl, services });
+  registerCalendarRoutes(app, { store, port, appUrl, services, googleOAuth });
   app.get('/api/health', (req, res) => {
     store.getSettings();
     res.json({ status: 'ok', service: 'morrow-mail' });

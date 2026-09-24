@@ -3,6 +3,8 @@ export function fixtures(store) {
   return {
     checkUpdates: async () => ({ currentVersion: '0.5.0-alpha.1', latestVersion: '0.5.0-alpha.2', updateAvailable: true, prerelease: true, url: 'https://github.com/Coke1120/genmail/releases/tag/v0.5.0-alpha.2', checkedAt: new Date().toISOString() }),
     verifySmtp: async () => {},
+    oauthFinish: async (provider, { config }) => ({ provider, ...config, email: `oauth-${provider}@example.com`, accessToken: 'fixture' }),
+    fetchProviderMessages: async () => [],
     fetchImapPage: async (mail, { folder }) => ({ messages: [{ id: `history-${folder}`, fromEmail: mail.email, to: 'friend@example.com', body: 'Please share your thoughts on the timetable when you have a moment. Thank you for reviewing this.', date: new Date(Date.now() - 3600000).toISOString(), folder, subject: 'History fixture', labels: [], read: true }], nextCursor: null }),
     runModel: async (ai, action) => action === 'style' ? { text: 'Friendly, direct, and concise.', usage: { total_tokens: 150 } } : 'Fixture response',
     listImapFolders: async () => [{ id: 'INBOX', name: 'Inbox', kind: 'inbox' }, { id: 'Projects', name: 'Projects', kind: 'folder' }],

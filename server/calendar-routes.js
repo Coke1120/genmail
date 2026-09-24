@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { oauthStart, oauthFinish, refreshMail } from './providers.js';
 import { listCalendars, listCalendarEvents, createCalendarEvent } from './calendar-providers.js';
+import { oauthCredentials } from './oauth-client.js';
 
 const PROVIDERS = ['google', 'microsoft'];
 function fail(message, status = 400) { throw Object.assign(new Error(message), { status }); }
@@ -42,7 +43,7 @@ export function calendarState(settings) {
   });
 }
 
-export function registerCalendarRoutes(app, { store, port, appUrl, services = {} }) {
+export function registerCalendarRoutes(app, { store, port, appUrl, services = {}, googleOAuth = null }) {
   const api = { oauthStart, oauthFinish, refreshMail, listCalendars, listCalendarEvents, createCalendarEvent, ...services };
   const pending = new Map(), refreshing = new Map(), generations = new Map(), busy = new Set();
   const getConnection = provider => store.getSettings().calendars?.[provider];
@@ -101,16 +102,17 @@ export function registerCalendarRoutes(app, { store, port, appUrl, services = {}
         calendars.push(...result.map(calendar => ({ ...calendar, provider })));
       } catch (error) { errors.push({ provider, message: error.status ? error.message : 'Could not load calendars.' }); }
     }));
-    res.json({ connections: calendarState(store.getSettings()).map(connection => ({ ...connection, redirectUri: `http://localhost:${port}/api/calendar-oauth/${connection.provider}/callback` })), calendars, errors });
+    res.json({ connections: calendarState(store.getSettings()).map(connection => ({ ...connection, hasDefaultClient: connection.provider === 'google' && !!googleOAuth, redirectUri: `http://localhost:${port}/api/calendar-oauth/${connection.provider}/callback` })), calendars, errors });
   });
 
   app.post('/api/calendars/:provider/connect', (req, res) => {
     const provider = providerName(req.params.provider);
     requireIdle(provider);
-    const config = { clientId: text(req.body?.clientId, 'OAuth client ID', 1024).trim() };
+    const credentials = oauthCredentials(provider, req.body, googleOAuth);
+    const config = { clientId: text(credentials.clientId, 'OAuth client ID', 1024).trim() };
     if (/[\r\n]/.test(config.clientId)) fail('OAuth client ID must be a single line.');
     const existing = getConnection(provider);
-    const secret = req.body?.clientSecret || (existing?.clientId === config.clientId ? existing.clientSecret : '');
+    const secret = credentials.clientSecret || (existing?.clientId === config.clientId ? existing.clientSecret : '');
     if (secret) {
       config.clientSecret = text(secret, 'Client secret', 4096).trim();
       if (/[\r\n]/.test(config.clientSecret)) fail('Client secret must be a single line.');

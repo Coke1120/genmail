@@ -72,7 +72,7 @@ The result is `build/macos/Morrow Mail.app`. You can move it to Applications. Th
 
 Native data lives in `~/Library/Application Support/Morrow Mail`, separate from the web app's `./data`. Existing web data is not automatically moved. To reuse it, stop both apps, make a verified backup, and restore that backup's database and encryption key into the native data directory before opening the native app. `MORROW_DATA_DIR` can select a separate absolute data directory for development or acceptance testing. Do not run two apps against the same data directory.
 
-The app starts its own loopback service on a random free port and authenticates native API requests with a per-launch secret sent over a private pipe. OAuth browser handoffs use the same PKCE/state/cookie checks as the web app. **Use the callback displayed in native Settings** when registering your desktop OAuth apps; the fixed `:3001` examples below describe the web app. Google desktop clients accept loopback ports. Microsoft [ignores the port when matching localhost redirect URIs](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url#localhost-exceptions); register each mail/calendar callback path separately.
+The app starts its own loopback service on a random free port and authenticates native API requests with a per-launch secret sent over a private pipe. OAuth browser handoffs use the same PKCE/state/cookie checks as the web app. When the build includes Morrow’s Google registration, click **Sign in with Google in browser** without entering a client ID or secret. **Use my own Google OAuth client** is available under advanced settings. Outlook still requires your own Microsoft client ID. Keep Morrow open until sign-in finishes; returning to the app refreshes connections and selects the newly connected mailbox. **Do not open the callback URL manually**: it is only the return address after provider authorization. It is available under **Advanced: callback URL for app registration** in native Settings, with a copy button. The fixed `:3001` examples below describe the web app. Google desktop clients accept loopback ports. Microsoft [ignores the port when matching localhost redirect URIs](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url#localhost-exceptions); register each mail/calendar callback path separately.
 
 Keyboard shortcuts: **⌘N** compose, **⌘,** Settings, **⌘F** search, **⌘R** sync, **⌘⇧R** reply, **⌘⇧M** provider Move / Labels, **⌘⇧A** local archive, **⌘⇧U** local read/unread, and **⌘1/2/3** Inbox / AI Studio / Calendar. In the composer, **⌘S** saves a draft and **⌘⇧D** opens send review. **Esc** cancels. Standard macOS **⌘M**, **⌘W**, **⌃⌘F**, and the red/yellow/green title-bar controls minimize, close, resize, and enter full screen. **Window → Window Size** offers compact, standard, and wide sizes; the window also resizes by dragging its edges and restores its saved size.
 
@@ -88,7 +88,7 @@ The Windows package reuses the React interface and the same provider, account-ro
 
 Data lives in `%APPDATA%\Morrow Mail`. Sidebar disclosure and pending calendar requests persist across app restarts. Windows uses the current user's profile permissions; Unix file-mode checks do not represent Windows ACLs. Account data is local to each installation; paired releases do **not** synchronize mail caches, credentials or preferences between computers.
 
-OAuth opens the system browser. Use the callback displayed in Settings, then return and click **Refresh connections** in Mail or Calendar. Keyboard shortcuts include **Ctrl+N** compose, **Ctrl+F** search, **Ctrl+,** settings, **Ctrl+R** sync, **Ctrl+Shift+R** reply, **Ctrl+1/2/3** Inbox / AI Studio / Calendar, **Ctrl+S** save draft, and **Ctrl+Shift+D** send review.
+The **Sign in … in browser** button opens the system browser. Keep Morrow open, finish authorization, then return to Mail or Calendar Settings. Connections refresh on return when there are no unsaved edits or in-flight operations; **Refresh connections** remains available. The callback in Advanced settings is for provider registration, not a link to start login. Keyboard shortcuts include **Ctrl+N** compose, **Ctrl+F** search, **Ctrl+,** settings, **Ctrl+R** sync, **Ctrl+Shift+R** reply, **Ctrl+1/2/3** Inbox / AI Studio / Calendar, **Ctrl+S** save draft, and **Ctrl+Shift+D** send review.
 
 Build on Windows x64 with official Node.js 22.13+ and npm:
 
@@ -143,7 +143,7 @@ This deployment is a local, single-user process. Public hosting and shared acces
 
 ## Connect a mailbox
 
-Open **Settings → Mail** and select a provider. Connect as many mailboxes as you need, including multiple accounts from the same provider. Use **Add Another Account** for the next connection. Gmail and Outlook use your own OAuth app registration; there is no shared hosted OAuth service.
+Open **Settings → Mail** and select a provider. Connect as many mailboxes as you need, including multiple accounts from the same provider. Use **Add Another Account** for the next connection. Builds can include Morrow’s Google Desktop OAuth registration for Gmail and Google Calendar. Those builds show a Google sign-in button without credential fields; custom Google registrations remain an advanced option. Source builds without this configuration and Outlook require your own app registration. Authorization and token exchange run locally; there is no hosted OAuth service.
 
 The native sidebar includes **All accounts** with combined folders, then separate folders under each connected email address. Both clients group folders under each account. All accounts, individual accounts and Demo can be collapsed independently; each client remembers its disclosure state. Combined mail defaults to newest first and supports the selected sort order and shows each message’s mailbox. The sample **Demo workspace** stays separate and is never mixed into real mail.
 
@@ -155,6 +155,8 @@ Existing single-mailbox installations are supported automatically, preserving th
 
 ### Gmail
 
+If Settings says **Google sign-in is ready**, click the browser sign-in button. The publisher manages the Cloud setup below; ordinary users do not need to register an app. The existing public `v0.5.0-alpha.1` downloads predate this built-in sign-in change. These setup steps apply to publishers, source builds, and the advanced custom-client option:
+
 1. Create or select a project in [Google Cloud Console](https://console.cloud.google.com/) and enable the **Gmail API**.
 2. Configure the OAuth consent screen. For an external app in testing, add your Google account under **Test users**.
 3. To enable provider moves, check **Allow moving mail and managing labels** in Settings and configure `https://www.googleapis.com/auth/gmail.modify`. Without that option, configure these scopes: `https://www.googleapis.com/auth/gmail.readonly`, `https://www.googleapis.com/auth/gmail.send`, `openid`, and `email`.
@@ -163,6 +165,20 @@ Existing single-mailbox installations are supported automatically, preserving th
 The local callback is `http://localhost:3001/api/oauth/google/callback`. Desktop clients use a loopback callback; they do not use the web-client redirect URI configuration.
 
 Google external apps in testing receive [refresh tokens that expire after seven days](https://developers.google.com/identity/protocols/oauth2#expiration) for these Gmail scopes, requiring reconnection. Publishing an app for other users can require Google's verification process. See the [Gmail API setup guide](https://developers.google.com/workspace/gmail/api/quickstart/nodejs) and [desktop OAuth documentation](https://developers.google.com/identity/protocols/oauth2/native-app).
+
+### Google registration for desktop builds
+
+Provide a downloaded **Desktop app** OAuth JSON file when packaging, for example:
+
+```sh
+MORROW_GOOGLE_OAUTH_FILE=/absolute/path/google-desktop-client.json npm run macos:build
+```
+
+The Windows builder accepts the same environment variable. CI uses the repository Actions secret **`GOOGLE_DESKTOP_OAUTH_JSON`** for both platforms; tagged builds fail if it is missing. Local/fork builds without a build input keep the custom-client flow. The JSON must contain an `installed` client; web-client credentials are rejected.
+
+The build embeds only the Desktop client ID and secret in the private backend bundle, not the renderer or public API. Installed-app credentials can be extracted from the distributed package and are not confidential server secrets. Never put user access/refresh tokens in this input. The raw downloaded file and generated `google-oauth.json` must stay out of Git.
+
+The publisher must enable Gmail and Calendar APIs, configure the consent screen and test users, and complete any required Google verification. Bundling a client does not verify these Cloud settings or lift Testing restrictions. Users still authorize their own Google accounts in the browser.
 
 ### Outlook / Microsoft 365
 
@@ -200,6 +216,8 @@ Open **Settings → Calendar** to connect providers, or use **Connections** on t
 Creating an event requires entering its details and reviewing the destination calendar, date, and time before explicitly submitting it. Events are created without attendees; Morrow does not send invitations. Calendar access is separate from AI Studio: its simulated scheduling and meeting-preparation features do not read these live calendars or create live events.
 
 ### Google Calendar
+
+A build with Google sign-in configured uses the same built-in Desktop client as Gmail. Choose **Sign in with Google in browser** in Calendar settings; calendar consent remains separate from mail consent. The following setup is for the publisher or a custom-client user:
 
 1. In your Google Cloud project, enable the **Google Calendar API**. You can reuse the Gmail project's **Desktop app** OAuth registration.
 2. Configure the consent screen and add your account as a test user when the app is in testing.
