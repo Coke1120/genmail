@@ -1494,6 +1494,96 @@ mod download_tests {
         }
     }
 
+    #[cfg(windows)]
+    fn assert_private_acl(path: &Path, protected: bool) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                ACCESS_ALLOWED_ACE,
+                Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+                DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl,
+                INHERIT_ONLY_ACE, IsValidAcl, IsValidSid, IsWellKnownSid,
+                OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED, WinCreatorOwnerRightsSid,
+                WinLocalSystemSid,
+            },
+            Storage::FileSystem::FILE_ALL_ACCESS,
+        };
+        struct Descriptor(*mut std::ffi::c_void);
+        impl Drop for Descriptor {
+            fn drop(&mut self) {
+                unsafe { LocalFree(self.0) };
+            }
+        }
+        let name = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let mut owner = std::ptr::null_mut();
+        let mut acl = std::ptr::null_mut();
+        let mut descriptor = std::ptr::null_mut();
+        // Read the actual Windows descriptor; the fixture must not depend on
+        // PowerShell.Security module autoloading or translate canonical paths.
+        unsafe {
+            assert_eq!(
+                GetNamedSecurityInfoW(
+                    name.as_ptr(),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                    &mut owner,
+                    std::ptr::null_mut(),
+                    &mut acl,
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                ),
+                0,
+                "Read fixture security descriptor: {}",
+                path.display()
+            );
+            let descriptor = Descriptor(descriptor);
+            assert!(!descriptor.0.is_null() && !owner.is_null() && !acl.is_null());
+            assert_ne!(IsValidSid(owner), 0);
+            assert_ne!(IsValidAcl(acl), 0);
+            let mut control = 0;
+            let mut revision = 0;
+            assert_ne!(
+                GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision),
+                0
+            );
+            if protected {
+                assert_ne!(
+                    control & SE_DACL_PROTECTED,
+                    0,
+                    "Staging DACL is not protected"
+                );
+            }
+            let (mut has_owner, mut has_system) = (false, false);
+            for index in 0..u32::from((*acl).AceCount) {
+                let mut entry = std::ptr::null_mut();
+                assert_ne!(GetAce(acl, index, &mut entry), 0);
+                assert!(!entry.is_null());
+                let ace = &*entry.cast::<ACCESS_ALLOWED_ACE>();
+                assert_eq!(ace.Header.AceType, 0, "Expected ACCESS_ALLOWED_ACE");
+                assert_eq!(u32::from(ace.Header.AceFlags) & INHERIT_ONLY_ACE, 0);
+                assert_eq!(ace.Mask & FILE_ALL_ACCESS, FILE_ALL_ACCESS);
+                let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+                assert_ne!(IsValidSid(sid), 0);
+                // SDDL OW is an Owner Rights trustee, not the owner's concrete SID.
+                let is_owner =
+                    EqualSid(sid, owner) != 0 || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0;
+                let is_system = IsWellKnownSid(sid, WinLocalSystemSid) != 0;
+                assert!(
+                    is_owner || is_system,
+                    "Staging grants another principal access"
+                );
+                has_owner |= is_owner;
+                has_system |= is_system;
+            }
+            assert!(has_owner && has_system, "Missing owner or SYSTEM access");
+        }
+    }
+
     struct Fixture {
         root: PathBuf,
         task: JoinHandle<()>,
@@ -1883,15 +1973,8 @@ mod download_tests {
         {
             // Staging and downloaded content must inherit only owner/SYSTEM access,
             // even when the installation's parent grants other local users access.
-            // Store uses SDDL OW (S-1-3-4, Owner Rights), which remains a special
-            // trustee rather than being rewritten to the owner's concrete SID.
-            fixture_command(
-                "verify private Windows staging ACL",
-                ps_command("$ErrorActionPreference='Stop'; $d=Get-Acl -LiteralPath '.'; if (!$d.AreAccessRulesProtected) { throw 'Staging DACL is not protected' }; $owner=$d.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; foreach ($path in @('.','update.zip')) { $a=Get-Acl -LiteralPath $path; $rules=$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); $hasOwner=$false; $hasSystem=$false; foreach ($rule in $rules) { if ($rule.AccessControlType -eq 'Allow') { $sid=$rule.IdentityReference.Value; if ($sid -in @($owner,'S-1-3-4')) { $hasOwner=$true } elseif ($sid -eq 'S-1-5-18') { $hasSystem=$true } else { throw 'Staging grants another principal access' } } }; if (!$hasOwner -or !$hasSystem) { throw 'Missing owner or SYSTEM access' } }")
-                    .current_dir(&directory),
-                30,
-            )
-            .await;
+            assert_private_acl(&directory, true);
+            assert_private_acl(&directory.join("update.zip"), false);
         }
         let sleeper = || {
             let mut command = if cfg!(windows) {
