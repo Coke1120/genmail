@@ -1,6 +1,7 @@
 // Private test fixture. This module is never included in the production app.
 export function fixtures(store) {
   return {
+    embed: async (_config, texts) => texts.map(text => [1, 1 + text.length % 3]),
     checkUpdates: async () => ({ currentVersion: '0.5.0-alpha.1', latestVersion: '0.5.0-alpha.2', updateAvailable: true, prerelease: true, url: 'https://github.com/Coke1120/genmail/releases/tag/v0.5.0-alpha.2', checkedAt: new Date().toISOString() }),
     verifySmtp: async () => {},
     oauthFinish: async (provider, { config }) => ({ provider, ...config, email: `oauth-${provider}@example.com`, accessToken: 'fixture' }),

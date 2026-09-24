@@ -23,7 +23,8 @@ function shutdown() {
   if (stopping) return;
   stopping = true;
   app.locals.automation.stop();
-  server.close(() => { store.close(); process.exit(0); });
+  const searchStopped = app.locals.smartSearch.stop().catch(() => {});
+  server.close(async () => { await searchStopped; store.close(); process.exit(0); });
   // Let in-flight provider requests finish; avoid hanging forever on an idle client.
   setTimeout(() => { server.closeAllConnections(); store.close(); process.exit(0); }, 65_000).unref();
 }

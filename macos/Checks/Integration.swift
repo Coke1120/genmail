@@ -100,6 +100,16 @@ struct NativeClientChecks {
         try await model.selectAccount("all", folder: "inbox")
         let duplicates = model.messages.filter { $0.id == "shared-inbox-id" }
         assert(duplicates.count == 2 && Set(duplicates.map(\.viewID)).count == 2)
+        let searchOptions: JSON = .object(["query": .string("Owned"), "scope": .string("all"), "sort": .string("relevance")])
+        let search = try await model.request("/search", method: "POST", body: searchOptions)
+        assert(search["total"].number == 2 && Set(search["messages"].array.map(\.viewID)).count == 2)
+        assert(search["messages"].array.allSatisfy { !$0["searchSnippet"].array.isEmpty })
+        model.searchResponse = search; model.selectedMessage = search["messages"].array[1].viewID
+        assert(Draft(message: model.current!, reply: true).accountID == search["messages"].array[1]["accountId"].string)
+        _ = try await model.request("/search/preferences", method: "POST", body: .object(["action": .string("save"), "value": searchOptions]))
+        let savedSearch = try await model.request("/search/preferences")
+        assert(savedSearch["saved"].array.first?["query"].string == "Owned")
+        model.searchResponse = .null
         model.selectedMessage = duplicates[1].viewID
         assert(model.current?["accountId"] == duplicates[1]["accountId"])
         model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["signatureFormat": .string("html"), "signature": .string("<b>Native signature</b>")]))
@@ -142,6 +152,18 @@ struct NativeClientChecks {
         model.state = try await model.request("/style/profile", method: "DELETE", body: .object([:]))
         assert(model.state["workspace"]["styleLearning"]["profile"].isNull)
         print("Native import controls and writing-style preview, review, save and delete checks passed.")
+        _ = try await model.request("/search/settings", method: "POST", body: .object(["enabled": .bool(true), "baseUrl": .string("http://127.0.0.1:11434/v1"), "model": .string("fixture-embedding"), "accounts": .array([.string("native@example.com")])]))
+        let indexPreview = try await model.request("/search/index/preview", method: "POST", body: .object([:]))
+        assert(indexPreview["job"]["sampleCount"].number > 0 && indexPreview["job"]["estimatedTokens"].number <= 16000)
+        _ = try await model.request("/search/index/run", method: "POST", body: .object(["previewId": .string(indexPreview["job"].id)]))
+        var indexState = try await model.request("/search/settings")
+        for _ in 0..<30 { if indexState["job"]["status"].string != "running" { break }; try await Task.sleep(nanoseconds: 50_000_000); indexState = try await model.request("/search/settings") }
+        assert(indexState["job"]["status"].string == "complete" && indexState["indexed"].number > 0)
+        let hybrid = try await model.request("/search", method: "POST", body: .object(["query": .string("timetable"), "scope": .string("account"), "smart": .bool(true)]))
+        assert(hybrid["total"].number > 0 && hybrid["messages"].array.allSatisfy { $0["accountId"].string == "native@example.com" })
+        _ = try await model.request("/search/index/clear", method: "POST", body: .object([:]))
+        _ = try await model.request("/search/settings", method: "POST", body: .object(["enabled": .bool(false)]))
+        print("Native indexed/hybrid search, saved searches, cross-account reply ownership and reviewed embedding indexing passed.")
         let browser = URLSession(configuration: .ephemeral, delegate: StopOAuthRedirects(), delegateQueue: nil)
         defer { browser.invalidateAndCancel() }
         for calendar in [false, true] {

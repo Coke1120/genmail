@@ -15,6 +15,7 @@
 Morrow Mail is an independent, MIT-licensed alternative inspired by Genspark GenMail. It runs locally with a **fully native SwiftUI macOS interface** and a **React / Electron Windows desktop interface**. Both bundle the same mail service and use the same release version. The React interface also runs in a browser for development.
 
 - **Multiple mailboxes:** Gmail, Outlook / Microsoft 365, and IMAP / SMTP; combined or separate inboxes with collapsible account groups, sorting, and compact views.
+- **Indexed search:** local full-text search, Chinese traditional/simplified matching, filters, saved searches and optional reviewed semantic indexing in both clients.
 - **Mail and calendars together:** read, search, compose, reply, manage provider folders / Gmail labels, and connect Google Calendar and Outlook Calendar.
 - **Bring your own AI:** configure a custom base URL, model ID, and API key for an OpenAI-compatible endpoint or use Ollama. Enable individual AI behaviors and choose what context they can access.
 - **Controlled AI automation:** GitHub update checks, daily/interval P0–P4 summaries, opt-in arrival/open/reply triggers, separate response/translation languages, and reviewed writing-style learning.
@@ -53,6 +54,20 @@ These are experimental prereleases. macOS builds are **ad-hoc signed, not Apple 
 ## v0.5 beta scope
 
 This beta adds built-in Google mail/calendar sign-in and clearer browser callback handling to both desktop clients. It retains the 0.5 alpha’s controlled AI automation, historical import and reviewed writing-style learning. Future work includes large-mailbox UI pagination/full delta sync, app-wide AI usage budgets, attachment support and delayed/undo sending. These are roadmap items, not capabilities of this release. See [verification](VERIFICATION.md) for release checks and acceptance limits.
+
+## Search and optional smart search (current source)
+
+The native and Windows/browser clients share a SQLite FTS5 index covering downloaded subjects, sender/recipients, bodies and labels. Search supports single/two-character Chinese queries, traditional/simplified conversion, mixed English, quoted phrases, relevance/date sorting, 30-result pages, recent/saved searches and removable filters. Results show their owning account, matching text and folder. Replies retain that account.
+
+Choose the current folder, current account view, or all connected accounts under **Filters & Scope**. The combined view excludes Demo and disconnected mail. **Downloaded Coverage** shows cached counts/date ranges; mail that has not been imported cannot appear. Trash requires an explicit folder selection. Normal inbox rendering still loads its mailbox cache; search pagination does not implement full inbox virtualization or provider delta sync.
+
+Use `from:jane@example.com to:me@example.com subject:"project update" after:2026-09-01 before:2026-10-01 is:unread label:Finance`, or the filter controls. Words/conditions use AND; quoted phrases preserve word order. `to:` includes To/Cc/Bcc, `is:` also accepts `read`/`starred`, and `in:` accepts local folder names. Date bounds are UTC: `after:` includes that day; `before:` excludes it. Filters narrow the selected scope, so choose account/all scope to search another folder. English word prefixes and normalized exact phrases are supported; arbitrary infix/fuzzy spelling and attachment search are not.
+
+**Settings → Search** adds separate embedding base URL, model ID, API key and OpenAI-compatible `/embeddings` or Ollama `/api/embed` protocol. Smart search defaults off. Select accounts, folders, content fields and 1/3/6/12 months; global AI permissions further restrict the text before any model request. Save, preview a batch (no AI call), review its scope/token estimate and excerpts, then choose **Index Reviewed Batch**. Only new/changed permitted text is indexed. Each batch respects the global message limit, a 4,000–64,000 estimated-token budget and 50 overlapping text chunks; oversized messages remain keyword-searchable. Estimates are conservative UTF-8 counts, not exact provider billing. New mail needs another reviewed batch; there is no background paid indexing or automatic retry of failed/interrupted batches.
+
+Enable **Smart Search (智慧搜尋)** in the search controls and press **Search**. The query goes to the embedding endpoint; local keyword and vector rankings are merged. Query vectors are cached briefly for pagination. Hybrid results include at most 200 keyword and 200 semantic candidates; use keyword mode for exhaustive results. The initial exact vector scan accepts up to 12,000 scoped chunks and asks for narrower filters above that limit. Retrieval quality depends on your embedding model; it does not generate an answer or establish factual accuracy.
+
+Mail text goes only to the selected embedding endpoint during approved batches; a remote endpoint requires HTTPS. Changed permissions/model/connection invalidate vectors and in-flight results. Vectors stay in the local SQLite database alongside plaintext mail; API keys and search history use the existing encrypted settings store. **Clear Semantic Index / Cancel Batch** preserves mail and the keyword index. This source feature is not included in the already-published beta.2 binaries.
 
 ## Native macOS app
 

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createDemoMessages } from './demo.js';
+import { initializeSearchIndex } from './search-index.js';
 
 export function createStore(dataDir) {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -53,6 +54,7 @@ export function createStore(dataDir) {
         PRIMARY KEY (account, id)
       );
     `);
+    const search = initializeSearchIndex(db);
     const readSettings = db.prepare('SELECT value FROM settings WHERE id = 1');
     const writeSettings = db.prepare('INSERT INTO settings (id, value) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET value = excluded.value');
     const list = db.prepare("SELECT data FROM messages WHERE account = ? ORDER BY json_extract(data, '$.date') DESC, id");
@@ -61,6 +63,7 @@ export function createStore(dataDir) {
     const remove = db.prepare('DELETE FROM messages WHERE account = ? AND id = ?');
 
     const store = {
+      search,
       getSettings() {
         return decrypt(readSettings.get().value);
       },

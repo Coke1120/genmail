@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     @Published var compose: Draft?
     @Published var organizing: JSON?
     @Published var searchFocus = 0
+    @Published var searchResponse: JSON = .null
     @Published var showSettings = false
     @Published var settingsTab = "general"
     @Published var assistantAction = "summary"
@@ -51,7 +52,7 @@ final class AppModel: ObservableObject {
     var features: [JSON] { state["features"].array }
     var preferences: JSON { state["settings"]["preferences"] }
     var policy: JSON { state["settings"]["policy"] }
-    var current: JSON? { messages.first { $0.viewID == selectedMessage } }
+    var current: JSON? { (searchResponse.isNull ? messages : searchResponse["messages"].array).first { $0.viewID == selectedMessage } }
     var colorScheme: ColorScheme? {
         switch preferences["theme"].string { case "light": return .light; case "dark": return .dark; default: return nil }
     }
@@ -164,7 +165,7 @@ final class AppModel: ObservableObject {
         let next = try await request("/state", mailbox: "")
         guard !next["account"].isNull, !next["messages"].isNull else { throw APIError("Morrow received an incomplete workspace.") }
         state = next
-        if let selectedMessage, !messages.contains(where: { $0.viewID == selectedMessage }) { self.selectedMessage = nil }
+        if let selectedMessage, !(messages + searchResponse["messages"].array).contains(where: { $0.viewID == selectedMessage }) { self.selectedMessage = nil }
     }
     func refreshWhenActive() {
         guard !starting, baseURL != nil, !busy, compose == nil else { return }
@@ -179,6 +180,7 @@ final class AppModel: ObservableObject {
         }
     }
     func selectAccount(_ id: String, folder: String? = nil) async throws {
+        searchResponse = .null
         state = try await request("/account/select", method: "POST", body: .object(["accountId": .string(id)]))
         selectedMessage = nil
         if let folder { section = folder }

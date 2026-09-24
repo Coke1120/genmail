@@ -1,4 +1,5 @@
 import StyleLearning from './StyleLearning';
+import SearchSettings from './SearchSettings';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, CalendarDays, ExternalLink, Info, LoaderCircle, Mail, Settings2, ShieldCheck, Sparkles } from 'lucide-react';
 import { AI_BEHAVIORS, DEFAULT_POLICY, DEFAULT_PREFERENCES } from '../shared/features';
@@ -7,7 +8,7 @@ import FooterPreview from './FooterPreview';
 import './settings.css';
 import CalendarSettings from './CalendarSettings';
 
-const TABS = [['general', Settings2, 'General'], ['mail', Mail, 'Mail'], ['learning', Sparkles, 'Learning'], ['calendar', CalendarDays, 'Calendar'], ['model', Sparkles, 'Model'], ['policy', ShieldCheck, 'AI permissions'], ['about', Info, 'About']];
+const TABS = [['general', Settings2, 'General'], ['mail', Mail, 'Mail'], ['learning', Sparkles, 'Learning'], ['search', Sparkles, 'Search'], ['calendar', CalendarDays, 'Calendar'], ['model', Sparkles, 'Model'], ['policy', ShieldCheck, 'AI permissions'], ['about', Info, 'About']];
 const CONTENT_LABELS = {
   subject: ['Email subjects', 'Subject lines used for context and search.'],
   body: ['Email & draft text', 'The written content of permitted messages and drafts.'],
@@ -48,11 +49,13 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   const useDefaultGoogleClient = provider === 'google' && hasDefaultGoogleClient && !customGoogleClient;
   const [busy, setBusy] = useState('');
   const [importOptions, setImportOptions] = useState({ months: 3, inbox: true, sent: true });
+  const [searchDirty, setSearchDirty] = useState(false);
+  const [searchBusy, setSearchBusy] = useState(false);
   const [learningDirty, setLearningDirty] = useState(false);
   const [learningBusy, setLearningBusy] = useState(false);
   const [calendarDirty, setCalendarDirty] = useState(false);
   const [calendarBusy, setCalendarBusy] = useState(false);
-  const operationBusy = !!busy || calendarBusy || learningBusy;
+  const operationBusy = !!busy || calendarBusy || learningBusy || searchBusy;
   const [error, setError] = useState('');
   const [mail, setMail] = useState(() => mailValues({}));
   const [ai, setAi] = useState(() => modelValues(savedAi));
@@ -70,6 +73,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   dirty.mail ||= Object.values(oauth).some(credentials => Object.values(credentials).some(Boolean));
   dirty.calendar = calendarDirty;
   dirty.learning = learningDirty;
+  dirty.search = searchDirty;
   const isDirty = Object.values(dirty).some(Boolean);
 
   useEffect(() => { onDirtyChange?.(isDirty); }, [isDirty, onDirtyChange]);
@@ -290,6 +294,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         </form>
       </section>
 
+      <div id="settings-panel-search" role="tabpanel" aria-labelledby="settings-tab-search" hidden={tab !== 'search'}><SearchSettings state={state} onDirtyChange={setSearchDirty} onBusyChange={setSearchBusy} disabled={!!busy || calendarBusy || learningBusy} /></div>
       <div id="settings-panel-learning" role="tabpanel" aria-labelledby="settings-tab-learning" hidden={tab !== 'learning'}><StyleLearning key={state.account.id} state={state} onUpdate={onUpdate} onDirtyChange={setLearningDirty} onBusyChange={setLearningBusy} disabled={!!busy || calendarBusy} /></div>
       <section id="settings-panel-mail" role="tabpanel" aria-labelledby="settings-tab-mail" hidden={tab !== 'mail'}>
         <fieldset className="settings-fields" disabled={operationBusy}>

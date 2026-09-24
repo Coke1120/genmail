@@ -6,6 +6,8 @@ struct NativeSettingsView: View {
     @Environment(\.dismiss) var dismiss
     @State private var values: JSON = .null
     @State private var baseline: JSON = .null
+    @State private var searchDirty = false
+    @State private var searchBusy = false
     @State private var learningDirty = false
     @State private var importSettings: JSON = .object(["months": .number(3), "inbox": .bool(true), "sent": .bool(true)])
     @State private var provider = "google"
@@ -17,15 +19,16 @@ struct NativeSettingsView: View {
     @State private var updateResult: JSON = .null
     @State private var downloadState: JSON = .null
     @State private var includePrereleases = (Bundle.main.object(forInfoDictionaryKey: "MorrowReleaseVersion") as? String ?? "").contains("-")
-    private let tabs = [("general", "General", "slider.horizontal.3"), ("mail", "Mail", "envelope"), ("learning", "Learning", "text.badge.star"), ("model", "Model", "cpu"), ("permissions", "AI Permissions", "checkmark.shield"), ("calendar", "Calendar", "calendar"), ("about", "About", "info.circle")]
-    var dirty: Bool { learningDirty || values != baseline || mailOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } || calendarOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } }
+    private let tabs = [("general", "General", "slider.horizontal.3"), ("mail", "Mail", "envelope"), ("learning", "Learning", "text.badge.star"), ("search", "Search", "magnifyingglass"), ("model", "Model", "cpu"), ("permissions", "AI Permissions", "checkmark.shield"), ("calendar", "Calendar", "calendar"), ("about", "About", "info.circle")]
+    var dirty: Bool { searchDirty || learningDirty || values != baseline || mailOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } || calendarOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } }
     var body: some View {
         VStack(spacing: 0) {
-            HStack { Text("Your workspace").font(.title2.bold()); Spacer(); if dirty { Text("Unsaved changes").font(.caption).foregroundStyle(.secondary) }; Button("Done") { close() }.keyboardShortcut(.cancelAction).disabled(model.busy) }.padding(22)
+            HStack { Text("Your workspace").font(.title2.bold()); Spacer(); if dirty { Text("Unsaved changes").font(.caption).foregroundStyle(.secondary) }; Button("Done") { close() }.keyboardShortcut(.cancelAction).disabled(model.busy || searchBusy) }.padding(22)
             Divider()
             HStack(spacing: 0) {
                 List(tabs, id: \.0, selection: Binding(get: { model.settingsTab }, set: { next in
-                    if learningDirty && !model.confirmDiscard("Discard unsaved learning settings or style edits?") { return }
+                    if searchBusy { return }
+                    if (learningDirty || searchDirty) && !model.confirmDiscard("Discard unsaved learning or search settings?") { return }
                     model.settingsTab = next
                 })) { tab in Label(tab.1, systemImage: tab.2).tag(tab.0) }.listStyle(.sidebar).frame(width: 165)
                 ScrollView {
@@ -33,6 +36,7 @@ struct NativeSettingsView: View {
                         switch model.settingsTab {
                         case "mail": mailPage
                         case "learning": StyleLearningView(dirty: $learningDirty)
+                        case "search": NativeSearchSettingsView(dirty: $searchDirty, operationBusy: $searchBusy)
                         case "model": modelPage
                         case "permissions": permissionsPage
                         case "calendar": calendarPage
@@ -50,13 +54,15 @@ struct NativeSettingsView: View {
             }.padding(14).frame(minHeight: 45)
         }.frame(width: 900, height: min(700, (NSScreen.main?.visibleFrame.height ?? 850) - 100))
         .textFieldStyle(.roundedBorder)
-        .interactiveDismissDisabled(dirty || model.busy)
+        .interactiveDismissDisabled(dirty || model.busy || searchBusy)
         .onAppear { initialize() }
+        .onChange(of: searchDirty) { _ in model.dirty("settings", dirty) }
+        .onChange(of: searchBusy) { _ in model.dirty("search-index", searchBusy) }
         .onChange(of: learningDirty) { _ in model.dirty("settings", dirty) }
         .onChange(of: values) { _ in model.dirty("settings", dirty) }
         .onChange(of: mailOAuth) { _ in model.dirty("settings", dirty) }
         .onChange(of: calendarOAuth) { _ in model.dirty("settings", dirty) }
-        .onDisappear { model.dirty("settings", false) }
+        .onDisappear { model.dirty("settings", false); model.dirty("search-index", false) }
         .task(id: model.settingsTab) {
             guard model.settingsTab == "about" else { return }
             while !Task.isCancelled {
@@ -421,7 +427,7 @@ struct NativeSettingsView: View {
         localError = ""; status = ""
         model.perform { do { try await work() } catch { localError = error.localizedDescription } }
     }
-    func close() { if !dirty || model.confirmDiscard() { dismiss() } }
+    func close() { guard !searchBusy else { return }; if !dirty || model.confirmDiscard() { dismiss() } }
     func backup() {
         let panel = NSSavePanel(); panel.title = "Back Up Morrow Mail"; panel.nameFieldStringValue = "Morrow-Backup-" + Date().formatted(.iso8601.year().month().day().dateSeparator(.dash))
         panel.canCreateDirectories = true

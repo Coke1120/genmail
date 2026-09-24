@@ -14,10 +14,11 @@ function shutdown() {
   if (stopping) return;
   stopping = true;
   app?.locals.automation.stop();
+  const searchStopped = app?.locals.smartSearch.stop().catch(() => {});
   const updatesStopped = updater?.stop().catch(() => {});
   clearTimeout(timeout);
   if (!server) return process.exit(0);
-  server.close(async () => { await updatesStopped; store?.close(); process.exit(0); });
+  server.close(async () => { await Promise.all([updatesStopped, searchStopped]); store?.close(); process.exit(0); });
   setTimeout(() => { server.closeAllConnections(); store?.close(); process.exit(0); }, 65_000).unref();
 }
 input.once('line', line => {

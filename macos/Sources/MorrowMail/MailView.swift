@@ -4,14 +4,12 @@ import AppKit
 struct MailWorkspace: View {
     @AppStorage("collapsedMailAccounts") private var collapsedAccounts = "[]"
     @EnvironmentObject var model: AppModel
-    @State private var search = ""
     @State private var unreadOnly = false
-    @FocusState private var searchFocused: Bool
     var filtered: [JSON] {
-        sortedMail(model.messages.filter { message in
+        if !model.searchResponse.isNull { return model.searchResponse["messages"].array }
+        return sortedMail(model.messages.filter { message in
             let folder = model.section == "starred" ? message["starred"].bool && message["folder"].string != "trash" : message["folder"].string == model.section
-            let match = search.isEmpty || ["subject", "fromName", "fromEmail", "body", "to"].contains { message[$0].string.localizedCaseInsensitiveContains(search) }
-            return folder && match && (!unreadOnly || !message["read"].bool)
+            return folder && (!unreadOnly || !message["read"].bool)
         }, by: model.preferences["sort"].string)
     }
     var body: some View {
@@ -36,10 +34,13 @@ struct MailWorkspace: View {
                     }
                     else if model.section == "calendar" { NativeCalendarView() }
                     else {
-                        HSplitView {
+                        VStack(spacing: 0) {
+                          NativeMailSearch().id(model.account + ":" + model.section)
+                          HSplitView {
                             messageList.frame(minWidth: 260, idealWidth: 310, maxWidth: 360)
                             if let message = model.current, filtered.contains(where: { $0.viewID == message.viewID }) { MessageReader(message: message).frame(minWidth: 320) }
                             else { EmptyPane(title: "A little room to think", detail: "Choose a message to read, or compose something new.", symbol: "envelope.open").frame(minWidth: 320) }
+                          }
                         }
                     }
                 }
@@ -128,8 +129,7 @@ struct MailWorkspace: View {
     }
     var messageList: some View {
         VStack(spacing: 0) {
-            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.title2.bold()); Text(model.combined ? "All accounts" : model.account == "demo" ? "Demo workspace" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Toggle(isOn: $unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).help("Show unread only").accessibilityLabel("Show unread only") }.padding(16)
-            TextField("Search mail", text: $search).focused($searchFocused).onChange(of: model.searchFocus) { _ in searchFocused = true }.textFieldStyle(.roundedBorder).padding(.horizontal, 14).padding(.bottom, 12)
+            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.title2.bold()); Text(model.combined ? "All accounts" : model.account == "demo" ? "Demo workspace" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Toggle(isOn: $unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).help("Show unread only").accessibilityLabel("Show unread only").disabled(!model.searchResponse.isNull) }.padding(16)
             HStack {
                 Menu {
                     ForEach(["compact", "comfortable", "spacious"], id: \.self) { density in
@@ -140,13 +140,13 @@ struct MailWorkspace: View {
                     ForEach(mailSortOptions, id: \.0) { option in
                         Button { model.preference("sort", option.0) } label: { Label(option.1, systemImage: model.preferences["sort"].string == option.0 ? "checkmark" : "arrow.up.arrow.down") }
                     }
-                } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
+                } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }.disabled(!model.searchResponse.isNull)
             }.disabled(model.busy).padding(.horizontal, 14).padding(.bottom, 10)
             Divider()
             if filtered.isEmpty {
                 VStack {
-                    EmptyPane(title: search.isEmpty && !unreadOnly ? "All clear" : "No matching messages", detail: unreadOnly ? "Only unread messages are shown." : search.isEmpty ? "There are no messages in this view." : "Try another sender or keyword.", symbol: "tray")
-                    if !search.isEmpty || unreadOnly { Button("Clear Filters") { search = ""; unreadOnly = false }.padding(.bottom, 24) }
+                    EmptyPane(title: model.searchResponse.isNull && !unreadOnly ? "All clear" : "No matching messages", detail: model.searchResponse.isNull ? "There are no messages in this view." : "Adjust the search filters or import more mail.", symbol: "tray")
+                    if unreadOnly { Button("Clear Unread Filter") { unreadOnly = false }.padding(.bottom, 24) }
                 }
             }
             else {
@@ -158,9 +158,10 @@ struct MailWorkspace: View {
                             Spacer(minLength: 2)
                             if message["starred"].bool { Image(systemName: "star.fill").foregroundStyle(.orange).font(.caption) }
                         }
-                        Text(message["subject"].nonempty ? message["subject"].string : "(No subject)").font(.system(size: 13, weight: .medium)).lineLimit(1)
-                        if model.preferences["density"].string != "compact" { Text(message["preview"].string).foregroundStyle(.secondary).font(.caption).lineLimit(model.preferences["density"].string == "spacious" ? 4 : 2) }
-                        if model.combined { Text(message["accountId"].string).font(.caption2).foregroundStyle(morrowGreen).lineLimit(1) }
+                        searchHighlighted(message["searchSubject"], fallback: message["subject"].nonempty ? message["subject"].string : "(No subject)").font(.system(size: 13, weight: .medium)).lineLimit(1)
+                        if model.preferences["density"].string != "compact" { searchHighlighted(message["searchSnippet"], fallback: message["preview"].string).foregroundStyle(.secondary).font(.caption).lineLimit(model.preferences["density"].string == "spacious" ? 4 : 2) }
+                        if model.combined || !model.searchResponse.isNull { Text(message["accountId"].string).font(.caption2).foregroundStyle(morrowGreen).lineLimit(1) }
+                        if message["searchMatch"].nonempty { Text(message["folder"].string + " · " + message["searchMatch"].string).font(.caption2).foregroundStyle(.secondary) }
                         Text(dateLabel(message["date"].string)).font(.caption2).foregroundStyle(.tertiary)
                         if message["deliveryStatus"].string == "unconfirmed" { Label("Check delivery", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
                     }.padding(.vertical, model.preferences["density"].string == "compact" ? 3 : model.preferences["density"].string == "spacious" ? 14 : 8).tag(message.viewID)

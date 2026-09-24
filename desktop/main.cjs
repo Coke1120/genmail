@@ -155,13 +155,26 @@ app.whenReady().then(async () => {
       window.morrowDesktop.writeState('morrow.account.collapsed.demo', 'true');
       if (window.morrowDesktop.readState('morrow.account.collapsed.demo') !== 'true') throw new Error('Desktop state was not saved.');
       const response = await fetch('/api/state'); const state = await response.json();
+      const until = async predicate => { const deadline = Date.now() + 10000; while (!predicate()) { if (Date.now() > deadline) throw new Error('Search UI did not settle.'); await new Promise(resolve => setTimeout(resolve, 50)); } };
+      const search = document.querySelector('input[aria-label="Search inbox"]');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, 'Northstar');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      await until(() => document.querySelector('.search-status strong')?.textContent.includes('matches') && document.querySelector('.message-row mark'));
+      if (!document.querySelector('.mailbox-label') || !document.querySelector('.search-match')) throw new Error('Search ownership or match markers are missing.');
+      document.querySelector('.search-history summary').click();
+      [...document.querySelectorAll('.search-history button')].find(button => button.textContent === 'Save this search').click();
+      await until(() => [...document.querySelectorAll('.search-history button')].some(button => button.textContent.includes('★ Northstar')));
+      const history = await (await fetch('/api/search/preferences', { headers: { 'X-Genmail-Account': 'demo' } })).json();
+      if (history.saved[0]?.query !== 'Northstar') throw new Error('Saved search was not persisted.');
+      document.querySelector('button[aria-label="Clear search"]').click();
+      await until(() => !document.querySelector('.search-status'));
       return { ok: response.ok, mode: state.account?.mode, count: state.messages?.length, node: typeof window.require, bridge: typeof window.morrowDesktop?.openSignIn, csp: !!document.querySelector('script[src]') };
     })()`);
     if (!result.ok || result.mode !== 'demo' || !result.count || result.node !== 'undefined' || result.bridge !== 'function' || !result.csp) throw new Error('Desktop smoke test failed.');
     if ((await fetch(`${origin}/api/state`)).status !== 401) throw new Error('Private API was exposed.');
     const health = await fetch(`${origin}/api/health`, { headers: { Authorization: `Bearer ${token}` } });
     if (!health.ok) throw new Error('Private service health check failed.');
-    console.log(`Desktop smoke passed: ${app.isPackaged ? 'bundled' : 'development'} service, authenticated renderer, demo inbox, sandbox, private API.`);
+    console.log(`Desktop smoke passed: ${app.isPackaged ? 'bundled' : 'development'} service, authenticated renderer, demo inbox, indexed search/highlights/saved search, sandbox, private API.`);
     stop();
   }
 }).catch(error => { if (smoke) console.error(error.message); fatal(); });

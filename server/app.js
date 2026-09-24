@@ -1,5 +1,6 @@
 import { createHistory, importOptions } from './history.js';
 import { createLearning } from './learning.js';
+import { registerSearchRoutes } from './search.js';
 import { bundledGoogleOAuth, oauthCredentials } from './oauth-client.js';
 import express from 'express';
 import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
@@ -121,6 +122,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     return { configured: !!mail.email, provider: mail.provider || 'imap', email: mail.email || '', imapHost: mail.imapHost || '', imapPort: mail.imapPort || 993, smtpHost: mail.smtpHost || '', smtpPort: mail.smtpPort || 465, clientId: mail.clientId || '', canOrganize: providers.canOrganizeMail(mail) };
   }
   function state(selected = activeAccount()) {
+    smartSearch.reconcile();
     const config = settings(), accounts = connections(config);
     const view = selected === 'all' || validAccount(selected) ? selected : activeAccount();
     const live = view !== 'all' && view !== 'demo';
@@ -196,6 +198,8 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   const fetchPage = (mail, options) => (mail.provider && mail.provider !== 'imap' ? api.fetchProviderPage : api.fetchImapPage)(mail, options);
   const history = createHistory({ store, connection: account => connections()[account], currentMail, fetchPage, importMessages, lock: mailboxOperation, ...(services.now ? { now: services.now } : {}) });
   const learning = createLearning({ store, connection: account => connections()[account], runModel: (...args) => api.runModel(...args), ...(services.now ? { now: services.now } : {}) });
+  const smartSearch = registerSearchRoutes({ app, store, connections, apiBase, embed: services.embed });
+  app.locals.smartSearch = smartSearch;
   app.post('/api/imports/:action', (req, res) => {
     if (!connections()[req.mailAccount]) fail('Choose a connected mailbox.', 409);
     if (req.params.action === 'start') history.start(req.mailAccount, req.body);
