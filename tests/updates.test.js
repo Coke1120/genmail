@@ -26,6 +26,7 @@ test('GitHub release checks compare semantic versions and filter drafts and rele
   for (const [installed, tag, expected] of [
     ['1.0.0-alpha.9', 'v1.0.0-alpha.10', true], ['1.0.0-alpha', '1.0.0-alpha.1', true],
     ['1.0.0-beta', '1.0.0', true], ['1.0.0', '1.0.0-beta', false],
+    ['0.5.0-alpha.1', 'v0.5.0-beta.1', true], ['0.5.0-beta.1', 'v0.5.0-alpha.1', false],
     ['1.0.0-2', '1.0.0-alpha', true], ['1.9.0', '1.10.0', true],
     ['2.0.0', '1.99.0', false], ['1.0.0+local', 'v1.0.0+release', false],
     [currentVersion, 'v' + currentVersion, false],

@@ -27,4 +27,4 @@ if (!process.env.npm_execpath) throw new Error('Run this builder through npm run
 execFileSync(process.execPath, [process.env.npm_execpath, 'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: resolve(stage, 'backend'), stdio: 'inherit' });
 writeFileSync(resolve(stage, 'package.json'), JSON.stringify({ name: 'morrow-mail-desktop', productName: 'Morrow Mail', version, main: 'main.cjs', license: 'MIT', private: true }));
 const [application] = await packager({ dir: stage, out: output, name: 'Morrow Mail', executableName: 'Morrow Mail', platform: 'win32', arch: 'x64', electronVersion: devDependencies.electron, appVersion: version, buildVersion: version.split('-')[0], icon: resolve(stage, 'icon.ico'), overwrite: true, prune: false, asar: false, win32metadata: { CompanyName: 'Morrow Mail contributors', FileDescription: 'Morrow Mail', ProductName: 'Morrow Mail', InternalName: 'MorrowMail' } });
-console.log(`Built ${application}. Unsigned alpha; extract the entire folder before running Morrow Mail.exe.`);
+console.log(`Built ${application}. Unsigned build; extract the entire folder before running Morrow Mail.exe.`);

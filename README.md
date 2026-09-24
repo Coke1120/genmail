@@ -8,9 +8,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-blue.svg)](#windows-desktop-app)
 [![macOS 13.5+](https://img.shields.io/badge/macOS-13.5%2B-black.svg)](#native-macos-app)
-[![Alpha release](https://img.shields.io/github/v/release/Coke1120/genmail?include_prereleases&label=alpha)](https://github.com/Coke1120/genmail/releases)
+[![Beta release](https://img.shields.io/github/v/release/Coke1120/genmail?include_prereleases&label=beta)](https://github.com/Coke1120/genmail/releases)
 
-[Download macOS / Windows alpha](https://github.com/Coke1120/genmail/releases) · [Feature coverage](FEATURE_COVERAGE.md) · [Verification](VERIFICATION.md) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
+[Download macOS / Windows beta](https://github.com/Coke1120/genmail/releases) · [Feature coverage](FEATURE_COVERAGE.md) · [Verification](VERIFICATION.md) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
 
 Morrow Mail is an independent, MIT-licensed alternative inspired by Genspark GenMail. It runs locally with a **fully native SwiftUI macOS interface** and a **React / Electron Windows desktop interface**. Both bundle the same mail service and use the same release version. The React interface also runs in a browser for development.
 
@@ -37,9 +37,9 @@ Captured from the 0.4 development build using fictional messages and isolated pr
 
 <img src="docs/screenshots/macos-reply.jpg" alt="Morrow Mail native reply composer with the work account locked as sender, To, Cc and Bcc fields, and a formatted HTML email footer" width="690">
 
-## Download the alpha
+## Download the beta
 
-[Download the latest paired alpha and checksums](https://github.com/Coke1120/genmail/releases). Starting with **v0.4.0-alpha.1**, each release contains both:
+[Download the latest paired beta and checksums](https://github.com/Coke1120/genmail/releases). Starting with **v0.4.0-alpha.1**, each release contains both:
 
 | Platform | Package | Interface |
 | --- | --- | --- |
@@ -48,11 +48,11 @@ Captured from the 0.4 development build using fictional messages and isolated pr
 
 Both include their runtimes; no Node installation is needed. On macOS, unzip and move **Morrow Mail.app** to Applications. On Windows, extract the **entire folder** and run **Morrow Mail.exe**; keep the accompanying files together.
 
-These are experimental alphas. macOS builds are **ad-hoc signed, not Apple notarized**; Windows builds are **unsigned** and may show SmartScreen warnings. Review the source and supplied SHA-256 checksum before opening. For macOS, see Apple's [opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac) instructions. Stable distribution signing and live-account acceptance remain pending.
+These are experimental prereleases. macOS builds are **ad-hoc signed, not Apple notarized**; Windows builds are **unsigned** and may show SmartScreen warnings. Review the source and supplied SHA-256 checksum before opening. For macOS, see Apple's [opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac) instructions. Stable distribution signing and live-account acceptance remain pending.
 
-## v0.5 alpha scope
+## v0.5 beta scope
 
-This release adds controlled AI automation, historical import and reviewed writing-style learning to both desktop clients. Future work includes large-mailbox UI pagination/full delta sync, app-wide AI usage budgets, attachment support and delayed/undo sending. These are roadmap items, not capabilities of this release. See [verification](VERIFICATION.md) for release checks and acceptance limits.
+This beta adds built-in Google mail/calendar sign-in and clearer browser callback handling to both desktop clients. It retains the 0.5 alpha’s controlled AI automation, historical import and reviewed writing-style learning. Future work includes large-mailbox UI pagination/full delta sync, app-wide AI usage budgets, attachment support and delayed/undo sending. These are roadmap items, not capabilities of this release. See [verification](VERIFICATION.md) for release checks and acceptance limits.
 
 ## Native macOS app
 
@@ -80,7 +80,7 @@ The inbox's **View** menu selects Compact, Comfortable, or Spacious rows. **Sort
 
 Native **Settings → About → Back Up Workspace** creates a verified backup including any pending calendar request. Calendar creation persists its original request ID and details before writing to the provider, so a restart can recover an uncertain attempt. Review the provider's calendar before resolving a pending request.
 
-Builds are ad-hoc signed for local use. A stable public distribution requires your Apple Developer ID certificate, hardened-runtime signing and **Apple notarization**. The published alpha explicitly remains unnotarized. Set `MORROW_SIGNING_IDENTITY` to your Developer ID identity for signing; the script does not submit anything to Apple. The app is not App Store sandboxed. Live provider acceptance testing and signing/notarization are release requirements, not claims made by the local build.
+Builds are ad-hoc signed for local use. A stable public distribution requires your Apple Developer ID certificate, hardened-runtime signing and **Apple notarization**. Public prereleases remain unnotarized. Set `MORROW_SIGNING_IDENTITY` to your Developer ID identity for signing; the script does not submit anything to Apple. The app is not App Store sandboxed. Live provider acceptance testing and signing/notarization are release requirements, not claims made by the local build.
 
 ## Windows desktop app
 
@@ -113,9 +113,9 @@ $env:DATA_DIR = Join-Path $env:APPDATA 'Morrow Mail'
 
 `package.json` is the version source for both apps and archive names. Pushes and pull requests run backend/web checks on Ubuntu, macOS and Windows. macOS also compiles and tests SwiftUI; Windows builds and launches its packaged `.exe`. Tag and manually dispatched builds upload both packages as short-lived CI artifacts; published release downloads remain available.
 
-To publish a new alpha, update the changelog and verification notes, bump the package version with `npm version <version>-alpha.<number> --no-git-tag-version`, commit, then push the matching `v<version>-alpha.<number>` tag. The workflow builds both platforms from that **same tag**. It verifies both archives and their checksums, uploads them to a draft release, and makes the release public only after every platform job succeeds. Failed builds publish no partial release; failed uploads leave a draft. Published assets are never overwritten.
+To publish a new alpha or beta, update the changelog and verification notes, bump the package version with `npm version <version>-<alpha|beta>.<number> --no-git-tag-version`, commit, then push the matching `v<version>-<alpha|beta>.<number>` tag. The workflow builds both platforms from that **same tag**. It verifies both archives and their checksums, uploads them to a draft release, and makes the release public only after every platform job succeeds. Failed builds publish no partial release; failed uploads leave a draft. Published assets are never overwritten.
 
-Every change is checked; versioned tags publish paired downloads. Unsigned automation currently accepts alpha versions only. Native UI differences remain explicit in [feature coverage](FEATURE_COVERAGE.md); API changes must preserve both clients.
+Every change is checked; versioned tags publish paired downloads. Unsigned automation accepts numbered alpha and beta versions; stable and release-candidate tags are rejected. Native UI differences remain explicit in [feature coverage](FEATURE_COVERAGE.md); API changes must preserve both clients.
 
 ## Web development interface
 
@@ -155,7 +155,7 @@ Existing single-mailbox installations are supported automatically, preserving th
 
 ### Gmail
 
-If Settings says **Google sign-in is ready**, click the browser sign-in button. The publisher manages the Cloud setup below; ordinary users do not need to register an app. The existing public `v0.5.0-alpha.1` downloads predate this built-in sign-in change. These setup steps apply to publishers, source builds, and the advanced custom-client option:
+If Settings says **Google sign-in is ready**, click the browser sign-in button. The publisher manages the Cloud setup below; ordinary users do not need to register an app. Built-in Google sign-in is included starting with `v0.5.0-beta.1`; older alpha downloads require a custom registration. These setup steps apply to publishers, source builds, and the advanced custom-client option:
 
 1. Create or select a project in [Google Cloud Console](https://console.cloud.google.com/) and enable the **Gmail API**.
 2. Configure the OAuth consent screen. For an external app in testing, add your Google account under **Test users**.
@@ -259,7 +259,7 @@ Model settings, permissions, and general preferences are **global across account
 
 General settings include your display name, plain-text or HTML signature, theme, density, mark-read-on-open behavior, reply tone, preferred AI response language, independent target translation language (blank follows the preferred language), and sync interval. These language settings control AI output, not UI localization. Timed mail sync checks all connected accounts every 1, 5, 15 or 30 minutes while the service is running; it defaults to manual. Review generated text before inserting it into a draft.
 
-**Settings → About → Check for updates** checks public releases in `Coke1120/genmail` on GitHub. Alpha builds initially include alpha/beta releases; uncheck that option to check stable releases only. The app compares semantic versions among the latest 100 published releases, shows the installed/latest version and check time, and opens the release downloads page. Checks share no mail or credentials, time out after 10 seconds, and cache successful results for one minute. Offline, rate-limit and empty-channel responses are shown as errors, not as “up to date.” Download and installation are manual.
+**Settings → About → Check for updates** checks public releases in `Coke1120/genmail` on GitHub. Prerelease builds initially include alpha/beta releases; uncheck that option to check stable releases only. The app compares semantic versions among the latest 100 published releases, shows the installed/latest version and check time, and opens the release downloads page. Checks share no mail or credentials, time out after 10 seconds, and cache successful results for one minute. Offline, rate-limit and empty-channel responses are shown as errors, not as “up to date.” Download and installation are manual.
 
 **Settings → AI permissions → When assistance starts** provides four independent, default-off triggers:
 

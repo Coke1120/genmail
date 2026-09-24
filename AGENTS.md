@@ -104,12 +104,12 @@ write permission. IMAP moves require MOVE + UIDPLUS and matching UIDVALIDITY.
 Keep the local message ID stable while recording the provider's destination ID.
 To/Cc/Bcc belong to the send fingerprint and uncertain draft; never drop Bcc from
 the provider delivery submission or expose it in SMTP recipient-visible headers.
-Public alpha releases must explicitly disclose ad-hoc signing and missing live-account
+Public alpha and beta releases must explicitly disclose ad-hoc signing and missing live-account
 acceptance. Never publish runtime data, fixture workspaces, or secrets.
 
 ## Paired release policy
 
-Keep package.json as the common version source. Every tagged alpha must build and pass
+Keep package.json as the common version source. Every tagged alpha or beta must build and pass
 checks on macOS and Windows before either download becomes public. Use the existing
 workflow and publisher; never replace published binaries or ship only one platform.
 Preserve SwiftUI on macOS and the shared React Windows/browser client. Desktop IPC
