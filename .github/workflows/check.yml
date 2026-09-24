@@ -41,6 +41,8 @@ jobs:
           MORROW_REQUIRE_GOOGLE_OAUTH: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
       - if: runner.os == 'Windows'
         run: npm run desktop:test -- --packaged
+      - if: runner.os == 'macOS' || runner.os == 'Windows'
+        run: npm run updater:test
       - if: matrix.artifact && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
         run: node scripts/package-release.js
       - if: matrix.artifact && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
@@ -69,3 +71,4 @@ jobs:
       - run: node scripts/publish-release.js
         env:
           GH_TOKEN: ${{ github.token }}
+          MORROW_UPDATE_SIGNING_KEY: ${{ secrets.MORROW_UPDATE_SIGNING_KEY }}

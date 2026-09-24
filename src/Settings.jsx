@@ -62,6 +62,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   const [footerPreview, setFooterPreview] = useState(null);
   const [updateResult, setUpdateResult] = useState(null);
   const [includePrereleases, setIncludePrereleases] = useState(__APP_VERSION__.includes('-'));
+  const [downloadState, setDownloadState] = useState({ supported: false, phase: 'idle' });
   useEffect(() => setFooterPreview(null), [preferences.signature, preferences.signatureFormat]);
   const saved = useRef({ mail, model: ai, general: preferences, policy });
   const allowUnload = useRef(false);
@@ -80,6 +81,16 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   }, [isDirty, operationBusy]);
   useEffect(() => { setTestResult(''); }, [ai]);
   useEffect(() => {
+    if (tab !== 'about' || !window.morrowDesktop) return;
+    const controller = new AbortController(); let timer;
+    const poll = async () => {
+      try { const response = await fetch('/api/updates/status', { signal: controller.signal }); if (response.ok && !controller.signal.aborted) setDownloadState(await response.json()); } catch {}
+      if (!controller.signal.aborted) timer = setTimeout(poll, 1500);
+    };
+    poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [tab]);
+  useEffect(() => {
     if (!window.morrowDesktop || tab !== 'mail' || isDirty || operationBusy) return;
     let controller;
     const refresh = () => {
@@ -96,6 +107,16 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
     const result = await response.json();
     if (!response.ok) throw new Error(result.error);
     if (!signal?.aborted) onUpdate(result);
+  }
+  async function updateDownload(action) {
+    setBusy('updates'); setError('');
+    try {
+      const response = await fetch(`/api/updates/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ includePrereleases }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not update the app.');
+      setDownloadState(result);
+    } catch (error) { setError(error.message); }
+    finally { setBusy(''); }
   }
 
   function closeSettings() {
@@ -505,9 +526,14 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         <fieldset className="settings-fields" disabled={operationBusy}>
           <legend>App updates</legend>
           <Permission title="Include alpha and beta releases" checked={includePrereleases} onChange={value => { setIncludePrereleases(value); setUpdateResult(null); }} />
-          <p className="settings-help">Checks public GitHub releases without sharing mail or credentials. Download and installation are manual. Results are cached for one minute.</p>
+          <p className="settings-help">Checks public GitHub releases without sharing mail or credentials. {window.morrowDesktop ? 'Downloaded updates are verified before you choose Install & Restart.' : 'Use the release downloads to update a browser development installation.'}</p>
           <button type="button" className="button secondary" onClick={checkUpdates}>{busy === 'updates' ? 'Checking…' : 'Check for updates'}</button>
           {updateResult && <div role="status" className="settings-test-result"><strong>{updateResult.updateAvailable ? `Update available: ${updateResult.latestVersion}` : 'You’re up to date for this channel.'}</strong><p>Installed: {updateResult.currentVersion} · Latest: {updateResult.latestVersion}<br />Checked: {new Date(updateResult.checkedAt).toLocaleString()}</p><a href={updateResult.url} target="_blank" rel="noreferrer">View release & downloads</a></div>}
+          {updateResult?.updateAvailable && downloadState.supported && ['idle', 'error'].includes(downloadState.phase) && <button type="button" className="button primary" onClick={() => updateDownload('download')}>Download update</button>}
+          {['checking', 'downloading', 'verifying'].includes(downloadState.phase) && <div role="status"><progress max={downloadState.total || 1} value={downloadState.received || 0} aria-label="Update download progress" /><p>{downloadState.phase === 'downloading' ? 'Downloading update…' : 'Verifying update…'}</p><button type="button" className="button secondary" onClick={() => updateDownload('cancel')}>Cancel download</button></div>}
+          {downloadState.phase === 'ready' && <div role="status"><p>Version {downloadState.version} is ready to install.</p><button type="button" className="button primary" disabled={isDirty || operationBusy} onClick={async () => { try { await window.morrowDesktop.installUpdate(); } catch (error) { setError(error.message || 'Could not restart for the update.'); } }}>Install & Restart</button>{isDirty && <p>Save or discard unsaved changes before restarting.</p>}</div>}
+          {downloadState.error && <p role="alert" className="settings-error">{downloadState.error}</p>}
+          {downloadState.previous && <p role="status">{downloadState.previous}</p>}
         </fieldset>
         <p><a href="https://github.com/Coke1120/genmail" target="_blank" rel="noreferrer">GitHub</a> · <a href="https://github.com/sponsors/Coke1120" target="_blank" rel="noreferrer">GitHub Sponsors</a> · <a href="https://buymeacoffee.com/Coke1120" target="_blank" rel="noreferrer">Buy Me a Coffee</a></p>
         <p className="settings-about-intro">An independent, open-source email workspace inspired by GenMail. Original design and code, MIT licensed, and built to keep your workspace on your computer.</p>

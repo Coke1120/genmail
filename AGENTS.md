@@ -69,6 +69,7 @@ npm run macos:test           # Swift model checks, UI compilation, native API in
 npm run macos:build          # self-contained app in build/macos/Morrow Mail.app
 npm run windows:build        # Windows x64 host: self-contained Electron app
 npm run desktop:test -- --packaged  # Windows packaged smoke test
+npm run updater:test               # isolated install/restart acceptance on macOS/Windows
 codesign --verify --deep --strict 'build/macos/Morrow Mail.app'
 plutil -lint 'build/macos/Morrow Mail.app/Contents/Info.plist'
 ```
@@ -116,3 +117,13 @@ Preserve SwiftUI on macOS and the shared React Windows/browser client. Desktop I
 must validate the main-frame sender, accept only narrow operations, and never expose
 Node, arbitrary filesystem access or private API tokens to the renderer. Calendar
 retry IDs and payloads must survive restart on both platforms.
+
+## Desktop update safety
+
+Keep the update signing private key outside source and app bundles; only the pinned
+public key is committed. Publish signed manifests only after both platform jobs pass.
+Never accept renderer-supplied download URLs, install paths or commands. Installer
+preparation requires the host-only update token, and IPC checks the main-frame sender.
+Updates must respect pending writes/unsaved edits, wait for both UI/service processes,
+retain the previous app and preserve the separate workspace. Use generated fixture
+apps/keys and temporary workspaces for install/restart tests, never the owner's data.

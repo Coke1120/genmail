@@ -1,6 +1,6 @@
 {
   "name": "morrow-mail",
-  "version": "0.5.0-beta.1",
+  "version": "0.5.0-beta.2",
   "description": "An open-source email and calendar client for macOS and Windows, with multiple accounts and bring-your-own AI.",
   "homepage": "https://github.com/Coke1120/genmail#readme",
   "repository": {
@@ -53,7 +53,8 @@
     "macos:test": "node scripts/test-macos.js",
     "macos:open": "open \"build/macos/Morrow Mail.app\"",
     "windows:build": "node scripts/build-windows.js",
-    "desktop:test": "node scripts/test-desktop.js"
+    "desktop:test": "node scripts/test-desktop.js",
+    "updater:test": "node scripts/test-updater.js"
   },
   "license": "MIT",
   "type": "module",

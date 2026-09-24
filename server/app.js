@@ -54,7 +54,7 @@ function safeEqual(a, b) {
   return first.length === second.length && timingSafeEqual(first, second);
 }
 
-export function createApp({ store, port = 3001, appUrl = `http://localhost:${port}`, services = {}, nativeToken = '', googleOAuth = bundledGoogleOAuth() }) {
+export function createApp({ store, port = 3001, appUrl = `http://localhost:${port}`, services = {}, nativeToken = '', googleOAuth = bundledGoogleOAuth(), updater = null, updateToken = '' }) {
   let uiUrl;
   try { uiUrl = new URL(appUrl); } catch { throw new Error('APP_URL must be a localhost HTTP origin.'); }
   if (uiUrl.protocol !== 'http:' || !isLoopbackHost(uiUrl.host) || uiUrl.origin !== appUrl || uiUrl.username || uiUrl.password) throw new Error('APP_URL must be a localhost HTTP origin without a path.');
@@ -209,6 +209,19 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.delete('/api/style/profile', (req, res) => { learning.clear(req.mailAccount); res.json(state(req.mailAccount)); });
 
   app.get('/api/state', (req, res) => res.json(state(req.mailAccount)));
+  app.get('/api/updates/status', (req, res) => res.json(updater?.status() || { supported: false, phase: 'idle' }));
+  app.post('/api/updates/download', (req, res) => {
+    if (!updater) fail('Use the desktop app to install updates.', 409);
+    res.status(202).json(updater.start(req.body?.includePrereleases));
+  });
+  app.post('/api/updates/cancel', (req, res) => {
+    if (!updater) fail('No desktop update is running.', 409);
+    res.json(updater.cancel());
+  });
+  app.post('/api/updates/install', async (req, res) => {
+    if (!updater || !updateToken || !safeEqual(req.get('X-Morrow-Update'), updateToken)) fail('Install updates from the desktop app controls.', 403);
+    res.json(await updater.prepare());
+  });
   app.get('/api/updates', async (req, res) => {
     if (req.query.includePrereleases !== undefined && !['true', 'false'].includes(req.query.includePrereleases)) fail('Choose a valid release channel.');
     const includePrereleases = req.query.includePrereleases === 'true';

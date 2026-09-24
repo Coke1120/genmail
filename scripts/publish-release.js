@@ -1,7 +1,8 @@
 // Invoked only after every platform job passes. Failed uploads leave a draft.
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, sign } from 'node:crypto';
+import { verifyManifest } from '../server/update-trust.js';
 import { join } from 'node:path';
 const { version } = JSON.parse(readFileSync('package.json'));
 const tag = process.env.GITHUB_REF_NAME;
@@ -15,11 +16,26 @@ for (const platform of platforms) {
   const checksum = readFileSync(join(directory, `SHA256SUMS-${platform}.txt`), 'utf8');
   if (checksum !== `${createHash('sha256').update(readFileSync(join(directory, name))).digest('hex')}  ${name}\n`) throw new Error(`Checksum mismatch: ${platform}`);
 }
+if (!process.env.MORROW_UPDATE_SIGNING_KEY) throw new Error('The update signing key is required before publishing.');
+const manifest = Buffer.from(JSON.stringify({ version, platforms: Object.fromEntries(platforms.map(platform => {
+  const name = `Morrow-Mail-${version}-${platform}.zip`, bytes = readFileSync(join(directory, name));
+  return [platform, { name, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }];
+})) }));
+const signature = sign(null, manifest, process.env.MORROW_UPDATE_SIGNING_KEY).toString('base64');
+verifyManifest(manifest, signature, version);
+writeFileSync(join(directory, 'update-manifest.json'), manifest);
+writeFileSync(join(directory, 'update-manifest.sig'), signature);
+expected.push('update-manifest.json', 'update-manifest.sig');
 const notes = `Morrow Mail ${version}
 
 Both packages are built from the same Git tag and share the same mail, AI and calendar backend.
 
-What changed since 0.5.0-alpha.1:
+What changed since 0.5.0-beta.1:
+- Desktop Settings now download a signed update, verify it before extraction, and offer Install & Restart. Saved workspace data stays in place; current operations and unsaved changes are guarded. Read-only installation folders retain the manual-download option.
+- Update packages have an Ed25519-signed manifest with pinned verification keys, exact platform/version checks and SHA-256 validation. Installation retains the previous app and rolls back failed replacement/launch operations.
+- Install this version manually once to enable future in-app updates; older builds only open release downloads. Updates require an explicit install action, not an unattended restart.
+
+Included from the previous beta:
 - Built-in Google Desktop OAuth for Gmail and Google Calendar on both platforms. Click Sign in with Google; users no longer need to enter a client ID or secret. Advanced settings still support a custom Google client. Outlook still requires a Microsoft client ID.
 - Clear browser sign-in buttons and advanced callback details. Native macOS refresh now selects the mailbox connected through the browser; Windows refreshes connections when returning to Settings without unsaved edits.
 - Paired beta publishing and alpha-to-beta update checks, retaining draft-first publication, SHA-256 verification and the ban on replacing public binaries.

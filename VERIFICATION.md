@@ -162,3 +162,11 @@ No real provider messages/calendar events were created and no paid model was con
 - The downloaded Mac app passed strict/deep signature verification and Info.plist lint. It remains ad-hoc signed and unnotarized; Windows remains unsigned.
 - Live, read-only GitHub update checks return `0.5.0-beta.1`: `0.5.0-alpha.1` reports an available update and `0.5.0-beta.1` reports no update. No mailbox, calendar or model was accessed.
 - Release notes retain Google test-user/API/verification requirements, native Settings GUI and live-account acceptance gaps, and existing feature limitations. Beta publication does not establish production readiness; existing alpha assets were not replaced.
+
+## In-app updates — 2026-09-24 (0.5.0-beta.2 candidate)
+
+- Both desktop clients expose signed download and explicit Install & Restart. Renderer requests cannot choose an executable, install directory or download URL; preparing installation requires a separate host credential on Windows. Native app termination and Electron close guards protect current operations and unsaved edits.
+- Added checks for manifest signatures/version/platform/size, HTTPS redirect restrictions, traversal/symlink/local-header ZIP rejection, replacement rollback and workspace preservation. Existing public macOS/Windows ZIPs pass the archive inspector.
+- On macOS, `npm run updater:test` passed the complete isolated flow: fixture-signed download, cancellation, protected install authorization, installer readiness, both process exits, replacement, launch of the new fixture app and preserved workspace. The first fixture incorrectly targeted a newer macOS; setting its deployment target fixed the fixture, and the updater now also checks minimum macOS before installation. This is fixture acceptance, not a live-account test.
+- The update signing private key was created outside the repository and stored in GitHub Actions secrets; only the public key is shipped. Bootstrap requires one manual install of an updater-enabled build. Existing public beta.1 assets remain unchanged.
+- Local `npm run check`: **94 tests passed**, plus the React build. SwiftUI/model/native API checks and Electron development smoke passed. CI also runs the full updater fixture on both desktop hosts before a release can publish; this includes a separate macOS incompatibility rejection check.

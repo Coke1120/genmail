@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('morrowDesktop', {
   writeState: (key, value) => state('set', key, value),
   removeState: key => state('remove', key),
   openSignIn: url => ipcRenderer.invoke('morrow:sign-in', url),
+  installUpdate: () => ipcRenderer.invoke('morrow:install-update'),
 });

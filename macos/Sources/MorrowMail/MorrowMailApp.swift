@@ -60,6 +60,7 @@ final class MorrowDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
+        if model.restartingForUpdate { model.stop(); return .terminateNow }
         if model.busy {
             let alert = NSAlert(); alert.messageText = "Wait for the current operation to finish."
             alert.informativeText = "Morrow is saving or communicating with a provider. You can quit when it finishes."

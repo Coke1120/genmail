@@ -15,6 +15,7 @@ struct NativeSettingsView: View {
     @State private var status = ""
     @State private var footerPreview: JSON = .null
     @State private var updateResult: JSON = .null
+    @State private var downloadState: JSON = .null
     @State private var includePrereleases = (Bundle.main.object(forInfoDictionaryKey: "MorrowReleaseVersion") as? String ?? "").contains("-")
     private let tabs = [("general", "General", "slider.horizontal.3"), ("mail", "Mail", "envelope"), ("learning", "Learning", "text.badge.star"), ("model", "Model", "cpu"), ("permissions", "AI Permissions", "checkmark.shield"), ("calendar", "Calendar", "calendar"), ("about", "About", "info.circle")]
     var dirty: Bool { learningDirty || values != baseline || mailOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } || calendarOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } }
@@ -56,6 +57,13 @@ struct NativeSettingsView: View {
         .onChange(of: mailOAuth) { _ in model.dirty("settings", dirty) }
         .onChange(of: calendarOAuth) { _ in model.dirty("settings", dirty) }
         .onDisappear { model.dirty("settings", false) }
+        .task(id: model.settingsTab) {
+            guard model.settingsTab == "about" else { return }
+            while !Task.isCancelled {
+                if let result = try? await model.request("/updates/status") { downloadState = result }
+                do { try await Task.sleep(nanoseconds: 1_500_000_000) } catch { return }
+            }
+        }
     }
     func initialize() {
         var next = model.state["settings"]
@@ -362,12 +370,27 @@ struct NativeSettingsView: View {
                         updateResult = .null
                         run { updateResult = try await model.request("/updates?includePrereleases=\(includePrereleases)") }
                     }
-                    Text("Checks public releases on GitHub. No mail or credentials are shared. Download and installation are manual; results are cached for one minute.").font(.caption).foregroundStyle(.secondary)
+                    Text("Checks public releases on GitHub without sharing mail or credentials. Downloaded updates are verified before you choose Install & Restart.").font(.caption).foregroundStyle(.secondary)
                     if !updateResult.isNull {
                         Text(updateResult["updateAvailable"].bool ? "Update available: \(updateResult["latestVersion"].string)" : "You’re up to date for this channel.").font(.headline)
                         Text("Installed: \(updateResult["currentVersion"].string) · Latest: \(updateResult["latestVersion"].string)\nChecked: \(dateLabel(updateResult["checkedAt"].string))").font(.caption)
                         if let url = URL(string: updateResult["url"].string) { Link("View Release & Downloads", destination: url) }
+                        if updateResult["updateAvailable"].bool && downloadState["supported"].bool && ["idle", "error"].contains(downloadState["phase"].string) {
+                            Button("Download Update") { run { downloadState = try await model.request("/updates/download", method: "POST", body: .object(["includePrereleases": .bool(includePrereleases)])) } }
+                        }
                     }
+                    if ["checking", "downloading", "verifying"].contains(downloadState["phase"].string) {
+                        ProgressView(value: downloadState["received"].number, total: max(1, downloadState["total"].number))
+                        Text(downloadState["phase"].string == "downloading" ? "Downloading update…" : "Verifying update…").font(.caption)
+                        Button("Cancel Download") { run { downloadState = try await model.request("/updates/cancel", method: "POST", body: .object([:])) } }
+                    }
+                    if downloadState["phase"].string == "ready" {
+                        Text("Version \(downloadState["version"].string) is ready to install.").font(.headline)
+                        Button("Install & Restart") { localError = ""; model.restartToInstallUpdate { localError = $0 } }.buttonStyle(.borderedProminent).disabled(dirty || !model.unsavedForms.isEmpty)
+                        if dirty || !model.unsavedForms.isEmpty { Text("Save or discard unsaved changes before restarting.").font(.caption) }
+                    }
+                    if downloadState["error"].nonempty { Text(downloadState["error"].string).foregroundStyle(.red) }
+                    if downloadState["previous"].nonempty { Text(downloadState["previous"].string).font(.caption) }
                 }.padding(8)
             }
             Divider()

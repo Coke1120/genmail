@@ -15,6 +15,7 @@ if (smokeDir) app.setPath('userData', smokeDir);
 const dataDirectory = app.getPath('userData');
 const boundsFile = join(dataDirectory, 'window.json');
 let window, child, origin, stopping = false, failed = false;
+let serviceToken, updateToken, installRequested = false, updatePrompt = false;
 const writes = new Set();
 if (!app.requestSingleInstanceLock()) app.exit(0);
 app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
@@ -30,6 +31,7 @@ async function startService() {
   const node = app.isPackaged ? join(__dirname, 'runtime', 'node.exe') : process.env.MORROW_NODE_BINARY;
   if (!node) throw new Error('Set MORROW_NODE_BINARY to a standalone Node executable for desktop development.');
   const token = randomBytes(32).toString('hex');
+  serviceToken = token; updateToken = randomBytes(32).toString('hex');
   const env = { ...process.env };
   delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.ELECTRON_RUN_AS_NODE;
   child = spawn(node, [join(backend, 'server/native.js')], { cwd: backend, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -46,7 +48,7 @@ async function startService() {
       clearTimeout(timer); child.removeListener('exit', rejectExit);
       try { const { port } = JSON.parse(line); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(); origin = `http://127.0.0.1:${port}`; accept(); } catch { reject(new Error('Invalid service response.')); }
     });
-    child.stdin.write(JSON.stringify({ token, dataDirectory }) + '\n');
+    child.stdin.write(JSON.stringify({ token, dataDirectory, parentPID: process.pid, updateToken }) + '\n');
   });
   return token;
 }
@@ -56,9 +58,18 @@ function fatal() {
   if (!smoke) dialog.showErrorBox('Morrow Mail could not continue', 'The private mail service stopped. Your saved workspace remains on this device. Close and reopen Morrow Mail.');
   stop(1);
 }
-function stop(code = 0) {
+async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
+  if (installRequested) {
+    try {
+      const result = await fetch(`${origin}/api/updates/install`, { method: 'POST', headers: { Authorization: `Bearer ${serviceToken}`, 'X-Morrow-Update': updateToken, 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(20000) });
+      if (!result.ok) throw new Error();
+    } catch {
+      dialog.showErrorBox('Update could not start', 'The existing app and your data were not replaced. Morrow will reopen; try downloading the update again.');
+      app.relaunch();
+    }
+  }
   const finish = () => {
     if (smokeDir) { try { rmSync(smokeDir, { recursive: true, force: true, maxRetries: 5 }); } catch {} }
     app.exit(code);
@@ -96,10 +107,10 @@ app.whenReady().then(async () => {
   window.webContents.setWindowOpenHandler(({ url }) => { external(url).catch(() => {}); return { action: 'deny' }; });
   window.webContents.on('will-prevent-unload', event => {
     const choice = dialog.showMessageBoxSync(window, { type: 'question', message: 'Discard unsaved changes and close?', buttons: ['Keep Editing', 'Discard'], defaultId: 0, cancelId: 0 });
-    if (choice === 1) event.preventDefault();
+    if (choice === 1) event.preventDefault(); else installRequested = false;
   });
   window.on('close', event => {
-    if (writes.size) { event.preventDefault(); dialog.showMessageBoxSync(window, { message: 'Wait for the current operation to finish.', detail: 'Morrow is saving or communicating with a provider.', buttons: ['OK'] }); return; }
+    if (writes.size) { installRequested = false; event.preventDefault(); dialog.showMessageBoxSync(window, { message: 'Wait for the current operation to finish.', detail: 'Morrow is saving or communicating with a provider.', buttons: ['OK'] }); return; }
     if (!window.isMaximized() && !window.isFullScreen()) { try { const { width, height } = window.getBounds(); writeFileSync(boundsFile, JSON.stringify({ width, height })); } catch {} }
   });
   ipcMain.on('morrow:state', (event, operation, key, value) => {
@@ -111,6 +122,17 @@ app.whenReady().then(async () => {
   ipcMain.handle('morrow:sign-in', async (event, url) => {
     if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || new URL(event.senderFrame.url).origin !== origin || !isSignInURL(url, origin)) throw new Error('Invalid sign-in request.');
     await shell.openExternal(url);
+  });
+  ipcMain.handle('morrow:install-update', async event => {
+    if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || new URL(event.senderFrame.url).origin !== origin) throw new Error('Invalid update request.');
+    if (writes.size || updatePrompt || installRequested) throw new Error('Wait for the current operation to finish.');
+    updatePrompt = true;
+    try {
+      const response = await fetch(`${origin}/api/updates/status`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok || (await response.json()).phase !== 'ready') throw new Error('Download and verify an update first.');
+      const result = await dialog.showMessageBox(window, { type: 'question', message: 'Install update and restart Morrow Mail?', detail: 'Your saved mail, accounts and settings will stay on this device. Unsaved changes must be resolved before closing.', buttons: ['Later', 'Install & Restart'], defaultId: 0, cancelId: 0 });
+      if (result.response === 1 && !writes.size) { installRequested = true; window.close(); }
+    } finally { updatePrompt = false; }
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'File', submenu: [{ label: 'Close', accelerator: 'Alt+F4', click: () => window.close() }] },

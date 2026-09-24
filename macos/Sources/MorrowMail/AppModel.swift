@@ -18,6 +18,7 @@ final class AppModel: ObservableObject {
     @Published var settingsTab = "general"
     @Published var assistantAction = "summary"
     @Published var unsavedForms = Set<String>()
+    private(set) var restartingForUpdate = false
     private var process: Process?
     private var input: Pipe?
     private var output: Pipe?
@@ -86,7 +87,7 @@ final class AppModel: ObservableObject {
             }
             try child.run()
             self.process = child; self.input = input; self.output = output
-            let config = JSON.object(["token": .string(token), "dataDirectory": .string(dataDirectory.path)])
+            let config = JSON.object(["token": .string(token), "dataDirectory": .string(dataDirectory.path), "parentPID": .number(Double(ProcessInfo.processInfo.processIdentifier)), "updateToken": .string(token)])
             var data = try JSONEncoder().encode(config); data.append(0x0a)
             try input.fileHandleForWriting.write(contentsOf: data)
             // Read asynchronously so a failed child cannot freeze the window.
@@ -125,11 +126,12 @@ final class AppModel: ObservableObject {
         if process?.isRunning == true { process?.terminate() }
         process = nil; input = nil; output = nil; baseURL = nil
     }
-    func request(_ path: String, method: String = "GET", body: JSON? = nil, mailbox: String? = nil) async throws -> JSON {
+    func request(_ path: String, method: String = "GET", body: JSON? = nil, mailbox: String? = nil, authorizeUpdate: Bool = false) async throws -> JSON {
         guard let baseURL, let url = URL(string: "/api" + path, relativeTo: baseURL)?.absoluteURL else { throw APIError("The local service is not connected.") }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if authorizeUpdate { request.setValue(token, forHTTPHeaderField: "X-Morrow-Update") }
         let owner = mailbox ?? account
         if !owner.isEmpty { request.setValue(owner, forHTTPHeaderField: "X-Genmail-Account") }
         if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
@@ -139,6 +141,20 @@ final class AppModel: ObservableObject {
         let result = try JSONDecoder().decode(JSON.self, from: data)
         guard (200...299).contains(http.statusCode) else { throw APIError(payload: result) }
         return result
+    }
+    func restartToInstallUpdate(onError: @escaping (String) -> Void) {
+        guard !busy, unsavedForms.isEmpty else { onError("Save or discard unsaved changes and wait for current operations before installing an update."); return }
+        let alert = NSAlert(); alert.messageText = "Install update and restart Morrow Mail?"
+        alert.informativeText = "Your saved mail, accounts and settings will stay on this device. The previous app will be retained if installation fails."
+        alert.addButton(withTitle: "Install & Restart"); alert.addButton(withTitle: "Later")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        perform {
+            do {
+                _ = try await self.request("/updates/install", method: "POST", body: .object([:]), authorizeUpdate: true)
+                self.restartingForUpdate = true
+                NSApp.terminate(nil)
+            } catch { onError(error.localizedDescription) }
+        }
     }
     func reload() async throws {
         guard !refreshing else { return }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0-beta.2 — 2026-09-24
+
+- In-app download, verified installation and automatic restart on macOS and Windows, with unsaved-edit/write guards.
+- Pinned Ed25519 update manifests, exact platform/version/size and SHA-256 checks, archive path validation and macOS compatibility checks.
+- Retains the previous app and restores it on failed replacement or immediate launch errors; mailbox data remains separate.
+- Requires one manual installation to enable future in-app updates. Read-only installation folders retain manual downloads; no unattended installation or privilege elevation.
+
 ## 0.5.0-beta.1 — 2026-09-24
 
 - Built-in Google Desktop OAuth for Gmail and Google Calendar in both desktop packages, with an advanced custom-client option. Microsoft still requires a client ID.
