@@ -2,7 +2,20 @@
 
 ## Rust prerelease cutover — 0.6.0-beta.1
 
-The user explicitly approved switching the desktop default to Rust and publishing a prerelease. Both builders now select Rust unless an explicit compatibility-build override requests Node. The common product version is 0.6.0-beta.1; publication is gated on all five macOS/Windows/Linux checks and signed-upgrade jobs for the release tag. The evidence below predates that tag and must not be mistaken for the new tag’s result. Ad-hoc macOS signing, unsigned Windows distribution and the listed manual/minimum-OS/live-account limitations remain disclosed.
+Rust is now the approved default desktop backend; explicit Node compatibility builds remain available. [0.6.0-beta.1](https://github.com/Coke1120/genmail/releases/tag/v0.6.0-beta.1) was published as a paired prerelease on 2026-09-25 at 05:00:07 UTC from tag commit `ebe0ccba967c180580b8ee1460ae67f58011b61b`.
+
+All five checks and the publisher in [tag CI 36094625556](https://github.com/Coke1120/genmail/actions/runs/36094625556) passed: Ubuntu/macOS/Windows Rust and Node/React checks, dependency audits and benchmarks, both actual desktop builds, native/packaged checks, original updater checks, and macOS/Windows old-installer-to-Rust upgrade/restart/backup restoration. Local release preflight also passed `npm run rust:test` (71 Rust tests and seven cross-runtime contracts), `npm run check`, the default-runtime macOS build and actual-package upgrade acceptance.
+
+All six public release assets were downloaded after publication. The pinned Ed25519 signature, both ZIP sizes/SHA-256/checksum files, safe archive paths, common 0.6.0-beta.1 version and Rust runtime metadata passed verification. Both contain bundled Google OAuth configuration and dependency notices, without a backend Node runtime or workspace database/key/recovery files. The public macOS ZIP exactly matches the CI archive and passes deep/strict ad-hoc codesign verification. The beta.2 public key, Node manifest/archive validator and original installer are unchanged.
+
+| Public archive | Bytes | SHA-256 |
+| --- | ---: | --- |
+| macOS arm64 | 9,463,109 | `8fe4f0a66b4c7f50668ac282481b4b3eb126125e47713d8108391326e2ed9b5d` |
+| Windows x64 | 166,320,673 | `a1ef99c56dc11499248f3201cb35a6222ce4d7db80a4183d81b95d53062cbca0` |
+
+The tagged service benchmarks passed every correctness check at 1k/10k/50k. Warm lexical p95 at 10k/50k was 25.21/66.28 ms on Ubuntu, 40.86/81.53 ms on macOS and 54.83/149.39 ms on Windows, within the plan's fixture budgets. These remain service-only, warm-cache fixture samples, not whole-app or arbitrary-hardware guarantees.
+
+Ad-hoc macOS signing, unsigned Windows distribution and the manual/minimum-OS/live-account limitations remain disclosed. The earlier candidate and walkthrough evidence below is historical; this prerelease does not establish stable production certification or M6 Tauri completion.
 
 ## Pre-cutover Rust candidate — 25 September 2026 (local and CI)
 

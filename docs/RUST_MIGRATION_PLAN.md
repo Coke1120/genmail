@@ -207,7 +207,7 @@ provider acceptance 先使用隔離 fixture；真實寄件、建立事件及付�
 - [x] binary rollback 保留目前 workspace，新增 schema 的 Node↔Rust 寫入及備份還原分別驗證；不自動覆寫為遷移前資料。
 - [x] 候選套件不需要系統 Node.js、不含 backend Node runtime；Windows Electron 自身的 Node runtime 仍存在。
 - [ ] 最低 OS／其他硬體、unsaved UI、中文輸入法、焦點與無障礙完成完整人工驗收；正式簽署／notarization 及真實帳戶另外驗收。
-- [ ] Mac / Windows 同 tag 的 build、packaged smoke、migration 及 updater checks 全數通過才發佈。
+- [x] 0.6.0-beta.1 的 Mac / Windows 同 tag build、packaged smoke、migration 及 updater checks 全數通過，已成對發佈 prerelease；CI 與下載資產驗證見 VERIFICATION.md。
 
 ### M6 — Windows Tauri，獨立評估與切換
 
