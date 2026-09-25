@@ -17,6 +17,18 @@ All five check jobs in [CI run 36050110233](https://github.com/Coke1120/genmail/
 
 All provider/model traffic used isolated generated fixtures, with no real send, calendar write, paid inference or owner workspace. Production cutover, signing/notarization, minimum-OS/manual UI and live-account acceptance remain explicit gates. This manual CI run does not publish a release; the packaged default remains Node.
 
+### Native Rust walkthrough — 25 September 2026
+
+Used an isolated copy of the actual macOS Rust candidate (service SHA `1bc1e1c8925f911e362ad855f0b2a9ee07c2ad0337f6a207c6c3e13eaf82d98b`), with a unique bundle identity and temporary workspace. Two fictional accounts contained 65 messages each with colliding provider IDs; sync and AI were disabled.
+
+- Passed through the native UI: 50/15-row inbox paging, full Traditional Chinese message text, unread badge updates, combined 130-message view and distinct owner labels. Opening an unread message refreshed the revision-bound list to page one while retaining the reader.
+- `subject:發票` returned 26 matches across both accounts. An empty search operator showed validation. The second account's result opened its own body, and Reply locked From to that account.
+- The unsaved-draft warning and Keep Editing retained content. Review displayed exact From/To/Cc/Bcc/subject; Send was cancelled. Saving created one draft under the second account. After quitting/reopening the App, its Chinese body, recipients and owner remained intact.
+- After fixture shutdown, Node reopened/decrypted the workspace and verified both connections, all 130 inbox rows, read flags, the owned draft and no delivery attempts. The temporary bundle/workspace were then removed.
+- **Blocked:** opening Settings caused the automation service to exit; reset/reconnect failed again. Both new crash reports identify `SkyComputerUseService`, `EXC_BREAKPOINT` / `SIGTRAP`, with `_assertionFailure` and `Array.remove(at:)` frames. Morrow and its Rust child remained running; a one-second sample found the UI main thread waiting in the AppKit event loop, and the private service still returned 401 to an unauthenticated health request. This establishes an automation crash, not successful Settings or backup UI acceptance.
+
+This walkthrough is partial. Settings/online-backup controls, all six sort modes, IME composition, Windows UI and live providers were not completed in this pass. Chinese text was pasted, not entered with an IME. Earlier automated backup/sort/platform checks remain separate evidence. No product code changed; the local report and process sample are under ignored `test-results/rust-walkthrough-20260925/`.
+
 ### M0/M1 historical baseline and read-worker comparison
 
 The following was measured before the complete service port and is retained as a data-flow baseline. It must not be used as a direct RSS ratio against the standalone Rust service: the Node sample includes its driver.
