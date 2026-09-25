@@ -41,6 +41,7 @@ pub struct Runtime {
     pub port: u16,
     token: String,
     pub(crate) cli_token: String,
+    pub(crate) cli_workspace: String,
     pub update_token: String,
     pub page_secret: [u8; 32],
 }
@@ -130,6 +131,7 @@ impl App {
             port,
             token,
             cli_token: hex_token()?,
+            cli_workspace: crate::cli::workspace_id(directory)?,
             update_token,
             page_secret: crate::store::random_bytes()?,
         })))
@@ -407,6 +409,7 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
         && ["google", "microsoft"].contains(&route[1])
         && ["callback", "authorize"].contains(&route[2]);
     let cli_route = route == ["cli"] || route == ["cli", "health"];
+    let cli_health = parts.method == Method::GET && route == ["cli", "health"];
     let cli_auth = cli_route
         && validation::same_secret(
             header("authorization"),
@@ -414,6 +417,7 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
         );
     if !callback
         && !cli_auth
+        && !cli_health
         && !app.0.token.is_empty()
         && !validation::same_secret(header("authorization"), &format!("Bearer {}", app.0.token))
     {
@@ -462,19 +466,6 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
                 ]
                 | ["account", "disconnect"]
         );
-    let config = app.settings().await?;
-    let supplied = header("x-genmail-account");
-    if bound && !valid_account(&config, supplied) && !(route == ["sync"] && supplied == "all") {
-        return Err(Error::conflict(
-            "Choose a connected mailbox before continuing. This account may have been disconnected.",
-        ));
-    }
-    let owner = if supplied == "all" || valid_account(&config, supplied) {
-        supplied.to_owned()
-    } else {
-        active_account(&config)
-    };
-    let paged = header("x-morrow-view") == "paged";
     let bytes = tokio::time::timeout(Duration::from_secs(15), to_bytes(body, 256 * 1024))
         .await
         .map_err(|_| Error::new(408, "Request body timed out."))?
@@ -496,10 +487,9 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
     }
     if cli_route {
         return match (parts.method.as_str(), route.as_slice()) {
-            ("GET", ["cli", "health"]) => Ok(Json(
-                json!({"service":"morrow-cli","version":1,"pid":std::process::id()}),
-            )
-            .into_response()),
+            ("GET", ["cli", "health"]) => {
+                Ok(Json(crate::cli::health(&app, string(&query, "nonce"))?).into_response())
+            }
             ("POST", ["cli"]) => {
                 let command = serde_json::from_value(body)
                     .map_err(|_| Error::invalid("Invalid CLI command."))?;
@@ -508,6 +498,19 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
             _ => Err(Error::new(404, "Not found.")),
         };
     }
+    let config = app.settings().await?;
+    let supplied = header("x-genmail-account");
+    if bound && !valid_account(&config, supplied) && !(route == ["sync"] && supplied == "all") {
+        return Err(Error::conflict(
+            "Choose a connected mailbox before continuing. This account may have been disconnected.",
+        ));
+    }
+    let owner = if supplied == "all" || valid_account(&config, supplied) {
+        supplied.to_owned()
+    } else {
+        active_account(&config)
+    };
+    let paged = header("x-morrow-view") == "paged";
     let context = Context {
         method: parts.method,
         path,
@@ -849,7 +852,7 @@ fn assert_handler_send(app: App, request: axum::http::Request<Body>) {
     check(handle_inner(app, request));
 }
 
-fn hex_token() -> Result<String> {
+pub(crate) fn hex_token() -> Result<String> {
     Ok(crate::store::random_bytes::<32>()?
         .iter()
         .map(|b| format!("{b:02x}"))

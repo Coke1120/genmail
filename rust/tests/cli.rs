@@ -195,7 +195,7 @@ fn executable_closed_and_running_app_share_owned_data_and_reviewed_send() {
     fixture.cli(&["accounts"], None, 3); // No live endpoint: standalone must still honor the writer lock.
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scoped_token_origin_input_limits_and_stale_endpoint() {
     let fixture = Fixture::new();
     let mut server = Server::start(&fixture.0);
@@ -296,6 +296,24 @@ async fn scoped_token_origin_input_limits_and_stale_endpoint() {
             0o600
         );
     }
+    let captured_health: Value = client
+        .get(format!("{base}/api/cli/health?nonce={}", "c".repeat(64)))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(captured_health["proof"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        client
+            .get(format!("{base}/api/cli/health"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
     let mut wrong = endpoint.clone();
     wrong["token"] = "0".repeat(64).into();
     fs::write(
@@ -303,7 +321,7 @@ async fn scoped_token_origin_input_limits_and_stale_endpoint() {
         serde_json::to_vec(&wrong).unwrap(),
     )
     .unwrap();
-    assert_eq!(fixture.cli(&["accounts"], None, 1)["status"], 401);
+    assert_eq!(fixture.cli(&["accounts"], None, 3)["status"], 409);
     fs::write(
         fixture.0.join("cli.json"),
         serde_json::to_vec(&endpoint).unwrap(),
@@ -324,6 +342,24 @@ async fn scoped_token_origin_input_limits_and_stale_endpoint() {
         )
         .unwrap();
     }
+    let copy = Fixture::new();
+    morrow_search::store::private_file(
+        &copy.0.join("cli.json"),
+        &serde_json::to_vec(&endpoint).unwrap(),
+    )
+    .unwrap();
+    morrow_search::store::private(&copy.0.join("cli.json"), false).unwrap();
+    let saved = copy.cli(
+        &["draft", "--account", "demo", "--input", "-"],
+        Some(&json!({"to":"copy@example.invalid","body":"Only in copied workspace"})),
+        0,
+    );
+    let id = saved["data"]["message"]["id"].as_str().unwrap();
+    assert_eq!(
+        fixture.cli(&["read", "--account", "demo", "--id", id], None, 1)["status"],
+        404
+    );
+    copy.cli(&["read", "--account", "demo", "--id", id], None, 0);
     server.stop();
     morrow_search::store::private_file(
         &fixture.0.join("cli.json"),
@@ -332,6 +368,44 @@ async fn scoped_token_origin_input_limits_and_stale_endpoint() {
     .unwrap();
     morrow_search::store::private(&fixture.0.join("cli.json"), false).unwrap();
     fixture.cli(&["accounts"], None, 0);
+    // A process reusing a stale port must not receive the bearer or command contents.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut impostor = endpoint.clone();
+    impostor["port"] = listener.local_addr().unwrap().port().into();
+    fs::write(
+        fixture.0.join("cli.json"),
+        serde_json::to_vec(&impostor).unwrap(),
+    )
+    .unwrap();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received = observed.clone();
+    let router =
+        axum::Router::new().fallback(move |request: axum::http::Request<axum::body::Body>| {
+            let received = received.clone();
+            let captured = captured_health.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let body = axum::body::to_bytes(body, 256 * 1024).await.unwrap();
+                received.lock().unwrap().push((parts.headers, body));
+                axum::Json(captured)
+            }
+        });
+    let fake = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    fixture.cli(
+        &["draft", "--account", "demo", "--input", "-"],
+        Some(&json!({"body":"Must not reach impostor"})),
+        3,
+    );
+    {
+        let requests = observed.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].0.contains_key("authorization"));
+        assert!(requests[0].1.is_empty());
+    }
+    fake.abort();
+    fs::remove_file(fixture.0.join("cli.json")).unwrap();
     fixture.cli(&["accounts", "--confirm"], None, 2);
     fixture.cli(&["list", "--account", "all", "--page", "0"], None, 2);
 }

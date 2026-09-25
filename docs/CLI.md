@@ -32,7 +32,7 @@ morrow accounts
 
 Every command accepts `--workspace /absolute/path`. Otherwise it uses `MORROW_DATA_DIR`, then the normal desktop workspace: `~/Library/Application Support/Morrow Mail` on macOS or `%APPDATA%\Morrow Mail` on Windows. Other platforms require an explicit workspace. An existing `genmail.sqlite` and `encryption.key` are required; set up accounts in the app first.
 
-When the app is running, the CLI attaches through an owner-private `cli.json` endpoint with a separate token limited to CLI commands. When the app is closed, it opens the same workspace with the normal exclusive writer lock. It never starts background sync, scheduled AI or a persistent server. An old app without CLI support must be closed before standalone use. A busy or unresponsive workspace returns an error; the CLI never bypasses the lock.
+When the app is running, the CLI attaches through an owner-private `cli.json` endpoint with a separate token limited to CLI commands. Before transmitting that token or mail, it verifies a fresh HMAC challenge bound to the canonical workspace and service PID. A copied workspace ignores the original workspace’s endpoint. When the app is closed, it opens the same workspace with the normal exclusive writer lock. It never starts background sync, scheduled AI or a persistent server. An old app without CLI support must be closed before standalone use. A busy or unresponsive workspace returns an error; the CLI never bypasses the lock.
 
 ## Read cached mail
 

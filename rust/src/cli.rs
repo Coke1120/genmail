@@ -11,6 +11,7 @@ use axum::{
     body::to_bytes,
     http::{HeaderMap, Method},
 };
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -368,6 +369,32 @@ struct Endpoint {
     port: u16,
     pid: u32,
     token: String,
+    workspace: String,
+}
+pub(crate) fn workspace_id(directory: &Path) -> Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(directory.canonicalize()?.as_os_str().as_encoded_bytes())
+    ))
+}
+fn proof(token: &str, workspace: &str, pid: u32, nonce: &str) -> Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC key");
+    mac.update(&serde_json::to_vec(&json!([
+        "morrow-cli-health-v1",
+        workspace,
+        pid,
+        nonce
+    ]))?);
+    Ok(format!("{:x}", mac.finalize().into_bytes()))
+}
+pub(crate) fn health(app: &App, nonce: &str) -> Result<Value> {
+    if nonce.len() != 64 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::invalid("A fresh 32-byte CLI challenge is required."));
+    }
+    Ok(
+        json!({"service":"morrow-cli","version":1,"pid":std::process::id(),
+        "workspace":app.0.cli_workspace,"proof":proof(&app.0.cli_token,&app.0.cli_workspace,std::process::id(),nonce)?}),
+    )
 }
 pub struct PublishedEndpoint(PathBuf);
 impl Drop for PublishedEndpoint {
@@ -389,6 +416,7 @@ pub fn publish(directory: &Path, app: &App) -> Result<PublishedEndpoint> {
             port: app.0.port,
             pid: std::process::id(),
             token: app.0.cli_token.clone(),
+            workspace: app.0.cli_workspace.clone(),
         })?,
     )?;
     store::private(&path, false)?;
@@ -429,6 +457,10 @@ fn read_endpoint(directory: &Path) -> Result<Option<Endpoint>> {
         || !endpoint.token.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err(Error::invalid("Invalid private CLI endpoint."));
+    }
+    if endpoint.workspace != workspace_id(directory)? {
+        // A copied workspace must never attach to the source workspace's service.
+        return Ok(None);
     }
     Ok(Some(endpoint))
 }
@@ -474,18 +506,24 @@ async fn run(directory: PathBuf, command: Command) -> Result<Value> {
             .build()
             .map_err(|_| Error::new(500, "Could not initialize CLI networking."))?;
         let url = format!("http://127.0.0.1:{}/api/cli", endpoint.port);
+        let nonce = service::hex_token()?;
         match client
-            .get(format!("{url}/health"))
-            .bearer_auth(&endpoint.token)
+            .get(format!("{url}/health?nonce={nonce}"))
             .timeout(Duration::from_secs(3))
             .send()
             .await
         {
             Ok(response) => {
                 let health = response_json(response).await?;
-                if health != json!({"service":"morrow-cli","version":1,"pid":endpoint.pid}) {
+                let expected = proof(&endpoint.token, &endpoint.workspace, endpoint.pid, &nonce)?;
+                if health["service"] != "morrow-cli"
+                    || health["version"] != 1
+                    || health["pid"] != endpoint.pid
+                    || health["workspace"] != endpoint.workspace
+                    || !validation::same_secret(string(&health, "proof"), &expected)
+                {
                     return Err(Error::conflict(
-                        "CLI service identity changed. Retry after reopening Morrow Mail.",
+                        "CLI service identity changed. No command was sent. Reopen Morrow Mail.",
                     ));
                 }
                 let response = client.post(url).bearer_auth(endpoint.token).json(&command).send().await.map_err(|_| Error::new(502,"CLI request interrupted. Do not retry a send automatically; inspect its saved draft or Sent record."))?;
