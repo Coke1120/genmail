@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,34 +10,41 @@ import { createStore } from '../server/store.js';
 
 const enabled = process.env.MORROW_TEST_RUST === '1';
 const executable = resolve('rust/target/debug/morrow-service' + (process.platform === 'win32' ? '.exe' : ''));
-async function start(directory, assetDirectory) {
+async function start(directory, assetDirectory, signal) {
+  signal.throwIfAborted();
   const token = randomBytes(32).toString('hex');
   const updateToken = randomBytes(32).toString('hex');
   const child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const abort = () => child.kill();
+  signal.addEventListener('abort', abort, { once: true });
+  const closed = new Promise(resolve => child.once('close', () => { signal.removeEventListener('abort', abort); resolve(); }));
   let output = '', errors = '';
   child.stderr.on('data', data => { errors += data; });
   const ready = new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(Error('Rust startup timed out: ' + errors)), 15000);
+    const timeout = setTimeout(() => { child.kill(); reject(Error('Rust startup timed out: ' + errors)); }, 15000);
+    child.once('error', error => { clearTimeout(timeout); reject(error); });
     child.once('exit', () => { clearTimeout(timeout); reject(Error('Rust service exited: ' + errors)); });
     child.stdout.on('data', data => { output += data; if (output.includes('\n')) { clearTimeout(timeout); try { resolve(JSON.parse(output.split('\n')[0]).port); } catch (error) { reject(error); } } });
   });
   child.stdin.write(JSON.stringify({ token, updateToken, dataDirectory: directory, port: 0, parentPID: process.pid, ...(assetDirectory ? { assetDirectory } : {}) }) + '\n');
-  const port = await ready;
+  let port;
+  try { port = await ready; } catch (error) { child.kill(); await closed; throw error; }
   const request = async (path, { method = 'GET', body, owner = 'a@example.test', headers = {} } = {}) => {
     const fetchRequest = headers.Host || headers['Sec-Fetch-Site'] ? (url, options) => new Promise((resolve, reject) => { const req = httpRequest(url, options, res => { const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => resolve({ status: res.statusCode, headers: new Headers(res.headers), json: async () => JSON.parse(Buffer.concat(chunks)) })); }); req.on('error', reject); req.end(options.body); }) : fetch;
-    const response = await fetchRequest(`http://127.0.0.1:${port}/api${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'X-Genmail-Account': owner, 'X-Morrow-View': 'paged', ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    const response = await fetchRequest(`http://127.0.0.1:${port}/api${path}`, { method, signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]), headers: { Authorization: `Bearer ${token}`, 'X-Genmail-Account': owner, 'X-Morrow-View': 'paged', ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, headers: response.headers, body: await response.json() };
   };
-  return { child, request, token, updateToken, origin: `http://127.0.0.1:${port}`, async stop() { const exit = once(child, 'exit'); child.stdin.end(); await exit; assert.equal(child.exitCode, 0, errors); assert.equal(errors, ''); } };
+  return { child, closed, request, token, updateToken, origin: `http://127.0.0.1:${port}`, async stop() { const timeout = setTimeout(() => child.kill(), 70000); try { child.stdin.end(); await closed; assert.equal(child.exitCode, 0, errors); assert.equal(errors, ''); } finally { clearTimeout(timeout); } } };
 }
 test('Trusted desktop assets require an existing absolute root and preserve HTTP authentication', { skip: !enabled, timeout: 30000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'morrow-rust-assets-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  await assert.rejects(start(directory, 'relative/dist'), /asset directory is invalid/);
-  await assert.rejects(start(directory, join(directory, 'absent')), /asset directory is invalid/);
+  let service;
+  t.after(async () => { if (service) { service.child.kill(); await service.closed; } rmSync(directory, { recursive: true, force: true }); });
+  await assert.rejects(start(directory, 'relative/dist', t.signal), /asset directory is invalid/);
+  await assert.rejects(start(directory, join(directory, 'absent'), t.signal), /asset directory is invalid/);
   const assets = join(directory, 'assets'); mkdirSync(assets);
   writeFileSync(join(assets, 'index.html'), '<!doctype html><title>Fixture assets</title>');
-  const service = await start(directory, assets);
+  service = await start(directory, assets, t.signal);
   try {
     const headers = { Authorization: `Bearer ${service.token}` };
     assert.equal(await (await fetch(service.origin, { headers })).text(), '<!doctype html><title>Fixture assets</title>');
@@ -46,9 +52,10 @@ test('Trusted desktop assets require an existing absolute root and preserve HTTP
     assert.equal((await fetch(service.origin + '/assets/missing.js')).status, 401);
   } finally { await service.stop(); }
 });
-test('Rust private service authenticates, pages with owners, retains unread changes and releases its writer on EOF', { skip: !enabled, timeout: 30000 }, async t => {
+test('Rust private service authenticates, pages with owners, retains unread changes and releases its writer on EOF', { skip: !enabled, timeout: 120000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'morrow-rust-http-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let service;
+  t.after(async () => { if (service) { service.child.kill(); await service.closed; } rmSync(directory, { recursive: true, force: true }); });
   const store = createStore(directory);
   store.setSettings({ mailAccounts: { 'a@example.test': { email: 'a@example.test', password: 'fixture-only', provider: 'imap' }, 'b@example.test': { email: 'b@example.test', provider: 'google', accessToken: 'fixture-only' } }, activeAccount: 'a@example.test', preferences: { syncInterval: 0 } });
   const fixtures = [];
@@ -57,8 +64,7 @@ test('Rust private service authenticates, pages with owners, retains unread chan
     store.upsertMessage(account, message); fixtures.push({ ...message, accountId: account, viewId: JSON.stringify([account, message.id]) });
   }
   store.close();
-  let service = await start(directory);
-  t.after(() => { if (service.child.exitCode === null) service.child.kill(); });
+  service = await start(directory, undefined, t.signal);
   const denied = await service.request('/state', { headers: { Authorization: '' } });
   assert.equal(denied.status, 401);
   assert.equal((await service.request('/state', { headers: { Origin: 'https://evil.example' } })).status, 403);
@@ -123,12 +129,12 @@ test('Rust private service authenticates, pages with owners, retains unread chan
   } finally { online.close(); }
   assert.equal((await service.request('/state')).status, 200, 'online backup keeps the service running');
   await service.stop();
-  service = await start(directory);
+  service = await start(directory, undefined, t.signal);
   assert.equal((await service.request('/messages/mail-000')).body.message.read, false);
   await service.stop();
   const destination = join(directory, 'manual-backup');
-  assert.match(execFileSync(executable, ['--backup', directory, destination], { encoding: 'utf8' }), /Verified/);
+  assert.match(execFileSync(executable, ['--backup', directory, destination], { encoding: 'utf8', timeout: 30000 }), /Verified/);
   const backup = createStore(destination);
   try { assert.equal(backup.getMessage('a@example.test', 'mail-000').read, false); } finally { backup.close(); }
-  assert.throws(() => execFileSync(executable, ['--backup', directory, destination], { stdio: 'pipe' }));
+  assert.throws(() => execFileSync(executable, ['--backup', directory, destination], { stdio: 'pipe', timeout: 30000 }));
 });

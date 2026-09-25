@@ -1,6 +1,6 @@
 # Agent CLI
 
-Included in desktop packages from **v0.6.0-beta.2**. The CLI is part of the existing Rust service binary; no separate daemon or Node installation is required at runtime. Earlier downloads do not include it.
+Included in desktop packages from **v0.6.0-beta.3**. The CLI is part of the existing Rust service binary; no separate daemon or Node installation is required at runtime. Earlier downloads do not include it.
 
 ## Run
 
