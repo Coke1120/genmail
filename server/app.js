@@ -149,7 +149,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
       revision: store.revision(), demoStats: stats.demo, mailPage: page ? { ...page, messages: undefined } : undefined,
       messages: page ? page.messages : view === 'all' ? Object.keys(accounts).flatMap(rows).sort((a, b) => b.date.localeCompare(a.date) || a.viewId.localeCompare(b.viewId)) : rows(view),
       settings: {
-        oauthClients: { google: { configured: !!googleOAuth } },
+        oauthClients: { google: { configured: !!googleOAuth }, microsoft: { configured: true } },
         mail: safeMail(mail),
         ai: { configured: !!(ai.baseUrl && ai.model), baseUrl: ai.baseUrl || 'http://127.0.0.1:11434/v1', model: ai.model || '', hasApiKey: !!ai.apiKey, temperature: ai.temperature ?? 0.3, maxTokens: ai.maxTokens ?? 1200 },
         policy: resolvePolicy(config.policy), preferences, footer: preferencesFooter(preferences), calendars: calendarState(config),

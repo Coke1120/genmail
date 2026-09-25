@@ -17,6 +17,9 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, io::Read, path::Path, sync::LazyLock};
 use tokio::sync::Mutex;
 
+// Public desktop application ID; shared with the Node compatibility service.
+pub const MICROSOFT_CLIENT_ID: &str = include_str!("../../shared/microsoft-client-id.txt");
+
 #[derive(Default)]
 pub struct OAuthState {
     pending: Mutex<HashMap<String, Attempt>>,
@@ -75,7 +78,13 @@ pub fn credentials(provider: &str, body: &Value, google: Option<&Value>) -> Resu
     if body["useDefaultClient"] != true {
         return Ok(body.clone());
     }
-    let google = google.filter(|_| provider == "google").ok_or_else(|| {
+    let microsoft = json!({"clientId": MICROSOFT_CLIENT_ID.trim()});
+    let client = match provider {
+        "microsoft" => Some(&microsoft),
+        "google" => google,
+        _ => None,
+    }
+    .ok_or_else(|| {
         Error::invalid(
             "Built-in sign-in is not configured for this provider. Use your own OAuth client.",
         )
@@ -91,7 +100,7 @@ pub fn credentials(provider: &str, body: &Value, google: Option<&Value>) -> Resu
             "Choose either the built-in OAuth client or your own credentials.",
         ));
     }
-    Ok(merge(body.clone(), google))
+    Ok(merge(body.clone(), client))
 }
 fn cookie_name(provider: &str, calendar: bool) -> String {
     if calendar {
@@ -151,7 +160,7 @@ async fn start(app: &App, ctx: &Context, provider: &str, calendar: bool) -> Resu
             .is_some_and(|v| !v.is_null() && v != "")
         {
             &credentials["clientSecret"]
-        } else if existing["clientId"] == id {
+        } else if credentials["useDefaultClient"] != true && existing["clientId"] == id {
             &existing["clientSecret"]
         } else {
             &Value::Null

@@ -28,14 +28,13 @@ writeFileSync(join(directory, 'update-manifest.sig'), signature);
 expected.push('update-manifest.json', 'update-manifest.sig');
 const notes = `Morrow Mail ${version}
 
-Agent CLI for the Rust-backed desktop app. Both packages are built from this same Git tag and pass the paired checks before publication.
+Built-in Microsoft sign-in for Outlook mail and Calendar. Both packages are built from this same Git tag and pass the paired checks before publication.
 
-What changed since 0.6.0-beta.1:
-- The bundled morrow-service CLI provides JSON accounts, cached mail listing/search/reading, owned drafts, complete send review and explicitly confirmed sending for local agents.
-- It connects to the running app or opens the existing workspace independently while the app is closed. Exclusive ownership prevents two database writers; cached reads do not mark messages read, fetch provider mail or trigger AI.
-- Sending requires an explicit account and confirmation of the reviewed content. Draft/sender/connection changes invalidate review; To/Cc/Bcc, footer, uncertain-delivery records and original request IDs are preserved. No automatic resend.
-- App discovery is bound to the canonical workspace and verifies a fresh service proof before transmitting a CLI token or message, including copied-workspace and stale-port protection. The CLI token only authorizes mail commands.
-- macOS remains fully native SwiftUI; Windows remains React/Electron. Rust is still the default service on both platforms.
+What changed since 0.6.0-beta.3:
+- Click Microsoft sign-in to authorize in your browser, without entering a client ID, secret or JSON. The publisher's public desktop application ID is shared by the Rust service and Node compatibility service.
+- Both native SwiftUI on macOS and React/Electron on Windows support default mail and calendar sign-in, with separate grants and an Advanced option for custom registrations.
+- PKCE, state, browser-bound callbacks and account isolation are retained. The built-in public client never reuses a saved custom client secret.
+- Rust remains the default backend; the attached/standalone agent CLI and existing workspace/update protections are retained.
 
 CLI quick start:
 - macOS: '/Applications/Morrow Mail.app/Contents/Resources/morrow-service' cli --help
@@ -44,13 +43,13 @@ CLI quick start:
 - Configure accounts in the app first. External agents with workspace access are not restricted by the in-app AI context checkboxes; trust the agent and authorize each delivery. No CLI attachments, account setup, implicit sync or automatic retries.
 
 Updating:
-- Versions 0.5.0-beta.2 and 0.6.0-beta.1 can download this release through Settings > About > Check for updates. Save or discard edits before Install & Restart. Earlier versions can install the package manually.
+- Versions 0.5.0-beta.2 and 0.6.0-beta.1 or later can download this release through Settings > About > Check for updates. Save or discard edits before Install & Restart. Earlier versions can install the package manually.
 - Keep a verified workspace backup and close the old app before opening the new one. The workspace stays separate from the app; binary rollback never silently restores an older database over current data.
 - The signed manifest, pinned Ed25519 key, exact platform/version checks and SHA-256 validation remain unchanged. Read-only installation directories retain the manual-download option.
 
 OAuth setup:
 - Built-in Google Desktop OAuth remains available for Gmail and Google Calendar. Google Cloud API enablement, test-user access and provider verification remain publisher responsibilities; bundling the registration does not remove Testing restrictions.
-- Outlook still requires an Application (client) ID from a Microsoft Entra Mobile and desktop app registration. No Google-style JSON or client secret is required. Mail and Calendar have separate localhost callback paths; see README.md.
+- Outlook mail and Calendar now use the bundled public Microsoft desktop registration by default; no user-supplied client ID, JSON or secret is required. Custom registrations remain available under Advanced. Organization policies may require administrator approval. Live Microsoft consent and Entra registration acceptance remain unverified; fixture checks do not establish provider approval.
 - Bundled desktop app identifiers are extractable and are not user credentials. No mailbox tokens or private update signing key are shipped.
 
 Packages:

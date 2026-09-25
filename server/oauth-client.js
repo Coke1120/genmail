@@ -1,5 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 
+// Public desktop application ID; shared with the compiled Rust service.
+export const microsoftClientId = readFileSync(new URL('../shared/microsoft-client-id.txt', import.meta.url), 'utf8').trim();
+
 const bundledFile = new URL('../google-oauth.json', import.meta.url);
 
 export function parseGoogleOAuth(source) {
@@ -20,7 +23,8 @@ export function bundledGoogleOAuth() {
 export function oauthCredentials(provider, body, googleClient) {
   if (body?.useDefaultClient !== undefined && typeof body.useDefaultClient !== 'boolean') throw Object.assign(new Error('Choose a valid OAuth client option.'), { status: 400 });
   if (!body?.useDefaultClient) return body || {};
-  if (provider !== 'google' || !googleClient) throw Object.assign(new Error('Built-in sign-in is not configured for this provider. Use your own OAuth client.'), { status: 400 });
+  const client = provider === 'microsoft' ? { clientId: microsoftClientId } : provider === 'google' ? googleClient : null;
+  if (!client) throw Object.assign(new Error('Built-in sign-in is not configured for this provider. Use your own OAuth client.'), { status: 400 });
   if (body.clientId || body.clientSecret) throw Object.assign(new Error('Choose either the built-in OAuth client or your own credentials.'), { status: 400 });
-  return { ...body, ...googleClient };
+  return { ...body, ...client };
 }

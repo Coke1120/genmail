@@ -102,7 +102,7 @@ export function registerCalendarRoutes(app, { store, port, appUrl, services = {}
         calendars.push(...result.map(calendar => ({ ...calendar, provider })));
       } catch (error) { errors.push({ provider, message: error.status ? error.message : 'Could not load calendars.' }); }
     }));
-    res.json({ connections: calendarState(store.getSettings()).map(connection => ({ ...connection, hasDefaultClient: connection.provider === 'google' && !!googleOAuth, redirectUri: `http://localhost:${port}/api/calendar-oauth/${connection.provider}/callback` })), calendars, errors });
+    res.json({ connections: calendarState(store.getSettings()).map(connection => ({ ...connection, hasDefaultClient: connection.provider === 'microsoft' || (connection.provider === 'google' && !!googleOAuth), redirectUri: `http://localhost:${port}/api/calendar-oauth/${connection.provider}/callback` })), calendars, errors });
   });
 
   app.post('/api/calendars/:provider/connect', (req, res) => {
@@ -112,7 +112,7 @@ export function registerCalendarRoutes(app, { store, port, appUrl, services = {}
     const config = { clientId: text(credentials.clientId, 'OAuth client ID', 1024).trim() };
     if (/[\r\n]/.test(config.clientId)) fail('OAuth client ID must be a single line.');
     const existing = getConnection(provider);
-    const secret = credentials.clientSecret || (existing?.clientId === config.clientId ? existing.clientSecret : '');
+    const secret = credentials.clientSecret || (!credentials.useDefaultClient && existing?.clientId === config.clientId ? existing.clientSecret : '');
     if (secret) {
       config.clientSecret = text(secret, 'Client secret', 4096).trim();
       if (/[\r\n]/.test(config.clientSecret)) fail('Client secret must be a single line.');

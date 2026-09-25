@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseGoogleOAuth, oauthCredentials } from '../server/oauth-client.js';
+import { parseGoogleOAuth, oauthCredentials, microsoftClientId } from '../server/oauth-client.js';
 import { bundleOAuth } from '../scripts/bundle-oauth.js';
 
 test('desktop OAuth packaging validates credentials, strips unrelated data and requires explicit default selection', t => {
@@ -17,9 +17,11 @@ test('desktop OAuth packaging validates credentials, strips unrelated data and r
   assert.deepEqual(Object.keys(JSON.parse(packaged).installed).sort(), ['client_id', 'client_secret']);
   assert.doesNotMatch(packaged, /must-not-ship|unused|untrusted/);
   assert.deepEqual(oauthCredentials('google', { useDefaultClient: true, organize: true }, credentials), { useDefaultClient: true, organize: true, ...credentials });
+  assert.match(microsoftClientId, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+  assert.deepEqual(oauthCredentials('microsoft', { useDefaultClient: true, organize: true }, credentials), { useDefaultClient: true, organize: true, clientId: microsoftClientId });
   const custom = { clientId: 'custom', clientSecret: 'custom-secret' };
   assert.equal(oauthCredentials('google', custom, credentials), custom);
-  for (const [provider, body, client] of [['google', { useDefaultClient: true }, null], ['microsoft', { useDefaultClient: true }, credentials], ['google', { useDefaultClient: true, clientId: 'custom' }, credentials], ['google', { useDefaultClient: true, clientSecret: 'custom-secret' }, credentials], ['google', { useDefaultClient: 'true' }, credentials]]) assert.throws(() => oauthCredentials(provider, body, client), { status: 400 });
+  for (const [provider, body, client] of [['google', { useDefaultClient: true }, null], ['microsoft', { useDefaultClient: true, clientSecret: 'custom-secret' }, credentials], ['google', { useDefaultClient: true, clientId: 'custom' }, credentials], ['google', { useDefaultClient: true, clientSecret: 'custom-secret' }, credentials], ['google', { useDefaultClient: 'true' }, credentials]]) assert.throws(() => oauthCredentials(provider, body, client), { status: 400 });
   for (const invalid of ['{bad-json', 'null', JSON.stringify({ web: JSON.parse(input).installed }), JSON.stringify({ installed: { client_id: 'invalid', client_secret: 'sensitive-value' } }), JSON.stringify({ installed: { client_id: credentials.clientId, client_secret: 'secret\nvalue' } }), ' '.repeat(32769)]) assert.throws(() => parseGoogleOAuth(invalid), { message: 'Use a valid Google Desktop app OAuth JSON file.' });
   assert.throws(() => bundleOAuth(directory, { MORROW_REQUIRE_GOOGLE_OAUTH: '1' }), /requires a Google Desktop/);
   assert.throws(() => bundleOAuth(directory, { MORROW_GOOGLE_OAUTH_FILE: join(directory, 'missing.json') }), /Could not read/);

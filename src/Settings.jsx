@@ -44,9 +44,9 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
   const [tab, setTab] = useState(TABS.some(([id]) => id === initialTab) ? initialTab : 'general');
   const [provider, setProvider] = useState(savedMail.configured ? savedMail.provider || 'imap' : 'google');
   const [oauth, setOauth] = useState({ google: { clientId: '', clientSecret: '' }, microsoft: { clientId: '' } });
-  const [customGoogleClient, setCustomGoogleClient] = useState(false);
-  const hasDefaultGoogleClient = !!state.settings.oauthClients?.google?.configured;
-  const useDefaultGoogleClient = provider === 'google' && hasDefaultGoogleClient && !customGoogleClient;
+  const [customClients, setCustomClients] = useState({});
+  const hasDefaultClient = !!state.settings.oauthClients?.[provider]?.configured;
+  const useDefaultClient = hasDefaultClient && !customClients[provider];
   const [busy, setBusy] = useState('');
   const [importOptions, setImportOptions] = useState({ months: 3, inbox: true, sent: true });
   const [searchDirty, setSearchDirty] = useState(false);
@@ -326,23 +326,23 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         </div>
         {provider !== 'imap' ? <form onSubmit={(event) => {
           event.preventDefault();
-          save(`oauth/${provider}/start`, { ...(useDefaultGoogleClient ? { useDefaultClient: true, organize: !!oauth.google.organize } : oauth[provider]), importOptions }, 'oauth');
+          save(`oauth/${provider}/start`, { ...(useDefaultClient ? { useDefaultClient: true, organize: !!oauth[provider].organize } : oauth[provider]), importOptions }, 'oauth');
         }}>
           <fieldset className="settings-fields" disabled={operationBusy}>
             <legend className="settings-section-title">Connect {provider === 'google' ? 'your Gmail' : 'your Microsoft mailbox'}.</legend>
             <p className="settings-intro">Use the sign-in button below to open {provider === 'google' ? 'Google' : 'Microsoft'} in your browser. Keep Morrow open while you approve access, then return to the app. Morrow imports your chosen history in the background.</p>
-            {useDefaultGoogleClient ? <p className="settings-help">Google sign-in is ready. No client ID or secret is needed. If Google limits access to test users, the publisher must add your account or complete app verification.</p> : <div className="settings-oauth-setup">
+            {useDefaultClient ? <p className="settings-help">{provider === 'google' ? 'Google sign-in is ready. No client ID or secret is needed. If Google limits access to test users, the publisher must add your account or complete app verification.' : 'Microsoft sign-in is ready. No client ID or secret is needed. Your organization may require administrator approval.'}</p> : <div className="settings-oauth-setup">
               <strong>Register your own OAuth app first</strong>
               <p>{provider === 'google'
                 ? 'Create a Desktop app OAuth client in Google Cloud, then enter its client ID and client secret below.'
                 : 'Create a desktop app registration in Microsoft Entra, then enter its application (client) ID below. No client secret is needed.'} See README.md in the project folder for setup instructions.</p>
             </div>}
-            {!useDefaultGoogleClient && <label className="settings-field">Client ID
+            {!useDefaultClient && <label className="settings-field">Client ID
               <input required value={oauth[provider].clientId} autoComplete="off" autoCapitalize="none" spellCheck={false}
                 placeholder={provider === 'google' ? 'Your Google OAuth client ID' : 'Your Microsoft application (client) ID'}
                 onChange={(event) => setOauth({ ...oauth, [provider]: { ...oauth[provider], clientId: event.target.value } })} />
             </label>}
-            {provider === 'google' && !useDefaultGoogleClient && <label className="settings-field">Client secret
+            {provider === 'google' && !useDefaultClient && <label className="settings-field">Client secret
               <input type="password" required autoComplete="new-password" value={oauth.google.clientSecret} placeholder="Your Google desktop app client secret"
                 onChange={(event) => setOauth({ ...oauth, google: { ...oauth.google, clientSecret: event.target.value } })} />
             </label>}
@@ -356,7 +356,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
               </button>
             </div>
             <details className="settings-oauth-setup"><summary>Advanced: callback URL for app registration</summary>
-              {provider === 'google' && hasDefaultGoogleClient && <label className="settings-permission"><input type="checkbox" checked={customGoogleClient} onChange={event => setCustomGoogleClient(event.target.checked)} /><span>Use my own Google OAuth client</span></label>}
+              {hasDefaultClient && <label className="settings-permission"><input type="checkbox" checked={!!customClients[provider]} onChange={event => setCustomClients(value => ({ ...value, [provider]: event.target.checked }))} /><span>Use my own {provider === 'google' ? 'Google' : 'Microsoft'} OAuth client</span></label>}
               <p>Do not open this URL to sign in. Your browser returns here automatically after authorization.</p>
               <code>{window.morrowDesktop ? `http://localhost:${window.location.port}` : 'http://localhost:3001'}/api/oauth/{provider}/callback</code>
             </details>

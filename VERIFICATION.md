@@ -1,4 +1,12 @@
-# Verification — 25 September 2026
+# Verification — 26 September 2026
+
+## Built-in Microsoft OAuth — 0.6.0-beta.4 candidate
+
+The supplied public Microsoft application ID is shared by the Node and Rust services. SwiftUI and React now offer default Microsoft mail/calendar sign-in without credential fields, while retaining advanced custom registrations. Default public-client requests never inherit a saved custom client secret. Published 0.6.0-beta.3 assets are unchanged.
+
+Local verification passed: `npm run check` (108 passed, two gated Rust HTTP tests skipped, React production build passed); both skipped contracts passed separately with `MORROW_TEST_RUST=1 node --test tests/rust-service.test.js`. Rust calendar/OAuth fixtures passed 6/6, strict all-target clippy passed, and `swift build --package-path macos` plus `npm run macos:rust:test` passed. Coverage includes default/custom selection, mail/calendar scopes, browser-bound PKCE handoff, callback handling, rejection of mixed default/custom credentials and non-reuse of legacy secrets.
+
+These are isolated fixtures and local native checks, not verification of the Entra registration or live Microsoft consent/token exchange. No live provider writes or Windows executable acceptance were performed for this change, and no release was published.
 
 ## Agent CLI — 0.6.0-beta.3
 

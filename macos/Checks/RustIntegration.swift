@@ -68,6 +68,7 @@ struct NativeRustChecks {
         try check(model.accounts.count == 2 && model.account == first, "seeded account migration failed")
         try check(model.preferences["syncInterval"].number == 0 && !model.policy["enabled"].bool, "fixture background network settings changed")
         try check(model.state["settings"]["oauthClients"]["google"]["configured"].bool, "trusted bundled OAuth client was not loaded")
+        try check(model.state["settings"]["oauthClients"]["microsoft"]["configured"].bool, "built-in Microsoft OAuth client was not available")
         let publicState = String(decoding: try JSONEncoder().encode(model.state), as: UTF8.self)
         try check(!publicState.contains("fixture-native-rust-"), "connection secrets appeared in public state")
         try check(model.messages.count == 50 && model.messages.allSatisfy { $0["body"].isNull }, "startup state was not paged")
@@ -200,7 +201,7 @@ struct NativeRustChecks {
         for calendar in [false, true] {
             for provider in ["google", "microsoft"] {
                 let route = calendar ? "/calendars/\(provider)/connect" : "/oauth/\(provider)/start"
-                let credentials: JSON = provider == "google" ? .object(["useDefaultClient": .bool(true)]) : .object(["clientId": .string("fixture-client")])
+                let credentials: JSON = .object(["useDefaultClient": .bool(true)])
                 let started = try await model.request(route, method: "POST", body: credentials)
                 let handoff = URL(string: started["url"].string)!
                 try check(handoff.host == "localhost" && handoff.port == model.baseURL?.port && handoff.path.hasSuffix("/authorize"), "OAuth handoff escaped the local service")

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { microsoftClientId } from '../server/oauth-client.js';
 import { createApp } from '../server/app.js';
 import { createStore } from '../server/store.js';
 
@@ -298,43 +299,46 @@ test('explicit demo requests cannot send live mail and drafts cannot change duri
   assert.equal(store.getMessage('live@example.com', draft.id), null);
 });
 
-test('built-in Google OAuth works for mail and calendar without exposing credentials or replacing custom clients', async t => {
+test('built-in Google and Microsoft OAuth works for mail and calendar without exposing credentials or replacing custom clients', async t => {
   const googleOAuth = { clientId: 'bundled.apps.googleusercontent.com', clientSecret: 'fixture-bundled-private' };
   const exchanges = [];
-  const { request, post, port } = await workspace(t, {
+  const { store, request, post, port } = await workspace(t, {
     oauthFinish: (provider, input) => {
       exchanges.push(input);
       return { provider, ...input.config, email: 'bundled@example.com', accessToken: 'fixture-user-token' };
-    }, fetchProviderMessages: () => [], listCalendars: () => [],
+    }, fetchProviderMessages: () => [], listCalendars: () => [], refreshMail: connection => connection,
   }, { googleOAuth });
   const state = await request('/api/state');
   assert.equal(state.data.settings.oauthClients.google.configured, true);
   assert.equal((await request('/api/calendars')).data.connections.find(item => item.provider === 'google').hasDefaultClient, true);
-  for (const [route, callbackKind, cookieName] of [['/api/oauth/google/start', 'oauth', 'genmail_oauth'], ['/api/calendars/google/connect', 'calendar-oauth', 'morrow_calendar_google']]) {
-    for (const body of [{ useDefaultClient: 'true' }, { useDefaultClient: true, clientId: 'custom' }, { useDefaultClient: true, clientSecret: 'custom' }]) assert.equal((await post(route, body)).status, 400);
-    const start = await post(route, { useDefaultClient: true, organize: true });
-    assert.equal(start.status, 200);
-    const handoff = new URL(start.data.url);
-    const authorize = await request(handoff.pathname + handoff.search, { headers: { Host: `localhost:${port}` } });
-    assert.equal(authorize.status, 302);
-    const googleURL = new URL(authorize.headers.get('location'));
-    assert.equal(googleURL.searchParams.get('client_id'), googleOAuth.clientId);
-    assert.equal(googleURL.searchParams.get('code_challenge_method'), 'S256');
-    assert.equal(googleURL.searchParams.get('client_secret'), null);
-    const cookie = authorize.headers.get('set-cookie').split(';')[0];
-    assert.ok(cookie.startsWith(cookieName + '='));
-    const callback = await request(`/api/${callbackKind}/google/callback?state=${encodeURIComponent(handoff.searchParams.get('state'))}&code=fixture-code`, { headers: { Host: `localhost:${port}`, Cookie: cookie } });
-    assert.equal(callback.status, 302);
-    assert.equal(new URL(callback.headers.get('location')).searchParams.get(callbackKind === 'oauth' ? 'connected' : 'calendarConnected'), 'google');
-    assert.equal(exchanges.at(-1).config.clientSecret, googleOAuth.clientSecret);
-    const customStart = await post(route, { clientId: 'custom-client', clientSecret: 'custom-secret' });
-    const customURL = new URL(customStart.data.url);
-    const customRedirect = await request(customURL.pathname + customURL.search);
-    assert.equal(new URL(customRedirect.headers.get('location')).searchParams.get('client_id'), 'custom-client');
-    for (const response of [state, start, callback, await request('/api/state'), await request('/api/calendars')]) assert.doesNotMatch(response.raw, /fixture-bundled-private|fixture-user-token|custom-secret/);
+  assert.equal(state.data.settings.oauthClients.microsoft.configured, true);
+  assert.equal((await request('/api/calendars')).data.connections.find(item => item.provider === 'microsoft').hasDefaultClient, true);
+  for (const provider of ['google', 'microsoft']) {
+    for (const [route, callbackKind, cookieName] of [[`/api/oauth/${provider}/start`, 'oauth', 'genmail_oauth'], [`/api/calendars/${provider}/connect`, 'calendar-oauth', `morrow_calendar_${provider}`]]) {
+      if (provider === 'microsoft' && callbackKind === 'calendar-oauth') store.setSettings({ calendars: { ...store.getSettings().calendars, microsoft: { clientId: microsoftClientId, clientSecret: 'stale-private' } } });
+      for (const body of [{ useDefaultClient: 'true' }, { useDefaultClient: true, clientId: 'custom' }, { useDefaultClient: true, clientSecret: 'custom' }]) assert.equal((await post(route, body)).status, 400);
+      const start = await post(route, { useDefaultClient: true, organize: true });
+      assert.equal(start.status, 200);
+      const handoff = new URL(start.data.url);
+      const authorize = await request(handoff.pathname + handoff.search, { headers: { Host: `localhost:${port}` } });
+      assert.equal(authorize.status, 302);
+      const authorizationURL = new URL(authorize.headers.get('location'));
+      assert.equal(authorizationURL.searchParams.get('client_id'), provider === 'google' ? googleOAuth.clientId : microsoftClientId);
+      assert.equal(authorizationURL.searchParams.get('code_challenge_method'), 'S256');
+      assert.equal(authorizationURL.searchParams.get('client_secret'), null);
+      const cookie = authorize.headers.get('set-cookie').split(';')[0];
+      assert.ok(cookie.startsWith(cookieName + '='));
+      const callback = await request(`/api/${callbackKind}/${provider}/callback?state=${encodeURIComponent(handoff.searchParams.get('state'))}&code=fixture-code`, { headers: { Host: `localhost:${port}`, Cookie: cookie } });
+      assert.equal(callback.status, 302);
+      assert.equal(new URL(callback.headers.get('location')).searchParams.get(callbackKind === 'oauth' ? 'connected' : 'calendarConnected'), provider);
+      assert.equal(exchanges.at(-1).config.clientSecret, provider === 'google' ? googleOAuth.clientSecret : undefined);
+      const customStart = await post(route, { clientId: 'custom-client', clientSecret: 'custom-secret' });
+      const customURL = new URL(customStart.data.url);
+      const customRedirect = await request(customURL.pathname + customURL.search);
+      assert.equal(new URL(customRedirect.headers.get('location')).searchParams.get('client_id'), 'custom-client');
+      for (const response of [state, start, callback, await request('/api/state'), await request('/api/calendars')]) assert.doesNotMatch(response.raw, /fixture-bundled-private|fixture-user-token|custom-secret|stale-private/);
+    }
   }
-  assert.equal((await post('/api/oauth/microsoft/start', { useDefaultClient: true })).status, 400);
-  assert.equal((await post('/api/calendars/microsoft/connect', { useDefaultClient: true })).status, 400);
   const unconfigured = await workspace(t);
   assert.equal((await unconfigured.request('/api/state')).data.settings.oauthClients.google.configured, false);
   for (const route of ['/api/oauth/google/start', '/api/calendars/google/connect']) assert.equal((await unconfigured.post(route, { useDefaultClient: true })).status, 400);

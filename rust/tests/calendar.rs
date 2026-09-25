@@ -507,7 +507,12 @@ async fn begin(app: &App, calendar: bool, provider: &str) -> (url::Url, String, 
     } else {
         format!("/api/oauth/{provider}/start")
     };
-    let result=call(app,context("POST",&path,json!({"clientId":"fixture-client","clientSecret":"fixture-secret","importOptions":{"months":1,"sent":true,"inbox":false}}))).await;
+    let body = if provider == "microsoft" {
+        json!({"useDefaultClient":true,"importOptions":{"months":1,"sent":true,"inbox":false}})
+    } else {
+        json!({"clientId":"fixture-client","clientSecret":"fixture-secret","importOptions":{"months":1,"sent":true,"inbox":false}})
+    };
+    let result = call(app, context("POST", &path, body)).await;
     assert_eq!(result.0, 200, "{}", result.2);
     let local = url::Url::parse(string(&result.2, "url")).unwrap();
     assert_eq!(local.host_str(), Some("localhost"));
@@ -527,6 +532,14 @@ async fn begin(app: &App, calendar: bool, provider: &str) -> (url::Url, String, 
             .query_pairs()
             .any(|(k, v)| k == "code_challenge_method" && v == "S256")
     );
+    if provider == "microsoft" {
+        assert!(
+            remote
+                .query_pairs()
+                .any(|(k, v)| k == "client_id" && v == oauth::MICROSOFT_CLIENT_ID.trim())
+        );
+        assert!(!remote.query_pairs().any(|(k, _)| k == "client_secret"));
+    }
     let cookie = authorized.1["set-cookie"].to_str().unwrap();
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Lax"));
@@ -550,7 +563,7 @@ async fn oauth_separate_purposes_browser_binding_canonical_mail_and_import() {
     let imports = imported.clone();
     let fixture=Fixture::new(Arc::new(move|method,target,headers,body|{let count=count.clone();let imports=imports.clone();async move {
         count.fetch_add(1,Ordering::SeqCst);
-        if method=="POST" {assert!(string(&body,"code_verifier").len()>=43);if headers["host"]=="login.microsoftonline.com"{assert!(string(&body,"scope").contains(if body["code"]=="calendar" {"Calendars.ReadWrite"}else{"Mail.Read"}));}return(200,json!({"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600}));}
+        if method=="POST" {assert!(string(&body,"code_verifier").len()>=43);if headers["host"]=="login.microsoftonline.com"{if body["client_id"]==oauth::MICROSOFT_CLIENT_ID.trim(){assert!(body.get("client_secret").is_none());}assert!(string(&body,"scope").contains(if body["code"]=="calendar" {"Calendars.ReadWrite"}else{"Mail.Read"}));}return(200,json!({"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600}));}
         if target.contains("calendarList")||target.starts_with("/v1.0/me/calendars") {return(200,calendars());}
         if target.contains("/messages") { imports.fetch_add(1,Ordering::SeqCst);return(200,json!({"value":[{"id":"same","subject":"Fixture","from":{"emailAddress":{"address":"sender@example.invalid"}},"body":{"contentType":"text","content":"Fixture"},"receivedDateTime":"2026-09-01T01:00:00Z"}]}));}
         (200,json!({"email":"PERSON@example.invalid","emailAddress":"PERSON@example.invalid","mail":"PERSON@example.invalid"}))
@@ -558,6 +571,7 @@ async fn oauth_separate_purposes_browser_binding_canonical_mail_and_import() {
     let mut app = fixture.app();
     Arc::get_mut(&mut app.0).unwrap().app_origin = "http://127.0.0.1:5173".into();
     set(&app,json!({"mailAccounts":{"Person@example.invalid":{"email":"Person@example.invalid","provider":"imap","password":"preserved"},"other@example.invalid":{"email":"other@example.invalid","password":"other-secret"}},"activeAccount":"other@example.invalid"})).await;
+    set(&app, json!({"calendars":{"microsoft":{"clientId":oauth::MICROSOFT_CLIENT_ID.trim(),"clientSecret":"stale-private"}}})).await;
     for provider in ["google", "microsoft"] {
         let (local, cookie, remote) = begin(&app, true, provider).await;
         let scope = remote
@@ -852,7 +866,11 @@ async fn validation_blocks_network_and_desktop_credentials_are_explicit() {
     );
     for (provider, body, client) in [
         ("google", json!({"useDefaultClient":true}), None),
-        ("microsoft", json!({"useDefaultClient":true}), Some(&google)),
+        (
+            "microsoft",
+            json!({"useDefaultClient":true,"clientSecret":"custom"}),
+            Some(&google),
+        ),
         (
             "google",
             json!({"useDefaultClient":true,"clientId":"custom"}),

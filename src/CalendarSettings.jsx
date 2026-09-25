@@ -8,7 +8,7 @@ const emptyForms = () => ({ google: { clientId: '', clientSecret: '' }, microsof
 export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange, onBeforeConnect }) {
   const [connections, setConnections] = useState([]);
   const [forms, setForms] = useState(emptyForms);
-  const [customGoogleClient, setCustomGoogleClient] = useState(false);
+  const [customClients, setCustomClients] = useState({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -56,7 +56,7 @@ export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange
     const controller = new AbortController(); pending.current = controller;
     setBusy(`connect-${provider}`); setError('');
     try {
-      const useDefault = provider === 'google' && !customGoogleClient && connections.some(item => item.provider === provider && item.hasDefaultClient);
+      const useDefault = !customClients[provider] && connections.some(item => item.provider === provider && item.hasDefaultClient);
       const response = await fetch(`/api/calendars/${provider}/connect`, { method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(useDefault ? { useDefaultClient: true } : { clientId: forms[provider].clientId.trim(), clientSecret: forms[provider].clientSecret.trim() }) });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || 'Unable to start calendar sign-in.');
@@ -106,14 +106,14 @@ export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange
     {loading ? <p className="calendar-status" role="status"><LoaderCircle className="calendar-spinner" size={16} />Loading connections…</p> : Object.entries(PROVIDERS).map(([provider, name]) => {
       const connection = connections.find(item => item.provider === provider);
       const form = forms[provider];
-      const useDefault = provider === 'google' && connection?.hasDefaultClient && !customGoogleClient;
+      const useDefault = connection?.hasDefaultClient && !customClients[provider];
       const preservedSecret = !!connection?.hasClientSecret && connection.clientId === form.clientId.trim();
       const redirect = connection?.redirectUri || `http://localhost:3001/api/calendar-oauth/${provider}/callback`;
       return <section className="calendar-connection" key={provider} aria-labelledby={`calendar-connection-${provider}`}>
         <div className="calendar-connection-heading"><h3 id={`calendar-connection-${provider}`}>{name}</h3><span className={`calendar-connection-status ${connection?.connected ? 'connected' : ''}`}>{connection?.connected ? <><Check size={13} />Connected</> : 'Not connected'}</span></div>
         {connection?.connected && <div className="calendar-connection-account"><p>{connection.email}</p><button type="button" className="button secondary" disabled={!!busy} onClick={() => disconnect(connection)}>{busy === `disconnect-${provider}` ? <LoaderCircle size={14} className="calendar-spinner" /> : <Unplug size={14} />}Disconnect</button></div>}
         <details className="calendar-setup" open={!connection?.connected}><summary>{connection?.connected ? 'Reconnect or change account' : 'Sign in through your browser'}</summary>
-          {useDefault ? <p className="settings-help">Google sign-in is ready. No client ID or secret is needed. If Google limits access to test users, the publisher must add your account or complete app verification.</p> : <div className="settings-oauth-setup">
+          {useDefault ? <p className="settings-help">{provider === 'google' ? 'Google sign-in is ready. No client ID or secret is needed. If Google limits access to test users, the publisher must add your account or complete app verification.' : 'Microsoft sign-in is ready. No client ID or secret is needed. Your organization may require administrator approval.'}</p> : <div className="settings-oauth-setup">
             {provider === 'google' ? <><strong>Google Cloud setup</strong><p>Enable the Google Calendar API, configure your OAuth consent screen, and create a Desktop app OAuth client. Copy its client ID and client secret. Add your Google account as a test user if the app is in Testing.</p><p>Requested access: your account identity, calendar list, and calendar events.</p><a href="https://developers.google.com/workspace/calendar/api/quickstart/nodejs" target="_blank" rel="noopener noreferrer">Google Calendar setup guide <ExternalLink size={12} /></a></> : <><strong>Microsoft Entra setup</strong><p>Register an app supporting the accounts you want to connect (personal and organizational accounts are supported). Add a Mobile and desktop applications platform with the redirect below. Enable public client flows; a client secret is not required.</p><p>Delegated permissions: User.Read, Calendars.ReadWrite, and offline_access. Your organization may require administrator approval.</p><a href="https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-registration" target="_blank" rel="noopener noreferrer">Microsoft desktop app registration guide <ExternalLink size={12} /></a></>}
           </div>}
           <form onSubmit={event => connect(event, provider)}><fieldset className="settings-fields" disabled={!!busy}>
@@ -123,7 +123,7 @@ export default function CalendarSettings({ onNotify, onDirtyChange, onBusyChange
             </>}
             <button className="button primary" type="submit">{busy === `connect-${provider}` ? <LoaderCircle size={15} className="calendar-spinner" /> : <ExternalLink size={15} />}{busy === `connect-${provider}` ? 'Opening sign-in…' : `Sign in to ${name} in browser`}</button>
             <details><summary>Advanced: callback URL for app registration</summary>
-              {provider === 'google' && connection?.hasDefaultClient && <label className="settings-permission"><input type="checkbox" checked={customGoogleClient} onChange={event => setCustomGoogleClient(event.target.checked)} /><span>Use my own Google OAuth client</span></label>}
+              {connection?.hasDefaultClient && <label className="settings-permission"><input type="checkbox" checked={!!customClients[provider]} onChange={event => setCustomClients(value => ({ ...value, [provider]: event.target.checked }))} /><span>Use my own {provider === 'google' ? 'Google' : 'Microsoft'} OAuth client</span></label>}
               <code>{redirect}</code><p>Do not open this URL to sign in. Your browser returns here automatically after authorization.</p>
             </details>
           </fieldset></form>

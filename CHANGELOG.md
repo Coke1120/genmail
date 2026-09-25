@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0-beta.4 — 2026-09-26
+
+- Add built-in Microsoft desktop OAuth for Outlook mail and Calendar in SwiftUI and React. Users can open browser sign-in without entering credentials; custom clients remain under Advanced. Node and Rust share the public application ID, preserve PKCE/browser binding and never reuse a saved secret for the built-in public client.
+
 ## 0.6.0-beta.3 — 2026-09-25
 
 - Add `morrow-service cli` for agent JSON accounts, cached list/search/read, drafts, complete send review and explicit confirmation. Attach to the running app or use its workspace independently while closed.

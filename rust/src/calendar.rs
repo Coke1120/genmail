@@ -411,8 +411,9 @@ pub async fn handle(app: &App, ctx: &Context) -> Result<Option<Response>> {
             }
             let mut connections = state(&app.settings().await?);
             for connection in connections.as_array_mut().unwrap() {
-                connection["hasDefaultClient"] =
-                    (connection["provider"] == "google" && app.0.google_oauth.is_some()).into();
+                connection["hasDefaultClient"] = (connection["provider"] == "microsoft"
+                    || (connection["provider"] == "google" && app.0.google_oauth.is_some()))
+                .into();
                 connection["redirectUri"] = format!(
                     "http://localhost:{}/api/calendar-oauth/{}/callback",
                     app.0.port,

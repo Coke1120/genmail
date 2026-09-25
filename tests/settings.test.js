@@ -20,12 +20,12 @@ test('Settings renders connected IMAP, Google and Outlook with import and learni
       assert.match(html, /Do not open this URL to sign in/);
       assert.match(html, /<details[^>]*><summary>Advanced: callback URL/);
     }
-    if (provider === 'google') {
-      state.settings.oauthClients = { google: { configured: true } };
+    if (provider !== 'imap') {
+      state.settings.oauthClients = { [provider]: { configured: true } };
       const builtIn = renderToString(React.createElement(Settings, { state }));
       assert.match(builtIn, /No client ID or secret is needed/);
-      assert.match(builtIn, /Use my own Google OAuth client/);
-      assert.doesNotMatch(builtIn, /placeholder="Your Google OAuth client ID"|placeholder="Your Google desktop app client secret"|Register your own OAuth app first/);
+      assert.match(builtIn, new RegExp(`Use my own (?:<!-- -->)?${provider === 'google' ? 'Google' : 'Microsoft'}(?:<!-- -->)? OAuth client`));
+      assert.doesNotMatch(builtIn, /placeholder="Your Microsoft application \(client\) ID"|placeholder="Your Google OAuth client ID"|placeholder="Your Google desktop app client secret"|Register your own OAuth app first/);
     }
   }
 });

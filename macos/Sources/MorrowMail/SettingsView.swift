@@ -310,13 +310,13 @@ struct NativeSettingsView: View {
         let credentials = Binding<JSON>(get: { calendar ? calendarOAuth[id] : mailOAuth[id] }, set: { if calendar { calendarOAuth[id] = $0 } else { mailOAuth[id] = $0 } })
         let clientID = Binding<String>(get: { credentials.wrappedValue["clientId"].string }, set: { credentials.wrappedValue["clientId"] = .string($0) })
         let secret = Binding<String>(get: { credentials.wrappedValue["clientSecret"].string }, set: { credentials.wrappedValue["clientSecret"] = .string($0) })
-        let hasDefault = id == "google" && model.state["settings"]["oauthClients"]["google"]["configured"].bool
+        let hasDefault = model.state["settings"]["oauthClients"][id]["configured"].bool
         let useDefault = hasDefault && !credentials.wrappedValue["useCustomClient"].bool
         let port = model.baseURL?.port ?? 3001
         let callback = "http://localhost:\(port)/api/\(calendar ? "calendar-oauth" : "oauth")/\(id)/callback"
         return VStack(alignment: .leading, spacing: 12) {
             Text("Sign in through your browser").font(.headline)
-            Text(useDefault ? "Google sign-in is ready. No client ID or secret is needed. Keep Morrow open while you approve access in your browser, then return here." : "Enter your OAuth app credentials below, then use the sign-in button. Keep Morrow open while you approve access in your browser, then return here.").font(.callout).foregroundStyle(.secondary)
+            Text(useDefault ? "\(id == "google" ? "Google" : "Microsoft") sign-in is ready. No client ID or secret is needed. Keep Morrow open while you approve access in your browser, then return here." : "Enter your OAuth app credentials below, then use the sign-in button. Keep Morrow open while you approve access in your browser, then return here.").font(.callout).foregroundStyle(.secondary)
             if !useDefault {
                 Text(id == "google" ? "Register a Desktop app OAuth client in Google Cloud. Enable the \(calendar ? "Calendar" : "Gmail") API and add yourself as a test user." : "Register a Mobile and desktop application in Microsoft Entra. Enable public client flows; no client secret is needed.").font(.callout).foregroundStyle(.secondary)
                 TextField("Application / client ID", text: clientID)
@@ -342,11 +342,11 @@ struct NativeSettingsView: View {
                 }.buttonStyle(.borderedProminent).disabled(!useDefault && (clientID.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty || (id == "google" && secret.wrappedValue.isEmpty)))
                 Button("Refresh Status") { run { try await model.reload(); status = "Connection status refreshed." } }
             }
-            Text(useDefault ? "If Google says access is restricted to test users, the publisher must add your account or complete app verification." : "The sign-in button becomes available after the required credentials are entered.").font(.caption).foregroundStyle(.secondary)
+            Text(useDefault ? (id == "google" ? "If Google says access is restricted to test users, the publisher must add your account or complete app verification." : "Your organization may require administrator approval to connect.") : "The sign-in button becomes available after the required credentials are entered.").font(.caption).foregroundStyle(.secondary)
             DisclosureGroup("Advanced: callback URL for app registration") {
                 VStack(alignment: .leading, spacing: 8) {
                     if hasDefault {
-                        Toggle("Use my own Google OAuth client", isOn: Binding(get: { credentials.wrappedValue["useCustomClient"].bool }, set: { credentials.wrappedValue["useCustomClient"] = .bool($0) })).toggleStyle(.checkbox)
+                        Toggle("Use my own \(id == "google" ? "Google" : "Microsoft") OAuth client", isOn: Binding(get: { credentials.wrappedValue["useCustomClient"].bool }, set: { credentials.wrappedValue["useCustomClient"] = .bool($0) })).toggleStyle(.checkbox)
                     }
                     Text(callback).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                     Button("Copy Callback URL") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(callback, forType: .string); status = "Callback URL copied for app registration." }
