@@ -1,12 +1,21 @@
 # Verification — 26 September 2026
 
-## Built-in Microsoft OAuth — 0.6.0-beta.4 candidate
+## Built-in Microsoft OAuth — 0.6.0-beta.4
+
+[0.6.0-beta.4](https://github.com/Coke1120/genmail/releases/tag/v0.6.0-beta.4) was published as a paired prerelease on 2026-09-25 at 17:49:28 UTC from `c758a47b2cd5c1b01052cfa111f090f291311691`. All five checks and the publisher in [tag CI 36165971063](https://github.com/Coke1120/genmail/actions/runs/36165971063) passed: Ubuntu/macOS/Windows full tests, lint, dependency audits and benchmarks, both desktop packages, native/packaged smoke and actual old-installer upgrade/restart/backup restoration. Each platform passed 74 Rust tests and seven Node/Rust contracts.
+
+All six public assets were downloaded. The pinned Ed25519 manifest signature, archive sizes, SHA-256/checksum files and safe archive paths passed verification. Both packages have matching release/runtime metadata, the supplied Microsoft ID embedded in the service, bundled Google OAuth configuration and dependency notices, without a separate Node backend or workspace database/key/recovery files. The public macOS app passes deep/strict ad-hoc codesign and plist validation; its service reports `0.6.0-beta.4`. Windows executable acceptance comes from CI; the public ZIP was inspected locally.
+
+| Public archive | Bytes | SHA-256 |
+| --- | ---: | --- |
+| macOS arm64 | 10,780,310 | `80e5e0be77418d45dba500c3caf11332f4e349c5932f1258d35274ff14ead08a` |
+| Windows x64 | 167,725,605 | `1ffc97d691b1b4c5c7bf653675906630db0b323aa7a06ffda27c1bacf4766542` |
 
 The supplied public Microsoft application ID is shared by the Node and Rust services. SwiftUI and React now offer default Microsoft mail/calendar sign-in without credential fields, while retaining advanced custom registrations. Default public-client requests never inherit a saved custom client secret. Published 0.6.0-beta.3 assets are unchanged.
 
 Local verification passed: `npm run check` (108 passed, two gated Rust HTTP tests skipped, React production build passed); both skipped contracts passed separately with `MORROW_TEST_RUST=1 node --test tests/rust-service.test.js`. Rust calendar/OAuth fixtures passed 6/6, strict all-target clippy passed, and `swift build --package-path macos` plus `npm run macos:rust:test` passed. Coverage includes default/custom selection, mail/calendar scopes, browser-bound PKCE handoff, callback handling, rejection of mixed default/custom credentials and non-reuse of legacy secrets.
 
-These are isolated fixtures and local native checks, not verification of the Entra registration or live Microsoft consent/token exchange. No live provider writes or Windows executable acceptance were performed for this change, and no release was published.
+These are isolated fixtures and native/packaged checks, not verification of the Entra registration or live Microsoft consent/token exchange. No live provider writes were performed. Existing ad-hoc signing, unsigned Windows, minimum-OS/hardware and manual/live-account acceptance limitations remain disclosed.
 
 ## Agent CLI — 0.6.0-beta.3
 
