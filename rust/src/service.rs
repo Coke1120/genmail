@@ -40,6 +40,7 @@ pub struct Runtime {
     pub client: reqwest::Client,
     pub port: u16,
     token: String,
+    pub(crate) cli_token: String,
     pub update_token: String,
     pub page_secret: [u8; 32],
 }
@@ -128,6 +129,7 @@ impl App {
             client,
             port,
             token,
+            cli_token: hex_token()?,
             update_token,
             page_secret: crate::store::random_bytes()?,
         })))
@@ -404,7 +406,14 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
         && ["oauth", "calendar-oauth"].contains(&route[0])
         && ["google", "microsoft"].contains(&route[1])
         && ["callback", "authorize"].contains(&route[2]);
+    let cli_route = route == ["cli"] || route == ["cli", "health"];
+    let cli_auth = cli_route
+        && validation::same_secret(
+            header("authorization"),
+            &format!("Bearer {}", app.0.cli_token),
+        );
     if !callback
+        && !cli_auth
         && !app.0.token.is_empty()
         && !validation::same_secret(header("authorization"), &format!("Bearer {}", app.0.token))
     {
@@ -485,6 +494,20 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
         }
         query[key.as_ref()] = value.into_owned().into();
     }
+    if cli_route {
+        return match (parts.method.as_str(), route.as_slice()) {
+            ("GET", ["cli", "health"]) => Ok(Json(
+                json!({"service":"morrow-cli","version":1,"pid":std::process::id()}),
+            )
+            .into_response()),
+            ("POST", ["cli"]) => {
+                let command = serde_json::from_value(body)
+                    .map_err(|_| Error::invalid("Invalid CLI command."))?;
+                Ok(Json(crate::cli::execute(&app, command).await?).into_response())
+            }
+            _ => Err(Error::new(404, "Not found.")),
+        };
+    }
     let context = Context {
         method: parts.method,
         path,
@@ -496,7 +519,7 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
     };
     dispatch(&app, context).await
 }
-async fn dispatch(app: &App, context: Context) -> Result<Response> {
+pub(crate) async fn dispatch(app: &App, context: Context) -> Result<Response> {
     if let Some(response) = crate::calendar::handle(app, &context).await? {
         return Ok(response);
     }
@@ -824,4 +847,11 @@ async fn static_response(
 fn assert_handler_send(app: App, request: axum::http::Request<Body>) {
     fn check<T: Send>(_: T) {}
     check(handle_inner(app, request));
+}
+
+fn hex_token() -> Result<String> {
+    Ok(crate::store::random_bytes::<32>()?
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }

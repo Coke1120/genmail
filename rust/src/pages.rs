@@ -136,6 +136,25 @@ fn placeholders(length: usize) -> String {
     }
 }
 pub fn page(store: &Store, accounts: &[String], input: &Value, secret: &[u8; 32]) -> Result<Value> {
+    page_at(store, accounts, input, secret, 0)
+}
+pub(crate) fn page_at(
+    store: &Store,
+    accounts: &[String],
+    input: &Value,
+    secret: &[u8; 32],
+    offset: usize,
+) -> Result<Value> {
+    // ponytail: bounded numeric offsets for short-lived CLI sessions; use cursor sessions beyond 200k rows.
+    if offset > 200_000
+        || offset > 0
+            && input
+                .get("cursor")
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty())
+    {
+        return Err(Error::invalid("Invalid mail page offset."));
+    }
     let options: Options =
         serde_json::from_value(input.clone()).map_err(|_| Error::invalid("Invalid mail page."))?;
     if (!options.folder.is_empty() && !FOLDERS.contains(&options.folder.as_str()))
@@ -308,7 +327,7 @@ pub fn page(store: &Store, accounts: &[String], input: &Value, secret: &[u8; 32]
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "WITH d AS NOT MATERIALIZED ({docs}), page AS MATERIALIZED (SELECT d.rowid,d.account AS owner,d.id AS id,{} FROM d {} WHERE {} ORDER BY {} LIMIT ?) SELECT json_object({projection}),p.owner,p.rowid FROM page p JOIN messages m ON m.account=p.owner AND m.id=p.id ORDER BY {}",
+        "WITH d AS NOT MATERIALIZED ({docs}), page AS MATERIALIZED (SELECT d.rowid,d.account AS owner,d.id AS id,{} FROM d {} WHERE {} ORDER BY {} LIMIT ? OFFSET ?) SELECT json_object({projection}),p.owner,p.rowid FROM page p JOIN messages m ON m.account=p.owner AND m.id=p.id ORDER BY {}",
         order
             .iter()
             .enumerate()
@@ -334,6 +353,7 @@ pub fn page(store: &Store, accounts: &[String], input: &Value, secret: &[u8; 32]
             .join(",")
     );
     params.push(Sql::Integer((options.page_size + 1) as i64));
+    params.push(Sql::Integer(offset as i64));
     let mut statement = store.conn.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(&params))?;
     let mut messages = Vec::new();

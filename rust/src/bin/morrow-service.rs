@@ -26,6 +26,9 @@ struct Configuration {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("cli") {
+        std::process::exit(morrow_search::cli::main(std::env::args().skip(2).collect()).await);
+    }
     if std::env::args().skip(1).eq(["--update-installer"]) {
         std::process::exit(morrow_search::updater::installer_main().await);
     }
@@ -108,6 +111,7 @@ async fn run() -> Result<()> {
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port)).await?;
     let port = listener.local_addr()?.port();
     let parent_pid = config.parent_pid;
+    let directory = config.data_directory.clone();
     let app = tokio::task::spawn_blocking(move || {
         let mut app = App::open(
             &config.data_directory,
@@ -128,6 +132,7 @@ async fn run() -> Result<()> {
     if *closed_rx.borrow() {
         return Ok(());
     }
+    let _cli_endpoint = morrow_search::cli::publish(&directory, &app)?;
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let indexing = app.clone();
     let mut index_stop = shutdown_rx.clone();

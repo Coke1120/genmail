@@ -171,6 +171,7 @@ async fn send(app: &App, ctx: &Context) -> Result<Value> {
  && input_clone.get("footer").is_some()&&input_clone["footer"]==draft["footer"] {value["footer"]=draft["footer"].clone();}
         let hash=fingerprint(&value)?;let sent_id=format!("sent:{request_clone}");if let Some(sent)=db.get(&owner,&sent_id)?{let mut comparable=value.clone();if input_clone.get("footer").is_some()&&input_clone["footer"]==sent["footer"]{comparable["footer"]=sent["footer"].clone();}
 if fingerprint(&sent)?!=fingerprint(&comparable)?{return Err(Error::conflict("This send request ID was already used for different text. Start a new draft."));}return Ok(json!({"sent":sent}));}
+        crate::cli::guard_review(db,&owner,&input_clone)?;
         if let Some(previous)=&previous{if input_clone["retryUnconfirmed"]!=true||previous["requestId"]!=request_clone{return Err(review(db,&owner,previous,409)?);}
 if previous["payloadHash"]!=hash{return Err(Error::conflict("This draft has an unconfirmed delivery with different text. Check Sent and reopen the saved draft before retrying."));}}
         let draft_id=if !string(&input_clone,"draftId").is_empty(){let id=validation::text(&input_clone["draftId"],"Draft ID",8192,false)?;if get_message(db,&owner,id)?["folder"]!="drafts"{return Err(Error::invalid("Only saved drafts can be sent."));}id.to_owned()}else if let Some(previous)=&previous{string(previous,"draftId").into()}else if owner!="demo"{format!("outbox:{request_clone}")}else{String::new()};
@@ -225,7 +226,8 @@ if previous["payloadHash"]!=hash{return Err(Error::conflict("This draft has an u
         let reply = string(&value, "replyToId").to_owned();
         let request_clone = request.clone();
         let draft = draft_id.clone();
-        let send_settings=app.db(move|db|db.transaction(|db|{let config=db.settings()?;let mut extra=json!({"id":draft,"folder":"drafts","deliveryStatus":"unconfirmed","deliveryRequestId":request_clone});if !reply.is_empty(){extra["replyToId"]=reply.into();}draft_value.as_object_mut().unwrap().remove("replyToId");db.upsert(&owner,&outgoing(&config,&owner,&draft_value,&extra))?;let mut pending=attempts(&config);if !pending.iter().any(|a|a["account"]==owner&&a["requestId"]==saved_attempt["requestId"]){pending.push(saved_attempt);}db.set_settings(&json!({"deliveryAttempts":pending}))?;Ok(config)})).await?;
+        let reviewed_input = input.clone();
+        let send_settings=app.db(move|db|db.transaction(|db|{crate::cli::guard_review(db,&owner,&reviewed_input)?;let config=db.settings()?;let mut extra=json!({"id":draft,"folder":"drafts","deliveryStatus":"unconfirmed","deliveryRequestId":request_clone});if !reply.is_empty(){extra["replyToId"]=reply.into();}draft_value.as_object_mut().unwrap().remove("replyToId");db.upsert(&owner,&outgoing(&config,&owner,&draft_value,&extra))?;let mut pending=attempts(&config);if !pending.iter().any(|a|a["account"]==owner&&a["requestId"]==saved_attempt["requestId"]){pending.push(saved_attempt);}db.set_settings(&json!({"deliveryAttempts":pending}))?;Ok(config)})).await?;
         let mut message = value.clone();
         message["fromName"] = string(&send_settings["preferences"], "displayName").into();
         message["replyMessageId"] = string(&prepared["original"], "messageId")
@@ -252,6 +254,9 @@ if previous["payloadHash"]!=hash{return Err(Error::conflict("This draft has an u
         .db(move |db| {
             db.transaction(|db| {
                 let config = db.settings()?;
+                if owner == "demo" {
+                    crate::cli::guard_review(db, &owner, &input)?;
+                }
                 let mut extra = json!({"id":sent_id,"folder":"sent","messageId":message_id});
                 let reply = string(&value, "replyToId");
                 if !reply.is_empty() {

@@ -20,6 +20,7 @@ Morrow Mail is an independent, MIT-licensed alternative inspired by Genspark Gen
 - **Bring your own AI:** configure a custom base URL, model ID, and API key for an OpenAI-compatible endpoint or use Ollama. Enable individual AI behaviors and choose what context they can access.
 - **Controlled AI automation:** GitHub update checks, daily/interval P0–P4 summaries, opt-in arrival/open/reply triggers, separate response/translation languages, and reviewed writing-style learning.
 - **History on your terms:** 1/3/6/12-month Inbox/Sent imports, pause/resume, body-only style samples and a per-analysis token budget.
+- **Agent CLI (current source):** JSON accounts, cached mail list/search/read, owned drafts and explicitly confirmed sending; works with the app open or closed. See the [CLI guide](docs/CLI.md). Not included in the existing v0.6.0-beta.1 downloads.
 - **Native composition:** To / Cc / Bcc, multiple recipients, replies bound to the receiving account, HTML email footers, keyboard shortcuts, and standard macOS window controls.
 
 AI Studio covers 19 behaviors through model-backed assistance and clearly labeled local simulations. Sending always requires an explicit action; AI does not send email automatically. Local storage does not mean every operation stays offline: connected mail/calendar providers and your configured AI endpoint receive the data needed for enabled actions.

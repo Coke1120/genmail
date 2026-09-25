@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod background;
 pub mod calendar;
+pub mod cli;
 pub mod content;
 pub mod error;
 pub mod imap;

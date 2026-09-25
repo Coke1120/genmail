@@ -1,0 +1,388 @@
+use morrow_search::{
+    cli::{self, Command as CliCommand},
+    service::App,
+    store::Store,
+};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+};
+
+struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("morrow-cli-{}", uuid::Uuid::new_v4()));
+        let db = Store::open(&path).unwrap();
+        db.set_settings(&json!({"mailAccounts":{
+            "a@example.invalid":{"provider":"google","email":"a@example.invalid","accessToken":"fixture-secret","connectionId":"a1"},
+            "b@example.invalid":{"provider":"microsoft","email":"b@example.invalid","connectionId":"b1"}},
+            "preferences":{"syncInterval":0,"displayName":"Fixture","signature":"Sent with fixture"},"policy":{"enabled":false}})).unwrap();
+        for account in ["a@example.invalid", "b@example.invalid"] {
+            for i in 0..65 {
+                db.upsert(account,&json!({"id":format!("same-{i}"),"folder":"inbox","subject":"invoice fixture","body":format!("Private body {account}"),"date":"2026-09-25T00:00:00.000Z","read":false})).unwrap();
+            }
+        }
+        Self(path)
+    }
+    fn cli(&self, args: &[&str], input: Option<&Value>, code: i32) -> Value {
+        // No shell and no credentials in the process arguments.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_morrow-service"));
+        child
+            .arg("cli")
+            .args(args)
+            .arg("--workspace")
+            .arg(&self.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = child.spawn().unwrap();
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(serde_json::to_string(input).unwrap().as_bytes())
+                .unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+struct Server(Child);
+impl Server {
+    fn start(path: &Path) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_morrow-service"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        writeln!(
+            child.stdin.as_mut().unwrap(),
+            "{}",
+            json!({"dataDirectory":path,"token":"a".repeat(64),"updateToken":"b".repeat(64)})
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&line).unwrap()["port"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        Self(child)
+    }
+    fn stop(&mut self) {
+        drop(self.0.stdin.take());
+        assert!(self.0.wait().unwrap().success());
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn executable_closed_and_running_app_share_owned_data_and_reviewed_send() {
+    let fixture = Fixture::new();
+    let accounts = fixture.cli(&["accounts"], None, 0);
+    assert!(!accounts.to_string().contains("fixture-secret"));
+    assert_eq!(accounts["data"]["accounts"].as_array().unwrap().len(), 3);
+    for running in [false, true] {
+        let mut server = running.then(|| Server::start(&fixture.0));
+        let mut identities = std::collections::HashSet::new();
+        for page in 1..=3 {
+            let result = fixture.cli(
+                &["list", "--account", "all", "--page", &page.to_string()],
+                None,
+                0,
+            );
+            assert_eq!(result["data"]["total"], 130);
+            for row in result["data"]["messages"].as_array().unwrap() {
+                assert!(row.get("body").is_none());
+                assert!(identities.insert(row["viewId"].clone().to_string()));
+            }
+        }
+        assert_eq!(identities.len(), 130);
+        let a = fixture.cli(
+            &["read", "--account", "A@example.invalid", "--id", "same-0"],
+            None,
+            0,
+        );
+        assert_eq!(
+            a["data"]["message"]["body"],
+            "Private body a@example.invalid"
+        );
+        assert_eq!(a["data"]["message"]["read"], false);
+        let search = fixture.cli(
+            &["search", "--account", "all", "--query", "invoice"],
+            None,
+            0,
+        );
+        assert_eq!(search["data"]["total"], 130);
+        assert_eq!(search["data"]["mode"], "keyword");
+        fixture.cli(&["read", "--account", "all", "--id", "same-0"], None, 3);
+        fixture.cli(
+            &[
+                "read",
+                "--account",
+                "missing@example.invalid",
+                "--id",
+                "same-0",
+            ],
+            None,
+            3,
+        );
+        let mut draft = json!({"to":"to@example.invalid","cc":"cc@example.invalid","bcc":"bcc@example.invalid","subject":"CLI fixture","body":"Explicit simulated send"});
+        let saved = fixture.cli(
+            &["draft", "--account", "demo", "--input", "-"],
+            Some(&draft),
+            0,
+        );
+        let id = saved["data"]["message"]["id"].as_str().unwrap();
+        let review = fixture.cli(&["review", "--account", "demo", "--id", id], None, 0);
+        assert_eq!(
+            review["data"]["message"]["footer"]["text"],
+            "Sent with fixture"
+        );
+        fixture.cli(&["send", "--input", "-"], Some(&review), 2);
+        draft["id"] = id.into();
+        draft["body"] = "Edited after review".into();
+        fixture.cli(
+            &["draft", "--account", "demo", "--input", "-"],
+            Some(&draft),
+            0,
+        );
+        fixture.cli(&["send", "--input", "-", "--confirm"], Some(&review), 3);
+        let review = fixture.cli(&["review", "--account", "demo", "--id", id], None, 0);
+        let sent = fixture.cli(&["send", "--input", "-", "--confirm"], Some(&review), 0);
+        assert_eq!(sent["data"]["simulated"], true);
+        for field in ["to", "cc", "bcc"] {
+            assert_eq!(sent["data"]["message"][field], draft[field]);
+        }
+        let replay = fixture.cli(&["send", "--input", "-", "--confirm"], Some(&review), 0);
+        assert_eq!(sent, replay);
+        if let Some(server) = &mut server {
+            server.stop();
+            assert!(!fixture.0.join("cli.json").exists());
+        }
+    }
+    let db = Store::open(&fixture.0).unwrap();
+    assert_eq!(
+        db.get("a@example.invalid", "same-0").unwrap().unwrap()["read"],
+        false
+    );
+    fixture.cli(&["accounts"], None, 3); // No live endpoint: standalone must still honor the writer lock.
+}
+
+#[tokio::test]
+async fn scoped_token_origin_input_limits_and_stale_endpoint() {
+    let fixture = Fixture::new();
+    let mut server = Server::start(&fixture.0);
+    let endpoint: Value =
+        serde_json::from_slice(&fs::read(fixture.0.join("cli.json")).unwrap()).unwrap();
+    let base = format!("http://127.0.0.1:{}", endpoint["port"]);
+    let token = endpoint["token"].as_str().unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()
+        .unwrap();
+    for path in [
+        "/api/state",
+        "/api/settings/mail",
+        "/api/backup",
+        "/api/updates/install",
+    ] {
+        assert_eq!(
+            client
+                .post(format!("{base}{path}"))
+                .bearer_auth(token)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+    assert_eq!(
+        client
+            .post(format!("{base}/api/cli"))
+            .json(&json!({"command":"accounts"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/api/cli"))
+            .bearer_auth(token)
+            .header("Origin", "https://example.invalid")
+            .json(&json!({"command":"accounts"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/api/cli"))
+            .bearer_auth(token)
+            .json(&json!({"command":"accounts","url":"https://example.invalid"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/api/cli"))
+            .bearer_auth(token)
+            .json(&json!({"command":"settings"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/api/cli"))
+            .bearer_auth(token)
+            .json(
+                &json!({"command":"draft","account":"demo","message":{"body":"x".repeat(256*1024)}})
+            )
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        413
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(fixture.0.join("cli.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let mut wrong = endpoint.clone();
+    wrong["token"] = "0".repeat(64).into();
+    fs::write(
+        fixture.0.join("cli.json"),
+        serde_json::to_vec(&wrong).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fixture.cli(&["accounts"], None, 1)["status"], 401);
+    fs::write(
+        fixture.0.join("cli.json"),
+        serde_json::to_vec(&endpoint).unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            fixture.0.join("cli.json"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        fixture.cli(&["accounts"], None, 2);
+        fs::set_permissions(
+            fixture.0.join("cli.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    server.stop();
+    morrow_search::store::private_file(
+        &fixture.0.join("cli.json"),
+        &serde_json::to_vec(&endpoint).unwrap(),
+    )
+    .unwrap();
+    morrow_search::store::private(&fixture.0.join("cli.json"), false).unwrap();
+    fixture.cli(&["accounts"], None, 0);
+    fixture.cli(&["accounts", "--confirm"], None, 2);
+    fixture.cli(&["list", "--account", "all", "--page", "0"], None, 2);
+}
+
+#[tokio::test]
+async fn changed_sender_connection_and_uncertain_delivery_require_new_review() {
+    let fixture = Fixture::new();
+    let app = App::open(&fixture.0, 0, "fixture".into(), String::new()).unwrap();
+    let saved = cli::execute(&app,CliCommand::Draft { account:"a@example.invalid".into(),message:json!({"to":"to@example.invalid","bcc":"hidden@example.invalid","body":"fixture"}) }).await.unwrap();
+    let id = saved["message"]["id"].as_str().unwrap().to_owned();
+    let review = cli::execute(
+        &app,
+        CliCommand::Review {
+            account: "a@example.invalid".into(),
+            id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    app.db(|db| {
+        db.set_settings(&json!({"preferences":{"displayName":"Changed"}}))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let send = || {
+        serde_json::from_value::<CliCommand>(
+            json!({"command":"send","review":review,"confirm":true,"retry_unconfirmed":false}),
+        )
+        .unwrap()
+    };
+    assert_eq!(cli::execute(&app, send()).await.unwrap_err().status, 409);
+    app.db(|db| { db.set_settings(&json!({"preferences":{"displayName":"Fixture"},"mailAccounts":{"a@example.invalid":{"connectionId":"a2"}}}))?; Ok(()) }).await.unwrap();
+    assert_eq!(cli::execute(&app, send()).await.unwrap_err().status, 409);
+    app.db(move |db| { let mut draft=db.get("a@example.invalid",&id)?.unwrap(); draft["deliveryStatus"]="unconfirmed".into(); draft["deliveryRequestId"]="uncertain-fixture-id".into(); db.upsert("a@example.invalid",&draft)?; db.set_settings(&json!({"deliveryAttempts":[{"account":"a@example.invalid","draftId":id,"requestId":"uncertain-fixture-id","payloadHash":"fixture"}]}))?; Ok(()) }).await.unwrap();
+    let review = cli::execute(
+        &app,
+        CliCommand::Review {
+            account: "a@example.invalid".into(),
+            id: saved["message"]["id"].as_str().unwrap().into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(review["requestId"], "uncertain-fixture-id");
+    assert_eq!(review["unconfirmed"], true);
+    let send = serde_json::from_value::<CliCommand>(
+        json!({"command":"send","review":review,"confirm":true,"retry_unconfirmed":false}),
+    )
+    .unwrap();
+    let error = cli::execute(&app, send).await.unwrap_err();
+    assert_eq!(error.status, 409);
+    assert_eq!(error.body["requiresSendReview"], true);
+}

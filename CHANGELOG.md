@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `morrow-service cli` for agent JSON accounts, cached list/search/read, drafts, complete send review and explicit confirmation. Attach to the running app or use its workspace independently while closed.
+- Scope the CLI token to mail commands, preserve exclusive workspace ownership and reject changed draft/sender/connection reviews; reuse durable To/Cc/Bcc delivery records and exact-request replay.
+
 ## 0.6.0-beta.1 — 2026-09-25
 
 - Implement the complete Rust storage/API/provider/AI/calendar/background/search/update service with compatible encryption, retained recovery records, verified migration backups and one database writer.

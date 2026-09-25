@@ -296,7 +296,8 @@ fn response(payload: &Value) -> Value {
     json!({"choices":[{"message":{"content":json!({"items":items}).to_string()}}],"usage":{"total_tokens":12}})
 }
 async fn next_call(receiver: &mut mpsc::Receiver<Call>) -> Call {
-    tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+    // Windows CI can spend several seconds committing the durable claim before HTTP.
+    tokio::time::timeout(Duration::from_secs(30), receiver.recv())
         .await
         .unwrap()
         .unwrap()
