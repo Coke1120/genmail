@@ -2,7 +2,7 @@
 
 日期：2026-09-24
 
-狀態：2026-09-25 已實作 M0 量測工具、M1 分頁介面、M2 唯讀試點及 M3–M5 完整 Rust service 候選版本。同一 commit 的 macOS／Windows Rust 桌面建置、實際升級與備份還原自動化驗收已通過；預設正式套件仍使用 Node，待其餘發佈驗收與明確切換確認。M6 依本計劃的 M5 穩定條件另行評估。詳見 [相容性清單](RUST_MIGRATION_INVENTORY.md) 與 [實際驗證記錄](../VERIFICATION.md)。
+狀態：2026-09-25 已實作 M0 量測工具、M1 分頁介面、M2 唯讀試點及 M3–M5 完整 Rust service 候選版本。同一 commit 的 macOS／Windows Rust 桌面建置、實際升級與備份還原自動化驗收已通過；使用者已明確批准 0.6.0-beta.1 切換 Rust 預設並以 prerelease 發佈，仍須同 tag 雙平台檢查全部通過。穩定版簽署、最低 OS、完整人工 UI 與真實帳戶驗收尚未完成。M6 依本計劃的 M5 穩定條件另行評估。詳見 [相容性清單](RUST_MIGRATION_INVENTORY.md) 與 [實際驗證記錄](../VERIFICATION.md)。
 
 本計劃保留 macOS 原生 SwiftUI 介面，逐步將共用 Node.js 服務遷移至 Rust。Windows 先保留 React / Electron，待 Rust 後端穩定後，另行評估 React / Tauri。Node.js 仍可用於 React 建置；「移除 Node.js」指最終桌面產品不再需要捆綁或啟動 Node.js runtime。
 
@@ -267,6 +267,6 @@ M0 先記錄 hardware、OS、build mode、資料集、索引狀態及量測腳�
 
 ## 8. 下一個可執行里程碑
 
-M0–M5 的實作已整合為預設關閉的候選版本。同一 commit 的 macOS／Windows Rust 套件、原有 Node 安裝器升級至實際 Rust 套件、UI／service 重啟與備份還原已由非發佈 CI 驗證。下一步是最低 OS／其他硬體、完整人工 UI、真實帳戶及正式簽署驗收；效能記錄不外推到未量測的平台或硬體。完成必要驗收並明確確認切換後，才將正式建置預設改成 Rust。M6 Tauri 維持獨立、以 M5 穩定為前提。
+M0–M5 的實作已整合。同一 commit 的 macOS／Windows Rust 套件、原有 Node 安裝器升級至實際 Rust 套件、UI／service 重啟與備份還原已由非發佈 CI 驗證。使用者已明確批准 0.6.0-beta.1 的 Rust 預設切換與 prerelease 發佈；同 tag 雙平台檢查仍為發佈必要條件。下一步保留最低 OS／其他硬體、完整人工 UI、真實帳戶及正式簽署驗收；效能記錄不外推到未量測的平台或硬體。M6 Tauri 維持獨立、以 M5 穩定為前提。
 
-本次保持一個 Cargo package，完成 Rust service、相容儲存／備份、provider／AI／排程／更新與明確候選套件選擇。上列未勾選項代表完整驗收尚未達成；M6 尚未實作。跨平台自動化、最低 OS、真實帳戶及正式簽署必須分別留下證據。正式切換不由建置成功自動啟用。
+本次保持一個 Cargo package，完成 Rust service、相容儲存／備份、provider／AI／排程／更新與預設 Rust 桌面套件。上列未勾選項代表完整驗收尚未達成；M6 尚未實作。跨平台自動化、最低 OS、真實帳戶及正式簽署必須分別留下證據。本次明確授權僅涵蓋 Rust prerelease，不表示穩定版驗收已完成。

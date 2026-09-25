@@ -68,7 +68,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   rust-desktop:
-    # Explicit candidate builds; the public artifacts above keep the default runtime.
+    # Additional signed-upgrade acceptance for the Rust packages published above.
     strategy:
       fail-fast: false
       matrix:

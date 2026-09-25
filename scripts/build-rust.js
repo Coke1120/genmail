@@ -5,8 +5,8 @@ import { resolve, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-// Explicit until the complete service and both desktop parity gates pass.
-export const serviceRuntime = process.env.MORROW_SERVICE_RUNTIME || 'node';
+// Rust is the approved desktop default; Node remains an explicit compatibility build.
+export const serviceRuntime = process.env.MORROW_SERVICE_RUNTIME || 'rust';
 if (!['node', 'rust'].includes(serviceRuntime)) throw new Error('MORROW_SERVICE_RUNTIME must be node or rust.');
 // Explicitly supported redistribution choices. OR alternatives such as GPL are
 // never selected; new required license terms stop packaging for review.

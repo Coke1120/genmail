@@ -28,29 +28,32 @@ writeFileSync(join(directory, 'update-manifest.sig'), signature);
 expected.push('update-manifest.json', 'update-manifest.sig');
 const notes = `Morrow Mail ${version}
 
-Both packages are built from the same Git tag and share the same mail, AI and calendar backend.
+The first Rust-backend prerelease. Both packages are built from this same Git tag and pass the paired checks before publication.
 
-What changed since 0.5.0-beta.1:
-- Desktop Settings now download a signed update, verify it before extraction, and offer Install & Restart. Saved workspace data stays in place; current operations and unsaved changes are guarded. Read-only installation folders retain the manual-download option.
-- Update packages have an Ed25519-signed manifest with pinned verification keys, exact platform/version checks and SHA-256 validation. Installation retains the previous app and rolls back failed replacement/launch operations.
-- Install this version manually once to enable future in-app updates; older builds only open release downloads. Updates require an explicit install action, not an unattended restart.
+What changed since 0.5.0-beta.2:
+- Rust now owns the shared desktop mail, OAuth, calendar, AI/workflow/learning, background import, search, storage and signed-update service. macOS keeps its fully native SwiftUI interface; Windows keeps React/Electron. No separate Node backend runtime is bundled; Electron still contains its own Node runtime.
+- Inbox pages contain bounded metadata with six locale-aware sorts, SQL counts, on-demand message bodies and revision refresh. Combined views retain mailbox ownership even when provider IDs collide.
+- Full-text search adds Chinese traditional/simplified matching, operators and filters, saved searches, owner labels and 30-result pages. Optional semantic search uses explicitly reviewed, budgeted batches; changed permissions or connections invalidate results, and failed paid requests do not automatically retry.
+- Migration preserves encrypted connections, cached messages, owner-bound drafts, exact To/Cc/Bcc send-review records and calendar retry IDs/payloads. First Rust takeover creates a verified backup and excludes a second database writer. Derived keyword indexes rebuild locally; legacy semantic vectors require a reviewed rebuild.
+- Native online backup and bundled command-line backups preserve the workspace and recovery files. Existing Node installers were tested against actual Rust packages, including both-PID shutdown, real desktop restart and backup restoration on macOS and Windows.
 
-Included from the previous beta:
-- Built-in Google Desktop OAuth for Gmail and Google Calendar on both platforms. Click Sign in with Google; users no longer need to enter a client ID or secret. Advanced settings still support a custom Google client. Outlook still requires a Microsoft client ID.
-- Clear browser sign-in buttons and advanced callback details. Native macOS refresh now selects the mailbox connected through the browser; Windows refreshes connections when returning to Settings without unsaved edits.
-- Paired beta publishing and alpha-to-beta update checks, retaining draft-first publication, SHA-256 verification and the ban on replacing public binaries.
+Updating:
+- Version 0.5.0-beta.2 can download this release through Settings > About > Check for updates. Save or discard edits before Install & Restart. Earlier versions can install the package manually.
+- Keep a verified workspace backup and close the old app before opening the new one. The workspace stays separate from the app; binary rollback never silently restores an older database over current data.
+- The signed manifest, pinned Ed25519 key, exact platform/version checks and SHA-256 validation remain unchanged. Read-only installation directories retain the manual-download option.
 
-Google setup:
-- Google Cloud API enablement, test-user access and app verification remain publisher responsibilities. While the project is in Testing, only approved test users can sign in and grants can expire after seven days. The bundled registration does not remove those restrictions.
-- Desktop client settings are extractable from the installed app. No user tokens or raw downloaded credential file are included in source control. Users authorize their own account in the browser.
+OAuth setup:
+- Built-in Google Desktop OAuth remains available for Gmail and Google Calendar. Google Cloud API enablement, test-user access and provider verification remain publisher responsibilities; bundling the registration does not remove Testing restrictions.
+- Outlook still requires an Application (client) ID from a Microsoft Entra Mobile and desktop app registration. No Google-style JSON or client secret is required. Mail and Calendar have separate localhost callback paths; see README.md.
+- Bundled desktop app identifiers are extractable and are not user credentials. No mailbox tokens or private update signing key are shipped.
 
 Packages:
-- **macOS (Apple silicon, macOS 13.5+):** fully native SwiftUI interface. Extract and move Morrow Mail.app to Applications. Ad-hoc signed; **not Apple notarized**.
-- **Windows (x64, Windows 10/11):** React interface in an isolated Electron desktop window. Extract the entire folder and run Morrow Mail.exe. **Unsigned prerelease**; Windows may show a SmartScreen warning.
-- Both include their runtimes; no Node installation is needed. Compare the supplied SHA-256 checksum before opening.
+- **macOS (Apple silicon, macOS 13.5+):** extract and move Morrow Mail.app to Applications. Fully native SwiftUI; ad-hoc signed and **not Apple notarized**.
+- **Windows (x64, Windows 10/11):** extract the entire folder and run Morrow Mail.exe. Isolated Electron renderer; **unsigned prerelease**, which may show a SmartScreen warning.
+- Both include their runtime. No Node or Rust installation is needed. Compare the supplied SHA-256 checksum before opening.
 
 Beta limitations:
-Live Gmail/Outlook/IMAP/calendar acceptance, Windows manual UI acceptance, and stable distribution signing remain pending. Provider checks use isolated fixtures; no real mail or calendar invitations were sent. Historical import is paged, but periodic refresh still fetches the latest 50 messages per selected folder. Large-cache UI pagination/full delta sync, attachments, app-wide AI spending caps and delayed/undo sending are not included. The 11 Studio simulation workflows remain labeled; the separate style-learning flow uses the configured model. Style quote/signature cleanup and token estimates are heuristic. Native Settings GUI automation was blocked by the UI tool; native compilation and API integration are verified by CI. macOS and Windows share feature APIs; their interfaces and platform-specific controls differ. The beta label does not establish production readiness. See README.md, FEATURE_COVERAGE.md and VERIFICATION.md in the tagged source.
+Live-account/provider acceptance, minimum-OS and other-hardware acceptance, complete manual UI/IME/accessibility testing and stable distribution signing remain pending. Native Settings walkthrough was blocked by the automation service crashing; automated native settings/backup checks passed, but are not a substitute for visual acceptance. Provider/model tests used isolated fixtures without real sends, invitations or paid inference. Periodic sync still fetches the latest 50 messages per selected folder; full provider delta sync, attachments, app-wide AI spending caps and delayed/undo sending are not included. Studio simulations remain clearly labeled. Windows Tauri is not part of this release. This beta does not establish stable production readiness; see the tagged README.md, FEATURE_COVERAGE.md and VERIFICATION.md.
 
 Support development: https://github.com/sponsors/Coke1120 · https://buymeacoffee.com/Coke1120
 `;

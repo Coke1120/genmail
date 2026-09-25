@@ -1,8 +1,12 @@
-# Verification — 23 September 2026
+# Verification — 25 September 2026
 
-## Rust service candidate — 25 September 2026 (local and CI, unreleased)
+## Rust prerelease cutover — 0.6.0-beta.1
 
-M0 measurement tools, M1 paged clients, M2 read worker and M3–M5 service functionality are implemented. **The packaged default remains Node; Rust selection is explicit and fails closed.** This is a tested candidate, not a claim of stable production distribution or M6 Tauri completion. See [the compatibility inventory and remaining gates](docs/RUST_MIGRATION_INVENTORY.md).
+The user explicitly approved switching the desktop default to Rust and publishing a prerelease. Both builders now select Rust unless an explicit compatibility-build override requests Node. The common product version is 0.6.0-beta.1; publication is gated on all five macOS/Windows/Linux checks and signed-upgrade jobs for the release tag. The evidence below predates that tag and must not be mistaken for the new tag’s result. Ad-hoc macOS signing, unsigned Windows distribution and the listed manual/minimum-OS/live-account limitations remain disclosed.
+
+## Pre-cutover Rust candidate — 25 September 2026 (local and CI)
+
+M0 measurement tools, M1 paged clients, M2 read worker and M3–M5 service functionality are implemented. **At this pre-cutover snapshot, the packaged default was Node and Rust selection was explicit and failed closed.** This is a tested candidate, not a claim of stable production distribution or M6 Tauri completion. See [the compatibility inventory and remaining gates](docs/RUST_MIGRATION_INVENTORY.md).
 
 - Local `npm run check`: 110 Node test entries, 108 passed and two explicitly gated Rust HTTP tests skipped; React production build passed. Rust-only contracts run separately under `npm run rust:test`.
 - Rust fixtures cover Gmail/Graph and IMAP/SMTP over isolated TLS, OAuth, all AI catalog workflows, learning, imports, schedules, search/index cancellation and budgets, original retry fingerprints, duplicate-owner IDs, shutdown, panic/disk-full transaction rollback, abrupt process death with on-disk journal recovery, writer exclusion and verified backup restore. `npm run rust:test` passed: rustfmt, clippy with warnings denied, 71 Rust tests, locked release/debug builds and all seven Node/Rust contracts. Additional recovery checks retain a stale index-completion marker across reopen; empty-vector reconciliation succeeds with SQLite writes disabled after permission generations are recorded.
@@ -15,7 +19,7 @@ M0 measurement tools, M1 paged clients, M2 read worker and M3–M5 service funct
 
 All five check jobs in [CI run 36050110233](https://github.com/Coke1120/genmail/actions/runs/36050110233), source `5ff69436372316e120805c34fb62529f6730cf7f`, passed: Ubuntu/macOS/Windows general checks, dependency audits and benchmarks, plus both macOS/Windows Rust desktop jobs. Default Node packages, native/packaged smoke and the original updater checks also passed. The release job was skipped. Earlier Windows runs exposed fixture tooling/path assumptions and a whole-client-state comparison that incorrectly rejected a normal added preference; fixes retained production verification and exact existing recovery values. Subsequent documentation-only changes record these results without changing the tested product code.
 
-All provider/model traffic used isolated generated fixtures, with no real send, calendar write, paid inference or owner workspace. Production cutover, signing/notarization, minimum-OS/manual UI and live-account acceptance remain explicit gates. This manual CI run does not publish a release; the packaged default remains Node.
+All provider/model traffic used isolated generated fixtures, with no real send, calendar write, paid inference or owner workspace. This historical manual CI run did not publish a release or change the then-default Node runtime. The later approved prerelease cutover is recorded above; signing/notarization, minimum-OS/manual UI and live-account acceptance remain outstanding.
 
 ### Native Rust walkthrough — 25 September 2026
 

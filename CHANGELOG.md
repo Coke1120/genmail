@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased — Rust service candidate
+## 0.6.0-beta.1 — 2026-09-25
 
 - Implement the complete Rust storage/API/provider/AI/calendar/background/search/update service with compatible encryption, retained recovery records, verified migration backups and one database writer.
 - Add bounded mail pages, six locale-aware sorts, body-on-demand loading and revision refresh in SwiftUI and React; preserve owner identity and manually unread messages.
-- Add explicit Rust desktop builds, native integration, isolated TLS protocol/provider fixtures, signed-upgrade checks, dependency audit/notices and 1k/10k/50k benchmarks. Default production selection remains Node until release gates and explicit cutover approval; Windows remains Electron.
+- Make Rust the default desktop backend after explicit prerelease cutover approval. macOS retains SwiftUI; Windows retains Electron and its internal Node runtime, without a separate Node backend.
+- Ship full-text search, Chinese normalization, scoped filters, saved searches and opt-in reviewed semantic indexing in both clients.
+- Add native integration, isolated TLS protocol/provider fixtures, actual old-installer-to-Rust upgrades, dependency audit/notices and 1k/10k/50k benchmarks.
+- Retain existing encrypted accounts, cached mail, owner-bound drafts, To/Cc/Bcc send-review records and calendar retry payloads; first Rust takeover creates a verified migration backup.
+- This remains an ad-hoc signed/unnotarized macOS and unsigned Windows prerelease. Live-account, minimum-OS/hardware and complete manual UI/IME acceptance remain pending; no stable-production certification is claimed.
 
 ## 0.5.0-beta.2 — 2026-09-24
 

@@ -90,10 +90,10 @@ Native acceptance checks: `npm run macos:test` validates JSON schema handling, u
 
 From 0.4.0-alpha.1, macOS arm64 and Windows x64 are built from one tag and published together only after platform checks pass. Windows uses the existing React interface in a sandboxed Electron window; macOS remains SwiftUI. Account isolation, drafts, HTML footers, AI policies and manual provider operations share one backend. Window controls and layouts are platform-specific; identical visual design is not claimed. Windows includes Ctrl-based compose/search/sync/reply/save/review shortcuts and persistent sidebar/calendar recovery state. Both builds are experimental and lack stable distribution signing; real-account acceptance remains outstanding.
 
-## Rust service candidate (unreleased)
+## Rust desktop service — 0.6.0-beta.1
 
 - Both clients use 50-row mail metadata pages (maximum 100), all six sorts, SQL counts, on-demand full message/draft loading, signed revision-bound cursors, and stale-response guards. Sender/subject ordering accepts the client’s BCP 47 locale; native and differential fixtures cover numeric, accented and Chinese names.
 - The complete Rust service implements the existing account, settings, draft/send, provider organization, OAuth, calendar, AI, workflow, learning, import, summary, search and updater contracts. Ownership, To/Cc/Bcc and uncertain-send review remain enforced at the service boundary.
 - Node and Rust retain compatible encrypted settings, message identities and recovery files. First takeover creates a verified backup; OS workspace locking plus SQLite exclusive ownership prevents legacy writers. The Rust CLI provides verified backups without Node.
-- Rust candidate packages are selected explicitly at build time. SwiftUI stays native; Windows keeps React/Electron. Default public packaging remains Node pending the documented release gates; selected Rust never falls back to Node.
-- Isolated TLS provider/model tests and the actual native Rust client harness exercise the candidate. See [verification](VERIFICATION.md) for current platform results, live-account/signing limits and benchmarks. Windows Tauri is deferred until the plan’s M5 stability gate.
+- Rust is the default desktop service from 0.6.0-beta.1, following explicit prerelease cutover approval. SwiftUI stays native; Windows keeps React/Electron. Both platforms must pass the tagged release gates before publication; Rust never falls back to Node.
+- Isolated TLS provider/model tests and the actual native Rust client harness exercise the Rust service. See [verification](VERIFICATION.md) for current platform results, live-account/signing limits and benchmarks. Windows Tauri is deferred until the plan’s M5 stability gate.

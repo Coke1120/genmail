@@ -1,6 +1,6 @@
 # Rust service compatibility inventory — 2026-09-25
 
-Baseline: `585fe1d8bc53c04062911a97c4f1d46fa5ad0ed4`. M0 measurement tools, M1 paged clients, M2 read worker and the M3–M5 Rust service implementation are present. **The default desktop runtime remains Node until the release gates and explicit cutover approval.** Windows Tauri is conditional on M5 stability and is not part of this candidate.
+Baseline: `585fe1d8bc53c04062911a97c4f1d46fa5ad0ed4`. M0 measurement tools, M1 paged clients, M2 read worker and the M3–M5 Rust service implementation are present. **Rust is the approved default desktop runtime for the 0.6.0-beta.1 prerelease; publication still requires all paired tag checks.** Stable signing, minimum-OS/manual UI and live-account acceptance remain separate gates. Windows Tauri is conditional on M5 stability and is not part of this release.
 
 ## Responsibility map
 

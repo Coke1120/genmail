@@ -51,9 +51,9 @@ Both include their runtimes; no Node installation is needed. On macOS, unzip and
 
 These are experimental prereleases. macOS builds are **ad-hoc signed, not Apple notarized**; Windows builds are **unsigned** and may show SmartScreen warnings. Review the source and supplied SHA-256 checksum before opening. For macOS, see Apple's [opening an app from an unidentified developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac) instructions. Stable distribution signing and live-account acceptance remain pending.
 
-## v0.5 beta scope
+## v0.6 beta scope
 
-This beta adds built-in Google mail/calendar sign-in and clearer browser callback handling to both desktop clients. It retains the 0.5 alpha’s controlled AI automation, historical import and reviewed writing-style learning. Future work includes large-mailbox UI pagination/full delta sync, app-wide AI usage budgets, attachment support and delayed/undo sending. These are roadmap items, not capabilities of this release. See [verification](VERIFICATION.md) for release checks and acceptance limits.
+This beta switches both desktop packages to the shared Rust service, adds bounded inbox paging and ships keyword/optional semantic search. It preserves built-in Google sign-in, controlled AI automation, historical import, reviewed writing-style learning and signed updates. Full provider delta sync, app-wide AI usage budgets, attachments and delayed/undo sending remain roadmap items. See [verification](VERIFICATION.md) for release checks and acceptance limits.
 
 ## Search and optional smart search (current source)
 
@@ -71,9 +71,9 @@ Mail text goes only to the selected embedding endpoint during approved batches; 
 
 ## Native macOS app
 
-The primary interface is **fully native SwiftUI**, including the mail reader, composer, all 19 AI Studio tools, skills, Email Brain, settings, permissions, and Google/Outlook calendars. There is no embedded web view. The app bundles Node and the existing mail service so it runs without a terminal or a separately installed Node runtime.
+The primary interface is **fully native SwiftUI**, including the mail reader, composer, all 19 AI Studio tools, skills, Email Brain, settings, permissions, and Google/Outlook calendars. There is no embedded web view. The app bundles the Rust mail service and needs no terminal, Node or Rust installation to run.
 
-Build on a Mac with Apple's Swift command-line tools, Node.js 22.13+, and npm:
+Build on a Mac with Apple's Swift command-line tools, Rust 1.98+ with rustfmt/clippy, Node.js 22.13+, and npm:
 
 ```sh
 npm ci
@@ -83,7 +83,7 @@ npm run macos:build
 npm run macos:open
 ```
 
-The result is `build/macos/Morrow Mail.app`. You can move it to Applications. The build uses the host architecture; this build is Apple silicon and requires **macOS 13.5+** because of its bundled Node runtime. `macos:build` rejects Node distributions linked to non-system libraries and records the bundled runtime's minimum OS in the app. Use an official standalone Node distribution when building elsewhere.
+The result is `build/macos/Morrow Mail.app`. You can move it to Applications. Rust desktop builds target Apple silicon and **macOS 13.5+**; packaging rejects non-system dynamic-library dependencies. An explicit `MORROW_SERVICE_RUNTIME=node` compatibility build still requires an official self-contained Node distribution with its license.
 
 Native data lives in `~/Library/Application Support/Morrow Mail`, separate from the web app's `./data`. Existing web data is not automatically moved. To reuse it, stop both apps, make a verified backup, and restore that backup's database and encryption key into the native data directory before opening the native app. `MORROW_DATA_DIR` can select a separate absolute data directory for development or acceptance testing. Do not run two apps against the same data directory.
 
@@ -105,7 +105,7 @@ Data lives in `%APPDATA%\Morrow Mail`. Sidebar disclosure and pending calendar r
 
 The **Sign in … in browser** button opens the system browser. Keep Morrow open, finish authorization, then return to Mail or Calendar Settings. Connections refresh on return when there are no unsaved edits or in-flight operations; **Refresh connections** remains available. The callback in Advanced settings is for provider registration, not a link to start login. Keyboard shortcuts include **Ctrl+N** compose, **Ctrl+F** search, **Ctrl+,** settings, **Ctrl+R** sync, **Ctrl+Shift+R** reply, **Ctrl+1/2/3** Inbox / AI Studio / Calendar, **Ctrl+S** save draft, and **Ctrl+Shift+D** send review.
 
-Build on Windows x64 with official Node.js 22.13+ and npm:
+Build on Windows x64 with official Node.js 22.13+, npm, Rust 1.98+ with rustfmt/clippy, and the Microsoft C++ build tools:
 
 ```sh
 npm ci --ignore-scripts
@@ -120,8 +120,8 @@ The runnable folder is `build/windows/Morrow Mail-win32-x64`; the distributable 
 For a Windows backup, quit Morrow Mail, open PowerShell inside the extracted app folder, and run:
 
 ```powershell
-$env:DATA_DIR = Join-Path $env:APPDATA 'Morrow Mail'
-& '.\resources\app\runtime\node.exe' '.\resources\app\backend\scripts\backup.js' 'C:\path\to\new-backup-folder'
+$workspace = Join-Path $env:APPDATA 'Morrow Mail'
+& '.\resources\app\runtime\morrow-service.exe' --backup $workspace 'C:\path\to\new-backup-folder'
 ```
 
 ## Keeping platform releases aligned
@@ -134,9 +134,9 @@ The release job requires `MORROW_UPDATE_SIGNING_KEY` in GitHub Actions secrets. 
 
 Every change is checked; versioned tags publish paired downloads. Unsigned automation accepts numbered alpha and beta versions; stable and release-candidate tags are rejected. Native UI differences remain explicit in [feature coverage](FEATURE_COVERAGE.md); API changes must preserve both clients.
 
-## Rust service candidate
+## Rust desktop service
 
-The Rust backend now implements storage, the local API, Gmail/Outlook OAuth and mail, IMAP/SMTP, calendars, AI/workflows/learning, background imports/summaries, keyword/semantic search, and signed desktop updates. SwiftUI and React use bounded metadata pages, SQL counts, on-demand bodies and revision checks. The existing Node backend remains the default until the release gates in [VERIFICATION.md](VERIFICATION.md) pass and cutover is approved.
+The Rust backend implements storage, the local API, Gmail/Outlook OAuth and mail, IMAP/SMTP, calendars, AI/workflows/learning, background imports/summaries, keyword/semantic search, and signed desktop updates. SwiftUI and React use bounded metadata pages, SQL counts, on-demand bodies and revision checks. Rust is the desktop default from 0.6.0-beta.1 following explicit prerelease cutover approval; remaining stable-release gates are recorded in [VERIFICATION.md](VERIFICATION.md).
 
 ```sh
 npm run rust:test
@@ -148,11 +148,11 @@ MORROW_SERVICE_RUNTIME=rust npm run macos:build
 npm run benchmark:rust-service -- --output=test-results/migration-rust-service.json
 ```
 
-Rust candidate bundles contain `morrow-service` instead of a backend Node runtime. A selected Rust service fails closed if it cannot start; it never falls back to a second writer. Windows still uses Electron and its internal Node runtime. Tauri remains a separately gated stage. Build selection is recorded in bundle metadata, not accepted from the renderer. `package.json` remains the version source. The locked Rust build requires Rust 1.98+, rustfmt/clippy and a C compiler; bundled third-party notices accompany the executable.
+Desktop bundles contain `morrow-service` instead of a backend Node runtime. Rust fails closed if it cannot start; it never falls back to a second writer. Windows still uses Electron and its internal Node runtime. Tauri remains a separately gated stage. Build selection is recorded in bundle metadata, not accepted from the renderer. `package.json` remains the version source. The locked Rust build requires Rust 1.98+, rustfmt/clippy and a C compiler; bundled third-party notices accompany the executable. Node remains available for browser development and explicit compatibility builds.
 
 On the first Rust open, the service locks the workspace against both Rust and legacy SQLite writers, verifies the existing key, and makes a consistent backup before migration. Mail, drafts, send-review records, calendar retry IDs and the AES-256-GCM settings format are preserved. It never restores an old database automatically during binary rollback. Interrupted paid jobs stop for review; legacy semantic vectors require a reviewed rebuild.
 
-The macOS Back Up Workspace control creates a consistent snapshot while the service runs. For a command-line Rust candidate backup, quit the app and run its bundled executable with **absolute** workspace and new destination paths:
+The macOS Back Up Workspace control creates a consistent snapshot while the service runs. For a command-line desktop backup, quit the app and run its bundled executable with **absolute** workspace and new destination paths:
 
 ```sh
 '/path/to/Morrow Mail.app/Contents/Resources/morrow-service' --backup '/absolute/workspace' '/absolute/new-backup'
@@ -232,6 +232,8 @@ The publisher must enable Gmail and Calendar APIs, configure the consent screen 
 2. Under **Authentication**, add the **Mobile and desktop applications** platform with the custom redirect URI `http://localhost:3001/api/oauth/microsoft/callback`. Enable public client flows.
 3. Add Microsoft Graph **delegated** permissions `User.Read`, `Mail.Read`, and `Mail.Send`. To enable provider moves, add `Mail.ReadWrite` and check **Allow moving mail and managing labels** in Settings. Reconnect existing accounts after changing permissions. Morrow also requests `offline_access` to refresh the connection.
 4. Copy the application/client ID into Morrow's Outlook settings, then connect and sign in. This public desktop client does not require a client secret.
+
+Microsoft uses a client ID, not a downloaded Google-style credentials JSON. The same app registration can serve mail and calendar: also register `http://localhost:3001/api/calendar-oauth/microsoft/callback` and add delegated `Calendars.ReadWrite` for calendar access. Native localhost redirect matching ignores the port but preserves the path, so Morrow’s random desktop port does not need a separate registration. This release requires entering the Microsoft client ID; only Google offers a bundled default client. See Microsoft’s [desktop registration](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-registration) and [loopback redirect rules](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url).
 
 Your organization may require administrator approval for consent or restrict app registration. See Microsoft's [app registration guide](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app), [platform configuration](https://learn.microsoft.com/en-us/graph/auth-register-app-v2), and [Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference).
 
