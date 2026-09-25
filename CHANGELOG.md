@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.6.0-beta.2 — 2026-09-25
 
 - Add `morrow-service cli` for agent JSON accounts, cached list/search/read, drafts, complete send review and explicit confirmation. Attach to the running app or use its workspace independently while closed.
 - Scope the CLI token to mail commands, preserve exclusive workspace ownership and reject changed draft/sender/connection reviews; reuse durable To/Cc/Bcc delivery records and exact-request replay.
+- Bind app discovery to the canonical workspace and require a fresh authenticated service proof before transmitting a CLI token or message. Copied workspaces and stale ports cannot redirect commands to another mailbox.
 
 ## 0.6.0-beta.1 — 2026-09-25
 

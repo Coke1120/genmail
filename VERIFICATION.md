@@ -1,12 +1,12 @@
 # Verification — 25 September 2026
 
-## Agent CLI — unreleased source
+## Agent CLI — 0.6.0-beta.2
 
 `morrow-service cli` now supports JSON accounts, cached list/search/read, owned drafts, review and explicitly confirmed sending, both attached to a running app and standalone with exclusive workspace ownership. It has a separate owner-private endpoint token, no background scheduler and no implicit provider read/AI calls. See [CLI usage and limits](docs/CLI.md).
 
 Local `npm run rust:test` passed with 74 Rust tests, seven Node/Rust contracts, strict clippy/rustfmt and locked debug/release builds. Three CLI integration cases launch real processes against isolated fictional workspaces: closed/running app access, account collisions and numeric paging, unchanged unread state, footer/To/Cc/Bcc, changed draft/sender/connection rejection, success replay, retained uncertain request IDs, token scope, Origin/body limits, stale endpoints and writer exclusion. Follow-up fixtures also cover copied-workspace isolation and a port impostor replaying an old health proof: no bearer or message is transmitted before fresh workspace-bound proof validation. Delivery in subprocess tests is explicitly simulated; no real provider mail was sent. Existing isolated TLS mail/SMTP tests remain the provider-delivery evidence. `npm run macos:rust:test` also passed with the updated service, including native lifecycle/restart, owned drafts/Bcc, online backup, local OAuth handoff and Node↔Rust encrypted persistence.
 
-The first post-merge main CI run passed four platform jobs but the Windows full check timed out waiting five seconds for a background fixture request. The fixture wait is now bounded at 30 seconds to accommodate durable claims on that runner; production deadlines and assertions are unchanged. The same CLI tests run in the existing Ubuntu/macOS/Windows CI matrix. This feature does not alter the already published v0.6.0-beta.1 assets.
+All five jobs in [CLI CI 36130997950](https://github.com/Coke1120/genmail/actions/runs/36130997950), source `eb80d6fd3226a6feb855b4ba5384b0b755cf1640`, passed: Ubuntu/macOS/Windows full checks, strict Rust lint/format checks, Node/React tests, dependency audits and benchmarks, plus both desktop packages, native/packaged smoke and actual old-installer upgrade/restart/backup acceptance. The first post-merge run had a Windows background fixture timeout; its wait is now bounded at 30 seconds, with production deadlines and assertions unchanged. The 0.6.0-beta.2 version, documentation and release notes are prepared after this source verification; publication additionally requires the complete tagged paired CI. Already published v0.6.0-beta.1 assets are unchanged.
 
 ## Rust prerelease cutover — 0.6.0-beta.1
 

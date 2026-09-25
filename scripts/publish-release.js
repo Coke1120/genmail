@@ -28,17 +28,23 @@ writeFileSync(join(directory, 'update-manifest.sig'), signature);
 expected.push('update-manifest.json', 'update-manifest.sig');
 const notes = `Morrow Mail ${version}
 
-The first Rust-backend prerelease. Both packages are built from this same Git tag and pass the paired checks before publication.
+Agent CLI for the Rust-backed desktop app. Both packages are built from this same Git tag and pass the paired checks before publication.
 
-What changed since 0.5.0-beta.2:
-- Rust now owns the shared desktop mail, OAuth, calendar, AI/workflow/learning, background import, search, storage and signed-update service. macOS keeps its fully native SwiftUI interface; Windows keeps React/Electron. No separate Node backend runtime is bundled; Electron still contains its own Node runtime.
-- Inbox pages contain bounded metadata with six locale-aware sorts, SQL counts, on-demand message bodies and revision refresh. Combined views retain mailbox ownership even when provider IDs collide.
-- Full-text search adds Chinese traditional/simplified matching, operators and filters, saved searches, owner labels and 30-result pages. Optional semantic search uses explicitly reviewed, budgeted batches; changed permissions or connections invalidate results, and failed paid requests do not automatically retry.
-- Migration preserves encrypted connections, cached messages, owner-bound drafts, exact To/Cc/Bcc send-review records and calendar retry IDs/payloads. First Rust takeover creates a verified backup and excludes a second database writer. Derived keyword indexes rebuild locally; legacy semantic vectors require a reviewed rebuild.
-- Native online backup and bundled command-line backups preserve the workspace and recovery files. Existing Node installers were tested against actual Rust packages, including both-PID shutdown, real desktop restart and backup restoration on macOS and Windows.
+What changed since 0.6.0-beta.1:
+- The bundled morrow-service CLI provides JSON accounts, cached mail listing/search/reading, owned drafts, complete send review and explicitly confirmed sending for local agents.
+- It connects to the running app or opens the existing workspace independently while the app is closed. Exclusive ownership prevents two database writers; cached reads do not mark messages read, fetch provider mail or trigger AI.
+- Sending requires an explicit account and confirmation of the reviewed content. Draft/sender/connection changes invalidate review; To/Cc/Bcc, footer, uncertain-delivery records and original request IDs are preserved. No automatic resend.
+- App discovery is bound to the canonical workspace and verifies a fresh service proof before transmitting a CLI token or message, including copied-workspace and stale-port protection. The CLI token only authorizes mail commands.
+- macOS remains fully native SwiftUI; Windows remains React/Electron. Rust is still the default service on both platforms.
+
+CLI quick start:
+- macOS: '/Applications/Morrow Mail.app/Contents/Resources/morrow-service' cli --help
+- Windows PowerShell, from the extracted app folder: & '.\\resources\\app\\runtime\\morrow-service.exe' cli --help
+- Usage, JSON contracts, review/send examples and limits: https://github.com/Coke1120/genmail/blob/v${version}/docs/CLI.md
+- Configure accounts in the app first. External agents with workspace access are not restricted by the in-app AI context checkboxes; trust the agent and authorize each delivery. No CLI attachments, account setup, implicit sync or automatic retries.
 
 Updating:
-- Version 0.5.0-beta.2 can download this release through Settings > About > Check for updates. Save or discard edits before Install & Restart. Earlier versions can install the package manually.
+- Versions 0.5.0-beta.2 and 0.6.0-beta.1 can download this release through Settings > About > Check for updates. Save or discard edits before Install & Restart. Earlier versions can install the package manually.
 - Keep a verified workspace backup and close the old app before opening the new one. The workspace stays separate from the app; binary rollback never silently restores an older database over current data.
 - The signed manifest, pinned Ed25519 key, exact platform/version checks and SHA-256 validation remain unchanged. Read-only installation directories retain the manual-download option.
 
