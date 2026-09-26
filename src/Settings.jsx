@@ -387,7 +387,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
         </form>
       </section>
 
-      <div id="settings-panel-search" role="tabpanel" aria-labelledby="settings-tab-search" hidden={tab !== 'search'}><SearchSettings state={state} active={tab === 'search'} onDirtyChange={setSearchDirty} onBusyChange={setSearchBusy} disabled={!!busy || preferencesSaving || calendarBusy || learningBusy || embeddingBusy} /></div>
+      <div id="settings-panel-search" role="tabpanel" aria-labelledby="settings-tab-search" hidden={tab !== 'search'}><SearchSettings state={state} active={tab === 'search'} onDirtyChange={setSearchDirty} onBusyChange={setSearchBusy} onConfigureModel={() => changeTab('model')} disabled={!!busy || preferencesSaving || calendarBusy || learningBusy || embeddingBusy} /></div>
       <div id="settings-panel-learning" role="tabpanel" aria-labelledby="settings-tab-learning" hidden={tab !== 'learning'}><StyleLearning key={state.account.id} state={state} onUpdate={onUpdate} onDirtyChange={setLearningDirty} onBusyChange={setLearningBusy} disabled={!!busy || preferencesSaving || calendarBusy} /></div>
       <section id="settings-panel-mail" role="tabpanel" aria-labelledby="settings-tab-mail" hidden={tab !== 'mail'}>
         <fieldset className="settings-fields" disabled={operationBusy}>

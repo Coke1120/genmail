@@ -28,18 +28,14 @@ writeFileSync(join(directory, 'update-manifest.sig'), signature);
 expected.push('update-manifest.json', 'update-manifest.sig');
 const notes = `Morrow Mail ${version}
 
-Safer formatted mail, broader Gmail coverage and clearer desktop controls. Both packages are built from this same Git tag and pass the paired checks before publication.
+A more compact mail reader, in-place AI assistance and optional sender-history replies. Both packages are built from this same Git tag and pass the paired checks before publication.
 
-What changed since 0.6.0-beta.4:
-- Read sanitized HTML mail with links and optional HTTPS images. Scripts, forms and embedded pages are blocked; images require per-message consent. Existing cached messages need refetching for HTML. Attachment/CID images are not included.
-- Choose a right, bottom or focused reading layout, expand the reader, and keep your inbox page/selection when reading. Senders align left; unread dots align right and only unread previews are bold. On macOS, closing the window keeps Morrow in the Dock; reopening retains your work and quitting still guards edits/writes.
-- Reply All and Forward retain the message's owning account. Demo is hidden from the interface. Imported Gmail drafts open as new local copies, preserving recipients without changing the provider original.
-- Gmail refresh checks Inbox, Sent, Drafts, Starred and All Mail, up to 50 messages per scope. Date-bounded All Mail history includes archived messages and user labels, excluding Spam/Trash. Provider metadata refresh preserves explicit local changes.
-- Reviewed provider moves support Gmail Spam and Outlook Junk; phishing reports and sender blocking remain provider-site actions. Mail and AI activity show fetching, checkpointed imports, queued/running work and safe errors.
-- Temporary read-only history fetch failures retry at most three times with persisted progress. Authentication, invalid cursors/pages and database failures need explicit recovery; older unexplained failed imports can be resumed manually.
-- General preferences auto-save with visible progress and retry on failure. Embedding settings move to Model with a fixed-input Test Connection; Index Now prepares a scope/budget review. Learn Now creates a proposal, and Save Approved Style separately activates it without overwriting manual Email Brain memory.
-- Fix update checks/downloads and product links for the renamed repository without relaxing trust checks. The unpublished beta.5 candidate was cancelled before release.
-- Update contributor guidance and user documentation. Rust remains the desktop backend, with the existing agent CLI, built-in OAuth and signed workspace-preserving updater.
+What changed since 0.6.0-beta.8:
+- Summarize, Suggest Reply and Translate open a message-bound popup without leaving your email for AI Studio. Review the result, then explicitly use a reply in an owned draft; nothing is sent automatically.
+- Add a separate Suggest with History action. It scans downloaded mail from the exact same sender in the same account, within permitted folders, and sends the selected message plus the newest matches up to the saved AI message limit. It shows matched/used counts; it cannot read mail that has not been downloaded. Sender access is required, unchecked fields are withheld, and changed sources or revoked permissions discard in-flight results.
+- Compact subject, sender and date/time presentation; recipient/mailbox details and full AI summaries remain expandable. Tighten native View/Sort controls, sidebar/list widths and reader spacing while retaining right/bottom/focused layouts.
+- Add Test Connection directly in Search for the saved embedding model, plus Edit in Model. Model still tests unsaved fields. Both probes send only a fixed sentence and leave settings/index unchanged; results/errors appear near the top.
+- Preserve the Rust desktop service, account-bound drafts, HTML isolation, reviewed provider operations, encrypted settings, backup and signed updater contracts.
 
 CLI quick start:
 - macOS: '/Applications/Morrow Mail.app/Contents/Resources/morrow-service' cli --help
@@ -63,7 +59,7 @@ Packages:
 - Both include their runtime. No Node or Rust installation is needed. Compare the supplied SHA-256 checksum before opening.
 
 Beta limitations:
-Live-account/provider acceptance, minimum-OS and other-hardware acceptance, complete manual UI/IME/accessibility testing and stable distribution signing remain pending. Native API, WebKit isolation and window lifecycle checks passed locally; browser fixture walkthroughs are not full native visual or live-account acceptance. The browser automation connection failed during an external-link confirmation check; protocol/sandbox tests passed, but that interactive step is not claimed. Provider/model tests used isolated fixtures without real sends, invitations or paid inference. Full provider delta/deletion sync, attachments, phishing/malware verdicts, sender blocking, app-wide AI spending caps and delayed/undo sending are not included. Studio simulations remain clearly labeled. Windows Tauri is not part of this release. This beta does not establish stable production readiness; see the tagged README.md, FEATURE_COVERAGE.md and VERIFICATION.md.
+Live-account/provider acceptance, minimum-OS and other-hardware acceptance, complete manual UI/IME/accessibility testing and stable distribution signing remain pending. Sender-history context is bounded by the saved 1–50 message limit; each historical body is truncated to 5,000 UTF-16 characters and the selected body to 18,000. It is not an exhaustive model analysis of the whole mailbox. Native API, WebKit isolation and window lifecycle checks passed locally; browser fixture walkthroughs are not full native visual or live-account acceptance. The browser automation connection failed during an external-link confirmation check; protocol/sandbox tests passed, but that interactive step is not claimed. Provider/model tests used isolated fixtures without real sends, invitations or paid inference. Full provider delta/deletion sync, attachments, phishing/malware verdicts, sender blocking, app-wide AI spending caps and delayed/undo sending are not included. Studio simulations remain clearly labeled. Windows Tauri is not part of this release. This beta does not establish stable production readiness; see the tagged README.md, FEATURE_COVERAGE.md and VERIFICATION.md.
 
 Support development: https://github.com/sponsors/Coke1120 · https://buymeacoffee.com/Coke1120
 `;

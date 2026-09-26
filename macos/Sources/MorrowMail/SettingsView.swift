@@ -36,16 +36,14 @@ struct NativeSettingsView: View {
             Divider()
             HStack(spacing: 0) {
                 List(tabs, id: \.0, selection: Binding(get: { model.settingsTab }, set: { next in
-                    if searchBusy || model.busy || preferenceSaving { return }
-                    if (learningDirty || searchDirty) && !model.confirmDiscard("Discard unsaved learning, search or embedding settings?") { return }
-                    model.settingsTab = next
+                    selectTab(next)
                 })) { tab in Label(tab.1, systemImage: tab.2).tag(tab.0) }.listStyle(.sidebar).frame(width: 165)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         switch model.settingsTab {
                         case "mail": mailPage
                         case "learning": StyleLearningView(dirty: $learningDirty)
-                        case "search": NativeSearchSettingsView(dirty: $searchDirty, operationBusy: $searchBusy)
+                        case "search": NativeSearchSettingsView(dirty: $searchDirty, operationBusy: $searchBusy, onConfigureModel: { selectTab("model") })
                         case "model":
                             modelPage.disabled(searchBusy)
                             Divider()
@@ -91,6 +89,11 @@ struct NativeSettingsView: View {
                 do { try await Task.sleep(nanoseconds: tab == "mail" ? 3_000_000_000 : 1_500_000_000) } catch { return }
             }
         }
+    }
+    private func selectTab(_ next: String) {
+        if searchBusy || model.busy || preferenceSaving { return }
+        if (learningDirty || searchDirty) && !model.confirmDiscard("Discard unsaved learning, search or embedding settings?") { return }
+        model.settingsTab = next
     }
     func initialize() {
         var next = model.state["settings"]

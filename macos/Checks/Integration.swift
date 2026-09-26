@@ -32,6 +32,19 @@ struct NativeClientChecks {
         let revision = try await model.request("/state/revision")
         assert(revision["revision"] == model.state["revision"])
         let opened = model.current!
+        let originalView = [model.account, model.section, model.selectedMessage ?? ""]
+        model.openAssistant("reply", message: opened, includeHistory: true)
+        assert(model.readerAssistant?["includeHistory"].bool == true)
+        assert([model.account, model.section, model.selectedMessage ?? ""] == originalView, "Reader assistance must not navigate to AI Studio or switch accounts.")
+        let readerRequest = model.readerAssistant!
+        assert(model.readerAssistantIsCurrent(readerRequest))
+        model.newDraft()
+        assert(model.compose == nil, "Do not open a second sheet over reader assistance.")
+        let sourceDetail = model.messageDetail
+        model.messageDetail["body"] = .string("changed fixture source")
+        assert(!model.readerAssistantIsCurrent(readerRequest), "A changed source must invalidate its AI result.")
+        model.messageDetail = sourceDetail
+        model.readerAssistant = nil
         _ = try await model.request("/messages/" + encodedPath(opened.id), method: "PATCH", body: .object(["read": .bool(false)]), mailbox: opened["accountId"].string)
         try await model.reload()
         await model.loadMessage()
@@ -65,6 +78,9 @@ struct NativeClientChecks {
         print("Native summary schedule and separate language settings round-trip passed.")
         try await model.selectAccount("demo") // Explicit fixture-only catalogue; no Demo entry exists in the UI.
         let selectedID = model.messages[0].id
+        let historyReply = try await model.request("/ai", method: "POST", body: .object(["action": .string("reply"), "messageId": .string(selectedID), "includeHistory": .bool(true)]), mailbox: "demo")
+        assert(historyReply["text"].nonempty && historyReply["source"].string == "demo")
+        assert(historyReply["history"]["scope"].string == "downloaded" && historyReply["history"]["usedMessages"].number >= 1 && historyReply["history"]["usedMessages"].number <= model.policy["maxMessages"].number)
         let calendars = try await model.request("/calendars")
         assert(calendars["connections"].array.filter { $0["connected"].bool }.count == 2)
         assert(calendars["calendars"].array.count == 4)

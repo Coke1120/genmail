@@ -1150,6 +1150,16 @@ async fn connection_probe_uses_unsaved_model_without_mail_settings_or_index_chan
     assert_eq!(fixture.app().db(|db| db.settings()).await.unwrap(), before);
     assert_eq!(fixture.vectors().await, vectors);
     *model.mode.lock().unwrap() = String::new();
+    assert_eq!(fixture.request("test", Some(json!({})), A).await.0, 200);
+    let saved_probe = model.seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(saved_probe["body"]["model"], before["searchAI"]["model"]);
+    assert_eq!(saved_probe["authorization"], "Bearer saved-fixture-key");
+    assert_eq!(
+        saved_probe["body"]["input"],
+        json!(["Morrow Mail embedding connection test."])
+    );
+    assert_eq!(fixture.app().db(|db| db.settings()).await.unwrap(), before);
+    assert_eq!(fixture.vectors().await, vectors);
     model.hold.store(true, Ordering::Release);
     let app = fixture.app().clone();
     let first_input = input.clone();

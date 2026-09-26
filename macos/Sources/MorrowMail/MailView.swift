@@ -7,6 +7,7 @@ struct MailWorkspace: View {
     @State private var columns: NavigationSplitViewVisibility = .all
     @State private var previousColumns: NavigationSplitViewVisibility = .all
     @State private var expandedReader = false
+    @State private var assistantDraft: Draft?
     @EnvironmentObject var model: AppModel
     private var layout: String { expandedReader ? "focus" : ["right", "bottom", "focus"].contains(readerLayout) ? readerLayout : "right" }
     var filtered: [JSON] {
@@ -22,7 +23,7 @@ struct MailWorkspace: View {
             } else {
               VStack(spacing: 0) {
                 NavigationSplitView(columnVisibility: $columns) {
-                    sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
+                    sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 230, max: 260)
                 } detail: {
                     if model.section != "calendar" && !model.hasMailbox {
                         VStack(spacing: 16) {
@@ -81,13 +82,18 @@ struct MailWorkspace: View {
         .onChange(of: model.selectedMessage) { selection in if selection == nil { leaveExpandedReader() } }
         .sheet(item: $model.compose) { draft in ComposeView(initial: draft).environmentObject(model) }
         .sheet(item: $model.organizing) { message in OrganizeMailView(message: message).environmentObject(model) }
+        .sheet(item: $model.readerAssistant, onDismiss: {
+            if let draft = assistantDraft { assistantDraft = nil; model.newDraft(draft) }
+        }) { request in
+            ReaderAssistanceView(request: request) { draft in assistantDraft = draft }.environmentObject(model)
+        }
         .sheet(isPresented: $model.showSettings) { NativeSettingsView().environmentObject(model) }
     }
     private var readingPanes: some View {
         // Keep the reader in the same container when layouts change, including its AI task state.
         HSplitView {
             if layout == "right" || (layout == "focus" && model.current == nil) {
-                messageList.frame(minWidth: 260, idealWidth: 310, maxWidth: layout == "focus" ? .infinity : 520)
+                messageList.frame(minWidth: 260, idealWidth: 320, maxWidth: layout == "focus" ? .infinity : 400)
             }
             VSplitView {
                 if layout == "bottom" { messageList.frame(minHeight: 160, idealHeight: 240, maxHeight: 440) }
@@ -124,7 +130,7 @@ struct MailWorkspace: View {
                 Image(systemName: "sunrise.fill").font(.title2).foregroundStyle(morrowGreen)
                 VStack(alignment: .leading) { Text("Morrow").font(.title2.weight(.bold)); Text("A calmer kind of inbox").font(.caption).foregroundStyle(.secondary) }
                 Spacer()
-            }.padding(18)
+            }.padding(.horizontal, 16).padding(.vertical, 12)
             List(selection: Binding(get: { mailFolders.contains(model.section) ? model.account + "\n" + model.section : model.section }, set: { value in
                 guard model.canNavigate else { return }
                 let parts = value.components(separatedBy: "\n")
@@ -184,19 +190,20 @@ struct MailWorkspace: View {
     }
     var messageList: some View {
         VStack(spacing: 0) {
-            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.title2.bold()); Text(model.combined ? "All accounts" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Toggle(isOn: $model.unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).help("Show unread only").accessibilityLabel("Show unread only").disabled(!model.searchResponse.isNull) }.padding(16)
-            HStack {
+            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.headline); Text(model.combined ? "All accounts" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }; Spacer(); Toggle(isOn: $model.unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).controlSize(.small).help("Show unread only").accessibilityLabel("Show unread only").disabled(!model.searchResponse.isNull) }.padding(.horizontal, 14).padding(.vertical, 10)
+            HStack(spacing: 12) {
                 Menu {
                     ForEach(["compact", "comfortable", "spacious"], id: \.self) { density in
                         Button { model.preference("density", density) } label: { Label(density.capitalized, systemImage: model.preferences["density"].string == density ? "checkmark" : "text.alignleft") }
                     }
-                } label: { Label("View", systemImage: "list.bullet") }
+                } label: { Label("View", systemImage: "list.bullet") }.fixedSize().accessibilityIdentifier("mail.viewMenu")
                 Menu {
                     ForEach(mailSortOptions, id: \.0) { option in
                         Button { model.preference("sort", option.0) } label: { Label(option.1, systemImage: model.preferences["sort"].string == option.0 ? "checkmark" : "arrow.up.arrow.down") }
                     }
-                } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }.disabled(!model.searchResponse.isNull)
-            }.disabled(model.busy).padding(.horizontal, 14).padding(.bottom, 10)
+                } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }.fixedSize().accessibilityIdentifier("mail.sortMenu").disabled(!model.searchResponse.isNull)
+                Spacer(minLength: 0)
+            }.menuStyle(.borderlessButton).controlSize(.small).disabled(model.busy).padding(.horizontal, 14).padding(.bottom, 8)
             Divider()
             if filtered.isEmpty {
                 VStack {
@@ -256,6 +263,8 @@ struct MailWorkspace: View {
 struct MessageReader: View {
     @EnvironmentObject var model: AppModel
     let message: JSON
+    @State private var detailsExpanded = false
+    @State private var summaryExpanded = false
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -266,53 +275,195 @@ struct MessageReader: View {
                     Button { model.newDraft(Draft(forwarding: message)) } label: { Label("Forward", systemImage: "arrowshape.turn.up.right") }.labelStyle(.iconOnly).help("Forward")
                 }
                 Spacer()
-                if model.canOrganize(message) { Button { model.organizing = message } label: { Label("Move / Labels / Spam", systemImage: "folder") }.help("Move, label, or move to Spam on this mailbox’s provider") }
+                if model.canOrganize(message) { Button { model.organizing = message } label: { Label("Move / Labels / Spam", systemImage: "folder") }.labelStyle(.iconOnly).help("Move, label, or move to Spam on this mailbox’s provider") }
                 Button { model.patch(message, .object(["starred": .bool(!message["starred"].bool)])) } label: { Image(systemName: message["starred"].bool ? "star.fill" : "star") }.help("Toggle star").accessibilityLabel("Toggle star")
                 if message["folder"].string != "drafts" {
                     Button { model.patch(message, .object(["folder": .string(message["folder"].string == "inbox" ? "archive" : "inbox")])) } label: { Image(systemName: message["folder"].string == "inbox" ? "archivebox" : "tray") }.help("Move locally").accessibilityLabel("Move locally")
                 }
                 Button { model.patch(message, .object(["folder": .string("trash")])) } label: { Image(systemName: "trash") }.help("Move to local trash").accessibilityLabel("Move to local trash")
-            }.buttonStyle(.borderless).padding(18).disabled(model.busy)
+            }.buttonStyle(.borderless).controlSize(.small).padding(.horizontal, 16).padding(.vertical, 10).disabled(model.busy)
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    Text(message["subject"].nonempty ? message["subject"].string : "(No subject)").font(.system(size: 26, weight: .semibold)).textSelection(.enabled)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Mailbox: " + message["accountId"].string).font(.caption).foregroundStyle(morrowGreen)
-                        Text(message["fromName"].string).font(.headline)
-                        Text(message["fromEmail"].string).foregroundStyle(.secondary)
-                        Text("To: " + message["to"].string).font(.callout).foregroundStyle(.secondary)
-                        if message["cc"].nonempty { Text("Cc: " + message["cc"].string).font(.callout).foregroundStyle(.secondary) }
-                        if message["bcc"].nonempty { Text("Bcc: " + message["bcc"].string).font(.callout).foregroundStyle(.secondary) }
-                        if message["providerFolderName"].nonempty { Text("Provider: " + message["providerFolderName"].string).font(.caption).foregroundStyle(morrowGreen) }
-                        Text(dateLabel(message["date"].string)).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(message["subject"].nonempty ? message["subject"].string : "(No subject)")
+                        .font(.system(size: 21, weight: .semibold)).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(message["fromName"].nonempty ? message["fromName"].string : message["fromEmail"].string)
+                            .font(.headline).lineLimit(1).help(message["fromEmail"].string)
+                        Spacer(minLength: 0)
+                        Text(dateLabel(message["date"].string)).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
                     }.textSelection(.enabled)
-                    if !message["labels"].array.isEmpty { Text(message["labels"].array.map(\.string).joined(separator: " · ")).font(.caption).foregroundStyle(morrowGreen) }
+                    DisclosureGroup(isExpanded: $detailsExpanded) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("From: " + message["fromName"].string + " <" + message["fromEmail"].string + ">")
+                            Text("To: " + message["to"].string)
+                            if message["cc"].nonempty { Text("Cc: " + message["cc"].string) }
+                            if message["bcc"].nonempty { Text("Bcc: " + message["bcc"].string) }
+                            Text("Mailbox: " + message["accountId"].string)
+                            Text("Date: " + dateLabel(message["date"].string))
+                            if message["providerFolderName"].nonempty { Text("Provider: " + message["providerFolderName"].string) }
+                            if !message["labels"].array.isEmpty { Text("Labels: " + message["labels"].array.map(\.string).joined(separator: ", ")) }
+                        }.font(.caption).foregroundStyle(.secondary).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 5)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("Details")
+                            Text("To: " + message["to"].string).foregroundStyle(.secondary).lineLimit(1)
+                        }.font(.caption)
+                    }
                     if !message["aiSummary"].isNull {
-                        GroupBox(message["aiSummary"]["source"].string == "demo" ? "Illustrative demo summary" : "New-mail AI summary") {
-                            VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            DisclosureGroup(isExpanded: $summaryExpanded) {
+                              VStack(alignment: .leading, spacing: 8) {
                                 ForEach(Array(message["aiSummary"]["items"].array.enumerated()), id: \.offset) { _, item in
-                                    Text(item["priority"].string).font(.headline)
-                                    Text(item["summary"].string).textSelection(.enabled)
+                                    Text(item["priority"].string + " · " + item["summary"].string).textSelection(.enabled)
                                 }
+                                if message["aiSummary"]["items"].array.isEmpty { Text(message["aiSummary"]["text"].string).textSelection(.enabled) }
                                 Text(dateLabel(message["aiSummary"]["completedAt"].string) + " · Review AI priorities.").font(.caption).foregroundStyle(.secondary)
-                            }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                        }
+                              }.padding(.top, 6).frame(maxWidth: .infinity, alignment: .leading)
+                            } label: { Label(message["aiSummary"]["source"].string == "demo" ? "Illustrative demo summary" : "AI summary · Review before using", systemImage: "sparkles").font(.caption).foregroundStyle(morrowGreen) }
+                            if !summaryExpanded {
+                                Text(message["aiSummary"]["items"].array.first?["summary"].string ?? message["aiSummary"]["text"].string)
+                                    .font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                        }.padding(10).background(morrowGreen.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                     } else { AutomaticAssistance(messageID: message.id, account: message["accountId"].string, trigger: "onOpen") }
                     Divider()
                     SecureMessageBody(message: message).id(message.viewID)
                     FooterPreview(footer: message["footer"])
                     Divider()
-                    HStack {
-                        ForEach(["summary", "reply", "translate"], id: \.self) { action in
-                            Button(action == "summary" ? "Summarize" : action == "reply" ? "Suggest reply" : "Translate") {
-                                model.openAssistant(action, message: message)
-                            }.disabled(model.busy || !model.allowed(action))
+                    LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 8) {
+                        ForEach(["summary", "reply", "history", "translate"], id: \.self) { action in
+                            Button(action == "summary" ? "Summarize" : action == "reply" ? "Suggest Reply" : action == "history" ? "Suggest with History" : "Translate") {
+                                model.openAssistant(action == "history" ? "reply" : action, message: message, includeHistory: action == "history")
+                            }.disabled(!model.canNavigate || model.messageDetail.viewID != message.viewID || !model.allowed(action == "history" ? "reply" : action) || !model.policy["folders"][message["folder"].string].bool || (action == "history" && !model.policy["content"]["sender"].bool))
+                                .help(action == "history" ? "Review downloaded same-sender mail in this account, within saved AI permissions. Sender access is required." : "Open AI assistance for this message")
                         }
-                    }
+                    }.controlSize(.small).frame(maxWidth: 400, alignment: .leading)
                     Text("AI uses your saved permissions. Generated text is yours to review.").font(.caption).foregroundStyle(.secondary)
-                }.padding(30)
+                }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+        .onChange(of: message.viewID) { _ in detailsExpanded = false; summaryExpanded = false }
+    }
+}
+
+struct ReaderAssistanceView: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) var dismiss
+    let request: JSON
+    let useDraft: (Draft) -> Void
+    @State private var result: JSON = .null
+    @State private var prompt = ""
+    @State private var loading = false
+    @State private var started = false
+    @State private var invalidated = false
+    @State private var localError = ""
+    @State private var work: Task<Void, Never>?
+    @State private var runID = UUID()
+    private var message: JSON { request["message"] }
+    private var action: String { request["action"].string }
+    private var history: Bool { request["includeHistory"].bool }
+    private var current: Bool { !invalidated && model.readerAssistantIsCurrent(request) }
+    private var title: String { history ? "Suggest with History" : action == "summary" ? "Summarize" : action == "reply" ? "Suggest Reply" : "Translate" }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label(title, systemImage: "sparkles").font(.title2.weight(.semibold))
+                Spacer()
+                Button("Close") { stop(); dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            ScrollView {
+              VStack(alignment: .leading, spacing: 12) {
+            Text(message["subject"].nonempty ? message["subject"].string : "(No subject)").lineLimit(2).help(message["subject"].string)
+            Text(message["accountId"].string).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if history {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Downloaded history only").font(.headline)
+                    Text("Uses this message and cached mail from \(message["fromEmail"].string) in this account. It does not fetch older mail from your provider.")
+                    Text("Up to \(Int(request["settings"]["policy"]["maxMessages"].number)) messages, including this one. Saved folder and content permissions apply; sender access is required.")
+                    Text("Permitted folders: " + permissionFolders.filter { request["settings"]["policy"]["folders"][$0].bool }.map { $0.capitalized }.joined(separator: ", "))
+                    Text("Permitted content: " + ["subject", "body", "sender"].filter { request["settings"]["policy"]["content"][$0].bool }.joined(separator: ", "))
+                }.font(.callout).foregroundStyle(.secondary).padding(12).background(morrowGreen.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
+            Text(request["settings"]["ai"]["configured"].bool
+                 ? "Model: \(request["settings"]["ai"]["model"].string) · \(request["settings"]["ai"]["baseUrl"].string)"
+                 : "No model configured · Choose an AI model in Settings")
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if history || action == "translate" {
+                TextField(action == "translate" ? "Language or translation instructions (optional)" : "Reply instructions (optional)", text: $prompt)
+                    .textFieldStyle(.roundedBorder).disabled(loading || !current)
+                    .onChange(of: prompt) { _ in result = .null; localError = "" }
+            }
+            if !current {
+                Label("The message, account or AI settings changed. Close this window and reopen the action to review the new context.", systemImage: "exclamationmark.circle").foregroundStyle(.secondary)
+            } else if loading {
+                HStack { ProgressView().controlSize(.small); Text("Generating…"); Spacer(); Button("Cancel") { stop(); localError = "Stopped waiting. The model may already be processing; no retry was started." } }
+            } else if !localError.isEmpty {
+                Text(localError).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if current && result["text"].nonempty {
+                Divider()
+                Text(result["source"].string == "demo" ? "Illustrative demo · Review before using" : "AI result · Review before using").font(.caption).foregroundStyle(.secondary)
+                if history && result["history"]["scope"].string == "downloaded" {
+                    Text("Used \(Int(result["history"]["usedMessages"].number)) of \(Int(result["history"]["matchedMessages"].number)) matching downloaded messages · Limit \(Int(result["history"]["maxMessages"].number))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text(result["text"].string).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
+            }
+              }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: .infinity)
+            Divider()
+            HStack {
+                Button(result["text"].nonempty ? "Generate Again" : "Generate") { generate() }
+                    .disabled(loading || !current || model.busy || !request["settings"]["ai"]["configured"].bool)
+                Spacer()
+                if result["text"].nonempty && current {
+                    Button("Copy") {
+                        guard current else { return }
+                        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(result["text"].string, forType: .string)
+                    }
+                    if action == "reply" {
+                        Button("Use in Draft") {
+                            guard current, !loading, !model.busy else { return }
+                            var draft = Draft(message: message, reply: true)
+                            draft.body = result["text"].string
+                            useDraft(draft); dismiss()
+                        }.buttonStyle(.borderedProminent).disabled(model.busy)
+                    }
+                }
+            }
+            Text("Your model provider may charge. Generated text is a suggestion; nothing is sent until you review a draft and choose Send.").font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(22).frame(width: 580, height: min(650, (NSScreen.main?.visibleFrame.height ?? 800) - 100))
+        .task {
+            guard !started else { return }
+            started = true
+            if !current { invalidate() }
+            else if !history { generate() }
+        }
+        .onChange(of: model.readerAssistantIsCurrent(request)) { valid in if !valid { invalidate() } }
+        .onDisappear { stop() }
+    }
+    private func stop() { work?.cancel(); work = nil; runID = UUID(); loading = false }
+    private func invalidate() { stop(); invalidated = true; result = .null; localError = "" }
+    private func generate() {
+        guard !loading, current, !model.busy, request["settings"]["ai"]["configured"].bool else { return }
+        var payload: JSON = .object(["action": .string(action), "messageId": .string(message.id), "prompt": .string(prompt)])
+        if history { payload["includeHistory"] = .bool(true) }
+        let owner = message["accountId"].string, run = UUID()
+        runID = run; loading = true; result = .null; localError = ""
+        work = Task { @MainActor in
+            do {
+                let next = try await model.request("/ai", method: "POST", body: payload, mailbox: owner)
+                guard !Task.isCancelled, runID == run else { return }
+                guard current else { invalidate(); return }
+                result = next
+            } catch {
+                guard !Task.isCancelled, runID == run else { return }
+                guard current else { invalidate(); return }
+                localError = error.localizedDescription
+            }
+            if runID == run { loading = false; work = nil }
         }
     }
 }
@@ -326,18 +477,28 @@ struct AutomaticAssistance: View {
     @State private var result: JSON = .null
     @State private var loading = false
     @State private var error = ""
+    @State private var expanded = false
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if loading { ProgressView(trigger == "onOpen" ? "Preparing automatic summary…" : "Preparing reply suggestion…") }
             if result["text"].nonempty {
-                Text(result["source"].string == "demo" ? "Automatic assistance · Illustrative demo" : "Automatic assistance · Review before using").font(.caption).foregroundStyle(.secondary)
-                Text(result["text"].string).textSelection(.enabled)
+                if trigger == "onOpen" {
+                    VStack(alignment: .leading, spacing: 5) {
+                        DisclosureGroup(isExpanded: $expanded) {
+                            Text(result["text"].string).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                        } label: { Label(result["source"].string == "demo" ? "Illustrative demo summary" : "AI summary · Review before using", systemImage: "sparkles").font(.caption).foregroundStyle(morrowGreen) }
+                        if !expanded { Text(result["text"].string).font(.callout).foregroundStyle(.secondary).lineLimit(2) }
+                    }.padding(10).background(morrowGreen.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                } else {
+                    Text(result["source"].string == "demo" ? "Automatic assistance · Illustrative demo" : "Automatic assistance · Review before using").font(.caption).foregroundStyle(.secondary)
+                    Text(result["text"].string).textSelection(.enabled)
+                }
                 if let use { Button("Use Suggested Reply") { use(result["text"].string) }.disabled(model.busy) }
             }
             if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.secondary) }
         }
         .task(id: account + "\n" + messageID + "\n" + trigger) {
-            result = .null; error = ""; loading = false
+            result = .null; error = ""; loading = false; expanded = false
             let action = trigger == "onOpen" ? "summary" : "reply", policy = model.policy, ai = model.state["settings"]["ai"], preferences = model.preferences
             guard policy["triggers"][trigger].bool, model.allowed(action) else { return }
             loading = true

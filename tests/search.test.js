@@ -180,6 +180,9 @@ test('embedding connection probe validates unsaved settings without mail, writes
   assert.equal((await request({ ...input, baseUrl: 'https://different.example', protocol: 'ollama' })).status, 200);
   assert.equal(seen[1].config.apiKey, ''); assert.equal(seen[1].config.protocol, 'ollama');
   assert.equal((await request({ ...input, clearApiKey: true })).status, 200); assert.equal(seen[2].config.apiKey, '');
+  assert.deepEqual(await request({}), { status: 200, data: { ok: true, dimensions: 3 } });
+  assert.equal(seen[3].config.model, 'saved-model'); assert.equal(seen[3].config.apiKey, 'saved-fixture-key');
+  assert.deepEqual(seen[3].input, ['Morrow Mail embedding connection test.']);
   const count = seen.length;
   for (const change of [{ model: '' }, { baseUrl: 'http://remote.invalid' }, { apiKey: 'bad\r\nkey' }, { input: 'private body' }, { enabled: true }]) assert.equal((await request({ ...input, ...change })).status, 400);
   assert.equal(seen.length, count);

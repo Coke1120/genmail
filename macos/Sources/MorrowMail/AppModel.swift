@@ -30,6 +30,7 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var settingsTab = "general"
     @Published var assistantAction = "summary"
+    @Published var readerAssistant: JSON?
     @Published var unsavedForms = Set<String>()
     private(set) var restartingForUpdate = false
     private var process: Process?
@@ -87,7 +88,7 @@ final class AppModel: ObservableObject {
     var colorScheme: ColorScheme? {
         switch preferences["theme"].string { case "light": return .light; case "dark": return .dark; default: return nil }
     }
-    var canNavigate: Bool { !busy && unsavedForms.isEmpty && compose == nil && organizing == nil && !showSettings }
+    var canNavigate: Bool { !busy && unsavedForms.isEmpty && compose == nil && organizing == nil && readerAssistant == nil && !showSettings }
 
     func start() async {
         guard !launching else { return }
@@ -222,7 +223,7 @@ final class AppModel: ObservableObject {
         return result
     }
     func restartToInstallUpdate(onError: @escaping (String) -> Void) {
-        guard !busy, unsavedForms.isEmpty else { onError("Save or discard unsaved changes and wait for current operations before installing an update."); return }
+        guard !busy, unsavedForms.isEmpty, readerAssistant == nil else { onError("Close AI assistance, save or discard unsaved changes and wait for current operations before installing an update."); return }
         let alert = NSAlert(); alert.messageText = "Install update and restart Morrow Mail?"
         alert.informativeText = "Your saved mail, accounts and settings will stay on this device. The previous app will be retained if installation fails."
         alert.addButton(withTitle: "Install & Restart"); alert.addButton(withTitle: "Later")
@@ -334,11 +335,26 @@ final class AppModel: ObservableObject {
         selectedMessage = nil
         if let folder { section = folder }
     }
-    func openAssistant(_ action: String, message: JSON) {
-        perform {
-            if self.account != message["accountId"].string { try await self.selectAccount(message["accountId"].string) }
-            self.selectedMessage = message.viewID; self.messageDetail = message; self.assistantAction = action; self.section = "studio"
-        }
+    func openAssistant(_ action: String, message: JSON, includeHistory: Bool = false) {
+        guard canNavigate, ["summary", "reply", "translate"].contains(action), allowed(action),
+              current == message, messageDetail.viewID == message.viewID,
+              policy["folders"][message["folder"].string].bool,
+              !includeHistory || action == "reply" && policy["content"]["sender"].bool,
+              let owner = accounts.first(where: { $0.id == message["accountId"].string }) else { return }
+        readerAssistant = .object([
+            "id": .string(UUID().uuidString), "action": .string(action), "message": message,
+            "includeHistory": .bool(includeHistory), "viewAccount": .string(account),
+            "settings": state["settings"].picking(["ai", "policy", "preferences"]),
+            "connection": owner["settings"], "writingContext": state["workspace"].picking(["brain", "styleLearning"]),
+        ])
+    }
+    func readerAssistantIsCurrent(_ request: JSON) -> Bool {
+        guard readerAssistant?.id == request.id, account == request["viewAccount"].string,
+              current == request["message"],
+              state["settings"].picking(["ai", "policy", "preferences"]) == request["settings"],
+              state["workspace"].picking(["brain", "styleLearning"]) == request["writingContext"],
+              let owner = accounts.first(where: { $0.id == request["message"]["accountId"].string }) else { return false }
+        return owner["settings"] == request["connection"]
     }
     func sync() async throws {
         state = try await request("/sync", method: "POST", body: .object([:]))
@@ -360,7 +376,7 @@ final class AppModel: ObservableObject {
         }
     }
     func newDraft(_ value: Draft? = nil) {
-        guard !busy, compose == nil else { return }
+        guard !busy, compose == nil, readerAssistant == nil else { return }
         guard unsavedForms.isEmpty else { notice = "Save your current changes before opening a new draft."; return }
         var draft = value ?? Draft()
         guard (draft.replyToID.isEmpty && !draft.forwarding && !draft.sourceDraft) || !draft.accountID.isEmpty else { error = "The original mailbox is unavailable. Reopen the original message."; return }
@@ -371,7 +387,7 @@ final class AppModel: ObservableObject {
         compose = draft
     }
     func settings(_ tab: String = "general") {
-        guard compose == nil, unsavedForms.subtracting(["settings"]).isEmpty else { notice = "Save your current changes before opening Settings."; return }
+        guard compose == nil, readerAssistant == nil, unsavedForms.subtracting(["settings"]).isEmpty else { notice = "Close AI assistance or save your current changes before opening Settings."; return }
         settingsTab = tab; showSettings = true
     }
     func allowed(_ action: String) -> Bool { policy["enabled"].bool && policy["behaviors"][action].bool }

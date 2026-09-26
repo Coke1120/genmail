@@ -69,6 +69,8 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   const previews = new Map();
   const updateChecks = new Map();
   const automaticAI = new Map();
+  // In-flight history replies must not survive revoke/restore within one process.
+  let historyRevision = 0;
   let mailboxBusy = false;
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -95,7 +97,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     return selected === 'all' || validAccount(selected) ? selected : 'demo';
   }
   function saveConnection(mail, select = false) {
-    if (select) mail = { ...mail, connectionId: randomUUID() };
+    if (select) { mail = { ...mail, connectionId: randomUUID() }; historyRevision++; }
     const config = settings();
     store.setSettings({ mailAccounts: { ...connections(config), [mail.email]: mail },
       ...(select || config.mail?.email === mail.email ? { mail } : {}), ...(select ? { activeAccount: mail.email } : {}) });
@@ -320,6 +322,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const fallback = Object.keys(accounts)[0] || 'demo';
     const selected = activeAccount() === account ? fallback : activeAccount();
     store.setSettings({ mailAccounts: accounts, mail: accounts[settings().mail?.email] || accounts[fallback] || null, activeAccount: selected });
+    historyRevision++;
     for (const [id, preview] of previews) if (preview.account === account) previews.delete(id);
     res.json(state(selected, req));
   }));
@@ -354,6 +357,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   }
   app.post('/api/settings/ai', (req, res) => {
     store.setSettings({ ai: modelSettings(req.body || {}) });
+    historyRevision++;
     res.json(state(req.mailAccount, req));
   });
   app.post('/api/settings/ai/test', async (req, res) => {
@@ -366,6 +370,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.post('/api/settings/policy', (req, res) => {
     const before = resolvePolicy(settings().policy), policy = updatePolicy(settings().policy, req.body);
     store.setSettings({ policy });
+    historyRevision++;
     if (JSON.stringify(before.summarySchedule) !== JSON.stringify(policy.summarySchedule) || (!before.enabled && policy.enabled) || (!before.triggers.scheduledSummary && policy.triggers.scheduledSummary) || (!before.behaviors.briefing && policy.behaviors.briefing)) automation.resetSchedules();
     previews.clear();
     res.json(state(req.mailAccount, req));
@@ -373,6 +378,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.post('/api/signature/preview', (req, res) => res.json({ footer: preferencesFooter(req.body || {}) }));
   app.post('/api/settings/preferences', (req, res) => {
     store.setSettings({ preferences: updatePreferences(settings().preferences, req.body) });
+    historyRevision++;
     res.json(state(req.mailAccount, req));
   });
   async function syncAccounts(accounts) {
@@ -587,11 +593,33 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
       });
     } finally { sending.delete(sendKey); if (draftKey) sendingDrafts.delete(draftKey); }
   });
+  function includeReplyHistory(input) {
+    if (input.includeHistory !== undefined && typeof input.includeHistory !== 'boolean') fail('includeHistory must be true or false.');
+    if (input.includeHistory === true && (input.action !== 'reply' || input.trigger !== undefined || input.draftText !== undefined)) fail('Sender history is available only for an explicit reply to a selected email.');
+    return input.includeHistory === true;
+  }
+  function replyHistory(account, target, policy) {
+    if (policy.content.sender !== true) fail('Enable sender access in AI permissions to suggest a reply with history.', 403);
+    if (policy.folders[target.folder] !== true) fail('This folder is outside the permitted AI scope.', 403);
+    const sender = email(target.fromEmail).replace(/[A-Z]/g, char => char.toLowerCase());
+    const folders = Object.keys(policy.folders).filter(folder => policy.folders[folder] === true);
+    const maxMessages = Math.max(1, Math.min(50, Number.isSafeInteger(policy.maxMessages) && policy.maxMessages >= 0 ? policy.maxMessages : 8));
+    // SQLite lower() folds ASCII only. Trim the same whitespace as JavaScript before exact matching.
+    const whitespace = '\u0009\u000a\u000b\u000c\u000d \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
+    const where = `account=? AND json_extract(data,'$.folder') IN (${folders.map(() => '?').join(',')}) AND lower(trim(json_extract(data,'$.fromEmail'),?))=? AND id<>?`;
+    const params = [account, ...folders, whitespace, sender, target.id];
+    const matchedMessages = 1 + store.search.query(`SELECT count(*) AS n FROM messages WHERE ${where}`, params)[0].n;
+    // ponytail: scan scoped metadata; add a sender index only if mailbox profiling warrants it.
+    const ids = store.search.query(`SELECT id FROM messages WHERE ${where} ORDER BY COALESCE(json_extract(data,'$.date'),'') DESC,id LIMIT ?`, [...params, maxMessages - 1]);
+    const messages = [target, ...ids.map(({ id }) => getMessage(account, id))].map(message => redactMessage(message, policy));
+    return { messages, history: { matchedMessages, usedMessages: messages.length, maxMessages, scope: 'downloaded' } };
+  }
   function contextFor(action, input, account) {
+    const includeHistory = includeReplyHistory(input);
     const config = settings();
     const policy = resolvePolicy(config.policy);
     const feature = requireBehavior(policy, action);
-    let messages = [], skill;
+    let messages = [], skill, history;
     if (action === 'skill') {
       skill = workspace(account).skills.find(item => item.id === input.skillId);
       if (!skill) fail('Choose a saved email skill.', 404);
@@ -604,19 +632,21 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
       const message = getMessage(account, input.messageId);
       if (!policy.folders[message.folder]) fail('This folder is outside the permitted AI scope.', 403);
       messages = [redactMessage(message, policy)];
+      if (includeHistory) ({ messages, history } = replyHistory(account, message, policy));
     } else if (feature.context === 'mailbox') {
       messages = permittedMessages(store.listMessages(account), policy).filter(message => !skill?.folders || skill.folders[message.folder]);
       if (!messages.length) fail('No messages are available within the permitted folders.', 403);
       if (action === 'ask') messages = api.searchContext(messages, input.prompt || '', policy.maxMessages);
       messages = messages.slice(0, policy.maxMessages);
     }
-    return { config, policy, feature, account, messages, skill };
+    return { config, policy, feature, account, messages, skill, history };
   }
   async function assistance(input, owner, summaryIDs = null) {
     const { action, prompt = '' } = input;
     text(prompt, 'AI instructions', 2000, !['ask', 'write'].includes(action));
     const context = contextFor(action, input, owner);
-    const { config, policy, feature, account, skill } = context;
+    const { config, policy, feature, account, skill, history } = context;
+    const revision = historyRevision;
     let messages = context.messages;
     if (summaryIDs) {
       if (!['summary', 'briefing'].includes(action) || summaryIDs.length > policy.maxMessages) fail('Invalid summary context.');
@@ -631,22 +661,28 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
         const folder = store.getMessage(account, id)?.folder;
         return policy.folders[folder] && (!skill?.folders || skill.folders[folder]);
       });
-    const options = { preferences: { ...DEFAULT_PREFERENCES, ...config.preferences }, brain: useBrain ? brain : null, styleVoice: ['reply', 'write', 'rewrite'].includes(action) && (!skill || skill.folders.sent) ? learning.voice(account) : '', structuredSummary: !!summaryIDs, timeZone: policy.summarySchedule.timeZone };
+    const options = { preferences: { ...DEFAULT_PREFERENCES, ...config.preferences }, brain: useBrain ? brain : null, styleVoice: ['reply', 'write', 'rewrite'].includes(action) && (!skill || skill.folders.sent) ? learning.voice(account) : '', structuredSummary: !!summaryIDs, timeZone: policy.summarySchedule.timeZone, ...(history ? { includeHistory: true } : {}) };
+    const brainSnapshot = history && options.brain ? { value: JSON.stringify(options.brain), sources: (brain.sourceMessageIds || []).map(id => redactMessage(getMessage(account, id), policy)) } : null;
     const instructions = skill ? `${skill.instructions}\n\n${prompt}` : prompt;
     if (!config.ai?.model || !config.ai?.baseUrl) {
       if (account !== 'demo') fail('Choose an AI model in Settings to use assistance with your mailbox.', 409);
       const text = api.demoAssistance(action, messages, instructions, options);
-      return { ...(summaryIDs ? prioritySummary(text, messages) : { text }), source: 'demo' };
+      return { ...(summaryIDs ? prioritySummary(text, messages) : { text }), source: 'demo', ...(history ? { history } : {}) };
     }
     let result;
     try { result = await api.runModel(config.ai, action, messages, instructions, options); }
     catch (error) { fail(error.message?.startsWith('The AI provider returned') ? error.message : 'Could not reach the AI model or read its response. Check your endpoint and model, then try again.', 502); }
     if (options.styleVoice && options.styleVoice !== learning.voice(account)) fail('Writing style changed while this request was running. Its response was discarded.', 409);
+    if (history && (revision !== historyRevision || config.aiGeneration !== settings().aiGeneration || (brainSnapshot && brainSnapshot.value !== JSON.stringify(workspace(account).brain)) || [...messages, ...(brainSnapshot?.sources || [])].some(previous => {
+      const current = store.getMessage(account, previous.id);
+      return !current || JSON.stringify(redactMessage(current, policy)) !== JSON.stringify(previous);
+    }))) fail('The reply history or AI permissions changed while this request was running. Its response was discarded.', 409);
     if (!validAccount(account) || connections(config)[account]?.connectionId !== connections()[account]?.connectionId || JSON.stringify(config.ai) !== JSON.stringify(settings().ai) || JSON.stringify(config.preferences) !== JSON.stringify(settings().preferences) || JSON.stringify(policy) !== JSON.stringify(resolvePolicy(settings().policy)) || (input.trigger && !matchesAITrigger(policy, input.trigger, store.getMessage(account, input.messageId))) || (skill && JSON.stringify(skill) !== JSON.stringify(workspace(account).skills.find(item => item.id === skill.id)))) fail('The account, model or AI permissions changed while this request was running. Its response was discarded.', 409);
-    return { ...(summaryIDs ? prioritySummary(result, messages) : { text: result }), source: 'model' };
+    return { ...(summaryIDs ? prioritySummary(result, messages) : { text: result }), source: 'model', ...(history ? { history } : {}) };
   }
   app.post('/api/ai', async (req, res) => {
     const input = req.body || {}, account = req.mailAccount;
+    includeReplyHistory(input);
     if (input.trigger !== undefined) {
       const action = { onOpen: 'summary', onReply: 'reply' }[input.trigger];
       if (typeof input.trigger !== 'string' || !action || input.action !== action || input.prompt || input.draftText !== undefined) fail('Invalid automatic AI trigger.');

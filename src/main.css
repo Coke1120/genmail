@@ -408,3 +408,51 @@ button svg { flex-shrink: 0; }
   .layout-right .message-pane { resize: horizontal; overflow: auto; min-width: 260px; max-width: 65%; flex-basis: auto; }
 }
 .message-row .message-select .message-sender, .message-row .message-select h3 { font-weight: inherit; }
+
+/* Keep the reading surface compact; full envelope and AI text remain one disclosure away. */
+.reader-content { padding: 18px 24px; }
+.reader-heading h2 { font-size: clamp(19px, 1.5vw, 24px); line-height: 1.3; margin: 0 0 10px; letter-spacing: -.4px; }
+.reader-details { margin-bottom: 16px; }
+.reader-details > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; color: var(--muted); font-size: 11px; }
+.reader-details > summary::-webkit-details-marker, .reader-summary > summary::-webkit-details-marker { display: none; }
+.reader-sender { min-width: 0; flex: 1; display: flex; flex-wrap: wrap; gap: 2px 6px; }
+.reader-sender strong { color: var(--text); font-size: 12px; }
+.reader-sender > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.reader-details time { font-size: 11px; }
+.reader-details-label { display: flex; align-items: center; gap: 3px; }
+.reader-details-label svg, .reader-summary > summary > svg:last-child { flex-shrink: 0; }
+.reader-details[open] .reader-details-label svg, .reader-summary[open] > summary > svg:last-child { transform: rotate(180deg); }
+.reader-details dl, .message-ai-scope dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 12px; padding: 12px; margin: 8px 0 0; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; line-height: 1.5; }
+.reader-details dt, .message-ai-scope dt { color: var(--muted); }
+.reader-details dd, .message-ai-scope dd { margin: 0; overflow-wrap: anywhere; color: var(--text); }
+.reader-summary { margin: 0 0 14px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-alt); color: var(--text); font-size: 11px; }
+.reader-summary > summary { display: flex; align-items: center; gap: 7px; list-style: none; cursor: pointer; }
+.reader-summary > summary > svg, .reader-summary strong { flex-shrink: 0; }
+.reader-summary > summary > span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.reader-summary[open] > summary > span { visibility: hidden; }
+.reader-summary pre { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+.reader-summary small, .reader-ai-status { color: var(--muted); font-size: 11px; }
+.reader-content .message-end { margin: 20px 0 16px; }
+.reader-ai-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; margin-top: 10px; color: var(--green); }
+.reader-ai-actions .button { font-size: 11px; min-height: 32px; padding: 6px 4px; }
+.message-ai-modal { width: min(660px, calc(100vw - 28px)); }
+.message-ai-content { padding: 0 24px 22px; color: var(--text); font-size: 13px; line-height: 1.6; }
+.message-ai-subject { font-weight: 600; overflow-wrap: anywhere; }
+.message-ai-scope { padding: 2px 14px 10px; background: var(--surface-alt); border-radius: 8px; }
+.message-ai-scope dl { padding: 0; border: 0; }
+.message-ai-model { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.message-ai-progress, .message-ai-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.message-ai-text { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: var(--surface-alt); border: 1px solid var(--line); border-radius: 7px; }
+.message-ai-actions { margin-top: 16px; }
+.message-ai-content .message-privacy { font-size: 11px; }
+.reader-toolbar { height: auto; min-height: 48px; flex-wrap: wrap; }
+.reader-toolbar > div { flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .reader-content { padding: 16px; }
+  .reader-details > summary { flex-wrap: wrap; }
+  .reader-details time { margin-left: 36px; }
+  .reader-sender { flex-basis: calc(100% - 40px); }
+  .reader-details-label { margin-left: auto; }
+  .message-ai-content { padding: 0 18px 18px; }
+  .message-ai-actions .button { flex: 1; }
+}

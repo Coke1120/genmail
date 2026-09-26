@@ -8,7 +8,7 @@ export function editableSearchSettings(value, presentation = 'search') {
   const keys = presentation === 'model' ? ['protocol', 'baseUrl', 'model'] : ['enabled', 'accounts', 'months', 'tokenBudget', 'folders', 'content'];
   return { ...Object.fromEntries(keys.map(key => [key, value.settings[key]])), ...(presentation === 'model' ? { apiKey: '', clearApiKey: false } : {}) };
 }
-export default function SearchSettings({ state, onDirtyChange, onBusyChange, disabled, presentation = 'search', active = true }) {
+export default function SearchSettings({ state, onDirtyChange, onBusyChange, onConfigureModel, disabled, presentation = 'search', active = true }) {
   const [value, setValue] = useState(null), [options, setOptions] = useState(null), [baseline, setBaseline] = useState('');
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [testResult, setTestResult] = useState('');
   const requestLock = useRef(false);
@@ -52,6 +52,14 @@ export default function SearchSettings({ state, onDirtyChange, onBusyChange, dis
   return <section className="settings-fields">
     <h2 className="settings-section-title">{presentation === 'model' ? 'Embedding model' : 'Search & semantic indexing'}</h2>
     <p className="settings-intro">{presentation === 'model' ? 'Smart search (智慧搜尋) uses this separate embedding model. Choose indexing scope and review batches in Search.' : 'Keyword search is local and always available. Configure the embedding connection in Model. Smart search (智慧搜尋) is optional; selected mail text is sent only after you review and start an indexing batch.'}</p>
+    {testResult && <p role="status" className="settings-test-result">{testResult}</p>}
+    {error && <p role="alert" className="search-error">{error}</p>}
+    {presentation === 'search' && <div className="settings-test-result">
+      <strong>Embedding connection · {value.settings.model || 'No embedding model saved'}</strong>
+      <p>{value.settings.baseUrl}</p>
+      <div className="settings-actions"><button className="button secondary" disabled={busy || indexing || disabled || !value.settings.model.trim()} onClick={() => action('test')}>Test connection</button>{onConfigureModel && <button className="button secondary" disabled={busy || indexing || disabled} onClick={onConfigureModel}>Edit in Model…</button>}</div>
+      <p className="settings-help">Tests the saved connection with a fixed sentence, never your mail. Does not save settings or change the index; the provider may charge for this request.</p>
+    </div>}
     <fieldset className="settings-fields" disabled={busy || indexing || disabled}>
       {presentation === 'model' ? <>
         <label className="settings-field">Embedding protocol<select value={options.protocol} onChange={e => set('protocol', e.target.value)}><option value="openai">OpenAI-compatible (/embeddings)</option><option value="ollama">Ollama native (/api/embed)</option></select></label>
@@ -79,7 +87,5 @@ export default function SearchSettings({ state, onDirtyChange, onBusyChange, dis
       </div>}
       <button className="button secondary" disabled={busy || disabled} onClick={() => { if (window.confirm('Delete semantic vectors and cancel indexing? Your mail and keyword index stay available.')) action('index/clear'); }}>Clear semantic index / cancel batch</button>
     </>
-    {testResult && <p role="status" className="settings-test-result">{testResult}</p>}
-    {error && <p role="alert" className="search-error">{error}</p>}
   </section>;
 }

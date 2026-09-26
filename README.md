@@ -41,7 +41,7 @@ Captured from the 0.4 development build using fictional messages and isolated pr
 
 ## Download the beta
 
-**Upgrading from beta.4 or earlier:** download and install this release manually once. The GitHub repository was renamed to `Coke1120/Morrow-Mail`; those versions reject the old update API redirect. Beta.8 uses the canonical address and retains signature verification. Back up the workspace and quit the old app before replacing it; keep the separate data directory.
+**Upgrading from beta.4 or earlier:** download and install this release manually once. The GitHub repository was renamed to `Coke1120/Morrow-Mail`; those versions reject the old update API redirect. Beta.8 and later use the canonical address and retain signature verification. Back up the workspace and quit the old app before replacing it; keep the separate data directory.
 
 [Download the latest paired beta and checksums](https://github.com/Coke1120/Morrow-Mail/releases). Starting with **v0.4.0-alpha.1**, each release contains both:
 
@@ -60,6 +60,16 @@ This beta switches both desktop packages to the shared Rust service, adds bounde
 
 **0.6.0-beta.8** adds safe formatted mail, right/bottom/focused reading layouts, reviewed Spam/Junk moves, visible mail/AI activity, recoverable imports and auto-saving General preferences. Demo entries are hidden; Reply All and Forward retain their source account. Embedding settings move to Model with Test Connection and Index Now; Learning adds Learn Now with explicit approval before a style becomes active. On macOS, closing the window keeps Morrow in the Dock. See the [changelog](CHANGELOG.md) for the full beta.8 changes.
 
+**0.6.0-beta.9** adds message-bound AI popups, a compact reader header and expandable summaries, plus **Suggest with History**. Search also exposes the saved embedding connection test. See [verification](VERIFICATION.md) for release status and checks.
+
+## In-place mail assistance
+
+**Summarize**, **Suggest Reply** and **Translate** open a popup over the selected message. You can review or copy the result; **Use in Draft** creates a reply from that message’s original account. AI Studio remains available for broader tools. No AI action sends mail automatically.
+
+**Suggest with History** is a separate, explicit action. It scans all downloaded records in the owning account for the exact same sender address (case-insensitive), within your allowed AI folders. The selected message stays first; the newest matching messages fill the saved **1–50 message** context limit, including the selected message. The result shows how many permitted messages matched and how many were used. Sender access is required; unchecked subject/body fields stay withheld. Selected bodies are capped at 18,000 UTF-16 characters and historical bodies at 5,000 each. It does not fetch provider history, include other accounts, or analyze an unlimited mailbox. Import older mail first if needed. Changed sources, connections or permissions invalidate a running result.
+
+The reader keeps subject, sender and date/time close together. Expand message details for complete addresses, recipients, mailbox and other metadata; expand a summary to read the full result without another AI request.
+
 ## Search and optional smart search
 
 The native and Windows/browser clients share a SQLite FTS5 index covering downloaded subjects, sender/recipients, bodies and labels. Search supports single/two-character Chinese queries, traditional/simplified conversion, mixed English, quoted phrases, relevance/date sorting, 30-result pages, recent/saved searches and removable filters. Results show their owning account, matching text and folder. Replies retain that account.
@@ -73,6 +83,8 @@ Use `from:jane@example.com to:me@example.com subject:"project update" after:2026
 Enable **Smart Search (智慧搜尋)** in the search controls and press **Search**. The query goes to the embedding endpoint; local keyword and vector rankings are merged. Query vectors are cached briefly for pagination. Hybrid results include at most 200 keyword and 200 semantic candidates; use keyword mode for exhaustive results. The initial exact vector scan accepts up to 12,000 scoped chunks and asks for narrower filters above that limit. Retrieval quality depends on your embedding model; it does not generate an answer or establish factual accuracy.
 
 Mail text goes only to the selected embedding endpoint during approved batches; a remote endpoint requires HTTPS. Changed permissions/model/connection invalidate vectors and in-flight results. Vectors stay in the local SQLite database alongside plaintext mail; API keys and search history use the existing encrypted settings store. **Clear Semantic Index / Cancel Batch** preserves mail and the keyword index. Versions through beta.4 configure the embedding connection under Search; beta.8 moves it to Model.
+
+**From beta.9:** Search also shows the saved embedding model and endpoint, with **Test Connection** for that saved configuration and **Edit in Model…**. The test uses the same fixed sentence without changing settings or the index. Model retains its test for unsaved connection fields. The native inbox also uses compact View/Sort menus and narrower sidebar/list columns to leave more room for reading.
 
 ## Native macOS app
 

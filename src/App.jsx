@@ -8,6 +8,7 @@ import MailSearch, { SearchHighlight } from './MailSearch';
 import { storage } from './storage';
 import FooterPreview from './FooterPreview';
 import MessageBody from './MessageBody';
+import MessageAI from './MessageAI';
 import Settings from './Settings';
 import ActivityStatus from './ActivityStatus';
 import Studio from './Studio';
@@ -43,7 +44,30 @@ function AccountGroup({ account, active, children }) {
   }}><summary title={account.email}><ChevronRight size={14} /><span><strong>{account.email}</strong><small>{account.provider === 'google' ? 'Google' : account.provider === 'microsoft' ? 'Outlook' : account.provider === 'imap' ? 'IMAP' : account.provider}</small></span>{account.unread > 0 && <span className="nav-count">{account.unread}</span>}</summary><div className="account-folders">{children}</div></details>;
 }
 
-function AutomaticAssistance({ messageId, account, trigger, policy, modelKey, onUse }) {
+export function ReaderHeader({ message }) {
+  return <header className="reader-heading">
+    <h2>{message.subject || '(No subject)'}</h2>
+    <details className="reader-details"><summary>
+      <Avatar name={message.fromName || message.fromEmail || '?'} />
+      <span className="reader-sender" title={`${message.fromName || ''} <${message.fromEmail || ''}>`}><strong>{message.fromName || message.fromEmail || 'Unknown sender'}</strong><span>{message.fromEmail}</span></span>
+      <time dateTime={message.date}>{new Date(message.date).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
+      <span className="reader-details-label">Details<ChevronDown size={12} /></span>
+    </summary><dl>
+      <dt>From</dt><dd>{message.fromName} &lt;{message.fromEmail}&gt;</dd>
+      <dt>To</dt><dd>{message.to || '—'}</dd>
+      {message.cc && <><dt>Cc</dt><dd>{message.cc}</dd></>}{message.bcc && <><dt>Bcc</dt><dd>{message.bcc}</dd></>}
+      <dt>Mailbox</dt><dd>{message.accountId}</dd><dt>Date</dt><dd>{fullDate(message.date)}</dd>
+      <dt>Folder</dt><dd>{message.folder}{message.providerFolderName && ` · ${message.providerFolderName}`}</dd>
+      {!!message.labels?.length && <><dt>Labels</dt><dd>{message.labels.join(', ')}</dd></>}
+    </dl></details>
+  </header>;
+}
+
+export function ReaderSummary({ title, text, metadata }) {
+  return <details className="reader-summary"><summary><Sparkles size={14} /><strong>{title}</strong><span>{text}</span><ChevronDown size={12} /></summary><div><pre>{text}</pre>{metadata && <small>{metadata}</small>}</div></details>;
+}
+
+function AutomaticAssistance({ messageId, account, trigger, policy, modelKey, onUse, compact = false }) {
   const [result, setResult] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const request = useRef(0);
   useEffect(() => { request.current++; setResult(null); setError(''); setBusy(false); }, [JSON.stringify(policy), modelKey]);
@@ -60,6 +84,7 @@ function AutomaticAssistance({ messageId, account, trigger, policy, modelKey, on
     // Triggers run on opening this view, not on preference changes or re-renders.
   }, [messageId, account, trigger]);
   if (!busy && !result?.text && !error) return null;
+  if (compact) return busy || error ? <p className="reader-ai-status" role={error ? 'alert' : 'status'}>{error ? `Automatic assistance: ${error}` : 'Preparing automatic summary…'}</p> : <ReaderSummary title={result.source === 'demo' ? 'Demo summary' : 'AI summary'} text={result.text} metadata="Automatic assistance · Review before using" />;
   return <section className="compose-ai-preview" aria-label="Automatic assistance" aria-live="polite">
     {busy && <p>Preparing automatic assistance…</p>}
     {error && <p>Automatic assistance: {error}</p>}
@@ -221,6 +246,7 @@ export default function App() {
   const settingsOpen = page === 'settings';
   const [compose, setCompose] = useState(null);
   const [organizing, setOrganizing] = useState(null);
+  const [readerAI, setReaderAI] = useState(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [aiResult, setAiResult] = useState(null);
   const [aiBusy, setAiBusy] = useState(false);
@@ -308,6 +334,7 @@ export default function App() {
   }, []);
   useEffect(() => {
     function shortcut(event) {
+      if (readerAI) return;
       const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
       if ((event.ctrlKey || event.metaKey) && !compose && !settingsBusy && !calendarBusy && !studioBusy && !syncing) {
         const key = event.key.toLowerCase();
@@ -483,16 +510,16 @@ export default function App() {
         <section className="reader-pane" aria-label="Message detail">
           {selected ? <>
             <div className="reader-toolbar"><div>{/^(google|microsoft|imap):/.test(selected.remoteId || selected.id) && <button className="button ghost" disabled={syncing || pendingIds.has(messageKey(selected))} onClick={() => setOrganizing(selected)}>Move / Labels / Spam</button>}<button className={`icon-button reader-back ${mailLayout === "focus" ? "focus-back" : ""}`} aria-label="Back to messages" onClick={() => setMobileReading(false)}><ArrowLeft size={18} /></button><IconButton icon={selected.folder === 'archive' || selected.folder === 'trash' ? Inbox : Archive} label={selected.folder === 'archive' || selected.folder === 'trash' ? 'Move to inbox locally' : 'Archive locally'} onClick={() => patch(selected, { folder: selected.folder === 'archive' || selected.folder === 'trash' ? 'inbox' : 'archive' })} disabled={pendingIds.has(messageKey(selected)) || syncing || selected.folder === 'drafts' || selected.folder === 'sent'} /><IconButton icon={Trash2} label="Move to trash locally" onClick={() => patch(selected, { folder: 'trash' })} disabled={pendingIds.has(messageKey(selected)) || syncing || selected.folder === 'trash'} /><span className="toolbar-divider" /><IconButton icon={selected.read ? Mail : MailOpen} label={selected.read ? 'Mark unread locally' : 'Mark read locally'} onClick={() => patch(selected, { read: !selected.read }, true)} disabled={pendingIds.has(messageKey(selected)) || syncing} /><button className={`icon-button ${selected.starred ? 'starred' : ''}`} title={selected.starred ? 'Remove star' : 'Star message'} aria-label={selected.starred ? 'Remove star' : 'Star message'} onClick={() => patch(selected, { starred: !selected.starred }, true)} disabled={pendingIds.has(messageKey(selected)) || syncing}><Star size={18} fill={selected.starred ? 'currentColor' : 'none'} /></button></div><div className="reader-pagination"><span>{selectedIndex + 1} of {filtered.length}</span><IconButton icon={ChevronLeft} label="Previous message" disabled={selectedIndex <= 0} onClick={() => setSelectedId(messageKey(filtered[selectedIndex - 1]))} /><IconButton icon={ChevronRight} label="Next message" disabled={selectedIndex >= filtered.length - 1} onClick={() => setSelectedId(messageKey(filtered[selectedIndex + 1]))} /></div></div>
-            <div className="reader-content" key={messageKey(selected)}><div className="reader-heading"><p className="mailbox-label">Mailbox: {selected.accountId}</p><div className="reader-labels"><span className="eyebrow">{selected.folder === 'sent' ? 'SENT CONVERSATION' : selected.folder === 'drafts' ? 'YOUR DRAFT' : 'CONVERSATION'}</span>{selected.labels?.slice(0, 2).map(label => <span className="message-label" key={label}>{label}</span>)}</div><h2>{selected.subject || '(No subject)'}</h2></div>
-              {selected.providerFolderName && <p>Provider location: {selected.providerFolderName}</p>}
-              {selected.cc && <p>Cc: {selected.cc}</p>}{selected.bcc && <p>Bcc: {selected.bcc}</p>}
-              <div className="sender-detail"><Avatar name={selected.fromName} large /><div><div className="sender-name"><strong>{selected.fromName}</strong><span>&lt;{selected.fromEmail}&gt;</span></div><span className="sender-recipient">to {selected.to === state.account.email ? 'me' : selected.to || '—'}<ChevronDown size={12} /></span></div><time dateTime={selected.date} title={fullDate(selected.date)}>{shortDate(selected.date)}</time></div>
-              {selected.folder !== 'drafts' && <button className="summary-callout" onClick={() => askAI('summary')} disabled={aiBusy || !allowed('summary', selected)}><span className="summary-icon"><Sparkles size={18} /></span><span><strong>A little clarity, in a click.</strong><small>Get the key points with your AI assistant</small></span><ArrowRight size={17} /></button>}
-              {selected.aiSummary ? <section className="compose-ai-preview" aria-label="New-mail summary"><strong>{selected.aiSummary.source === 'demo' ? 'Illustrative demo summary' : 'New-mail AI summary'} · {selected.aiSummary.items?.[0]?.priority}</strong><pre>{selected.aiSummary.items?.[0]?.summary}</pre><small>{fullDate(selected.aiSummary.completedAt)} · Review AI priorities.</small></section> : detailLoaded && selectedId === messageKey(selected) && (!isNarrow || mobileReading) && <AutomaticAssistance messageId={selected.id} account={selected.accountId} trigger="onOpen" policy={policy} modelKey={JSON.stringify([state.settings.ai, state.settings.preferences])} />}
+            <div className="reader-content" key={messageKey(selected)}><ReaderHeader message={selected} />
+              {selected.aiSummary ? <ReaderSummary title={`${selected.aiSummary.source === 'demo' ? 'Demo summary' : 'AI summary'}${selected.aiSummary.items?.[0]?.priority ? ` · ${selected.aiSummary.items[0].priority}` : ''}`} text={selected.aiSummary.items?.[0]?.summary} metadata={`${fullDate(selected.aiSummary.completedAt)} · Review AI priorities.`} /> : detailLoaded && selectedId === messageKey(selected) && (!isNarrow || mobileReading) && <AutomaticAssistance compact messageId={selected.id} account={selected.accountId} trigger="onOpen" policy={policy} modelKey={JSON.stringify([state.settings.ai, state.settings.preferences])} />}
               <div className="message-content">{detailError ? <span role="alert">{detailError} <button onClick={() => setDetailRetry(value => value + 1)}>Retry loading message</button></span> : !detailLoaded ? <span role="status">Loading message…</span> : <MessageBody key={messageKey(selected)} message={selected} />}</div>
               <FooterPreview footer={selected.footer} />
               <div className="message-end"><span /><Leaf size={14} /><span /></div>
-              <div className="reply-actions">{selected.folder === 'drafts' ? <button className="button primary" disabled={!detailLoaded} onClick={() => setCompose({ ...selected })}><Pencil size={16} />{selected.providerDraft ? 'Copy to local draft' : 'Continue writing'}</button> : <><button className="button primary" disabled={!detailLoaded} onClick={() => reply()}><ArrowDownLeft size={17} />Reply</button><button className="button secondary" disabled={!detailLoaded} onClick={() => reply('', true)}><ReplyAll size={17} />Reply all</button><button className="button secondary" disabled={!detailLoaded} onClick={forward}><ArrowRight size={17} />Forward</button><button className="button secondary ai-reply" onClick={() => askAI('reply')} disabled={aiBusy || !allowed('reply', selected)}><Sparkles size={16} />Draft a reply<span>AI</span></button></>}</div>
+              <div className="reply-actions">{selected.folder === 'drafts' ? <button className="button primary" disabled={!detailLoaded} onClick={() => setCompose({ ...selected })}><Pencil size={16} />{selected.providerDraft ? 'Copy to local draft' : 'Continue writing'}</button> : <><button className="button primary" disabled={!detailLoaded} onClick={() => reply()}><ArrowDownLeft size={17} />Reply</button><button className="button secondary" disabled={!detailLoaded} onClick={() => reply('', true)}><ReplyAll size={17} />Reply all</button><button className="button secondary" disabled={!detailLoaded} onClick={forward}><ArrowRight size={17} />Forward</button></>}</div>
+              <div className="reader-ai-actions" role="group" aria-label="AI for this message">
+                <Sparkles size={15} aria-hidden="true" />
+                {[['summary', 'Summarize', false], ...(selected.folder !== 'drafts' ? [['reply', 'Suggest reply', false], ['reply', 'Suggest with History', true]] : []), ['translate', 'Translate', false]].map(([action, label, includeHistory]) => <button key={label} type="button" className="button ghost" disabled={!detailLoaded || aiBusy || !allowed(action, selected) || (includeHistory && (!policy.content.sender || !selected.fromEmail))} title={includeHistory ? 'Use permitted downloaded mail from this sender; review scope before generating.' : undefined} onClick={() => setReaderAI({ action, includeHistory })}>{label}</button>)}
+              </div>
               <p className="message-privacy"><ShieldCheck size={13} />Your words. Your final say. Nothing sends automatically.</p>
             </div>
           </> : <div className="reader-empty"><div className="empty-art"><Mail size={42} strokeWidth={1} /><span><Leaf size={16} /></span></div><span className="eyebrow">ROOM TO BREATHE</span><h2>Less noise.<br />More possibility.</h2><p>{query ? 'Your next conversation is just a search away.' : 'Choose a conversation, or start a new one.'}</p><button className="button secondary" onClick={() => setCompose({})}><Plus size={16} />Write something good</button></div>}
@@ -510,6 +537,7 @@ export default function App() {
       <footer className="workspace-footer"><span><span className="footer-dot" />A home for your email. A little space for you.</span><span>Open source, by nature.<Leaf size={12} /></span></footer>
     </main>
     {organizing && <OrganizeMail message={organizing} onClose={() => setOrganizing(null)} onUpdate={localUpdate} />}
+    {readerAI && <MessageAI {...readerAI} state={state} message={selected} loaded={page === 'mail' && detailLoaded} onClose={() => setReaderAI(null)} onUse={setCompose} />}
     {compose && <Compose initial={compose} account={state.account} accounts={state.accounts} preferences={preferences} footer={state.settings.footer} policy={policy} modelKey={JSON.stringify(state.settings.ai)} onSettings={() => setSettingsOpen(true, 'policy')} onClose={() => setCompose(null)} onSaved={localUpdate} onSent={sent} notify={notify} />}
     {toast && <div className={`toast ${toast.type}`} role={toast.type === 'error' ? 'alert' : 'status'}>{toast.type === 'error' ? <CircleHelp size={18} /> : <Check size={18} />}<span>{toast.message}</span><button aria-label="Dismiss notification" onClick={() => setToast(null)}><X size={15} /></button></div>}
   </div>;

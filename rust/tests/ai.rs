@@ -393,6 +393,174 @@ async fn assistance_permissions_owner_sources_and_transient_generation() {
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
 }
 #[tokio::test]
+async fn sender_history_reply_is_owned_redacted_bounded_and_explicit() {
+    let directory = Temporary::new();
+    let model = Model::new(false, "Reviewed reply suggestion");
+    let server = model_server(model.clone()).await;
+    let app = app_at(&directory, &server.url).await;
+    app.db(|db| {
+        let settings = db.settings()?;
+        db.set_settings(&json!({"policy":policy::update(&settings["policy"], &json!({"maxMessages":3,"folders":{"archive":true},"content":{"subject":false}}))?}))?;
+        db.update(OWNER, "same", &json!({"fromEmail":"Sender@Example.test","date":"2020-01-01T00:00:00Z","body":"T".repeat(19000)}))?;
+        for (id, date, folder, sender) in [
+            ("a", "2026-09-26T00:00:00Z", "inbox", " sender@example.test "),
+            ("b", "2026-09-26T00:00:00Z", "archive", "SENDER@example.test"),
+            ("c", "2026-09-25T00:00:00Z", "sent", "sender@example.test"),
+            ("blocked", "2026-09-27T00:00:00Z", "trash", "sender@example.test"),
+            ("unrelated", "2026-09-27T00:00:00Z", "inbox", "other@example.test"),
+            ("lookalike", "2026-09-27T00:00:00Z", "inbox", "sender@example.test.evil"),
+        ] {
+            db.upsert(OWNER,&merge(message(id,sender),&json!({"folder":folder,"date":date,"body":id.repeat(6000)})))?;
+        }
+        db.upsert(OTHER,&merge(message("a","sender@example.test"),&json!({"body":"OTHER PRIVATE","date":"2026-09-27T00:00:00Z"})))?;
+        Ok(())
+    }).await.unwrap();
+    let request = json!({"action":"reply","messageId":"same","includeHistory":true});
+    let result = ai_request(&app, request.clone()).await.unwrap();
+    assert_eq!(
+        result["history"],
+        json!({"matchedMessages":4,"usedMessages":3,"maxMessages":3,"scope":"downloaded"})
+    );
+    let calls = model.requests.lock().await;
+    let payload: Value = serde_json::from_str(string(&calls[0]["messages"][1], "content")).unwrap();
+    assert_eq!(payload["emails"].as_array().unwrap().len(), 3);
+    assert_eq!(payload["emails"][0]["body"], "T".repeat(18000));
+    assert_eq!(payload["emails"][1]["body"], "a".repeat(5000));
+    assert_eq!(payload["emails"][2]["body"], "b".repeat(5000));
+    assert!(
+        payload["emails"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("subject").is_none())
+    );
+    assert!(
+        string(&calls[0]["messages"][0], "content")
+            .contains("first supplied email is the selected reply target")
+    );
+    assert!(!payload.to_string().contains("OTHER PRIVATE"));
+    drop(calls);
+    let plain = ai_request(&app, json!({"action":"reply","messageId":"same"}))
+        .await
+        .unwrap();
+    assert!(plain.get("history").is_none());
+    let plain_payload: Value = serde_json::from_str(string(
+        &model.requests.lock().await[1]["messages"][1],
+        "content",
+    ))
+    .unwrap();
+    assert_eq!(plain_payload["emails"].as_array().unwrap().len(), 1);
+    for invalid in [
+        json!({"includeHistory":"true"}),
+        json!({"includeHistory":null}),
+        json!({"action":"summary"}),
+        json!({"trigger":"onReply"}),
+        json!({"draftText":"draft"}),
+    ] {
+        assert_eq!(
+            ai_request(&app, merge(request.clone(), &invalid))
+                .await
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+    assert_eq!(model.calls.load(Ordering::SeqCst), 2);
+    app.db(|db|{let settings=db.settings()?;db.set_settings(&json!({"policy":policy::update(&settings["policy"],&json!({"maxMessages":1,"content":{"body":false}}))?}))?;Ok(())}).await.unwrap();
+    let limited = ai_request(&app, request.clone()).await.unwrap();
+    assert_eq!(limited["history"]["matchedMessages"], 4);
+    assert_eq!(limited["history"]["usedMessages"], 1);
+    let redacted: Value = serde_json::from_str(string(
+        &model.requests.lock().await[2]["messages"][1],
+        "content",
+    ))
+    .unwrap();
+    assert!(redacted["emails"][0].get("body").is_none());
+    app.db(|db|{let settings=db.settings()?;db.set_settings(&json!({"policy":policy::update(&settings["policy"],&json!({"content":{"sender":false}}))?}))?;Ok(())}).await.unwrap();
+    assert_eq!(
+        ai_request(&app, request.clone()).await.unwrap_err().status,
+        403
+    );
+    app.db(|db|{let settings=db.settings()?;db.set_settings(&json!({"policy":policy::update(&settings["policy"],&json!({"content":{"sender":true}}))?}))?;db.update(OWNER,"same",&json!({"fromEmail":""}))?;Ok(())}).await.unwrap();
+    assert_eq!(ai_request(&app, request).await.unwrap_err().status, 400);
+    assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn sender_history_changes_and_revocation_discard_in_flight_replies() {
+    for mutation in [
+        "body",
+        "folder",
+        "sender",
+        "delete",
+        "generation",
+        "disconnect",
+    ] {
+        let directory = Temporary::new();
+        let model = Model::new(true, "STALE HISTORY REPLY");
+        let server = model_server(model.clone()).await;
+        let app = app_at(&directory, &server.url).await;
+        app.db(|db| {
+            db.upsert(OWNER, &message("history", OWNER))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let pending = tokio::spawn({
+            let app = app.clone();
+            async move {
+                ai_request(
+                    &app,
+                    json!({"action":"reply","messageId":"same","includeHistory":true}),
+                )
+                .await
+            }
+        });
+        model.entered.acquire().await.unwrap().forget();
+        app.db(move |db| {
+            match mutation {
+                "body" => {
+                    db.update(OWNER, "history", &json!({"body":"changed"}))?;
+                }
+                "folder" => {
+                    db.update(OWNER, "history", &json!({"folder":"trash"}))?;
+                }
+                "sender" => {
+                    db.update(
+                        OWNER,
+                        "history",
+                        &json!({"fromEmail":"someone.else@example.test"}),
+                    )?;
+                }
+                "delete" => {
+                    db.delete(OWNER, "history")?;
+                }
+                "generation" => ai::invalidate(db)?,
+                "disconnect" => {
+                    let mut config = db.settings()?;
+                    config["mailAccounts"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(OWNER);
+                    db.set_settings(&json!({"mailAccounts":null}))?;
+                    db.set_settings(&config)?;
+                }
+                _ => unreachable!(),
+            };
+            Ok(())
+        })
+        .await
+        .unwrap();
+        model.release.add_permits(1);
+        assert_eq!(
+            pending.await.unwrap().unwrap_err().status,
+            409,
+            "{mutation}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn automatic_requests_coalesce_and_are_not_cached_after_completion() {
     let directory = Temporary::new();
     let model = Model::new(true, "A summary");

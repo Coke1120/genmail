@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-beta.9 — 2026-09-27
+
+- Open message Summarize, Suggest Reply and Translate in a local popup, retaining the reader and original reply owner.
+- Add explicitly requested Suggest with History: exact same-sender cached mail, within the same account and saved folder/content/message limits, with visible used/matched counts and stale-source rejection.
+- Compact message headers and automatic summaries, retain expandable full details, and tighten native View/Sort menus and sidebar/list widths.
+- Add saved embedding Test Connection and Edit in Model directly in Search, with visible result/error feedback.
+
 ## 0.6.0-beta.8 — 2026-09-27
 
 - Use the renamed `Coke1120/Morrow-Mail` repository for update checks, downloads and product links without relaxing redirect or signature checks. Older installed versions require a one-time manual update; beta.5 was cancelled before publication.

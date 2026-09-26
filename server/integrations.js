@@ -158,8 +158,8 @@ export function demoAssistance(action, messages, prompt = '', { preferences = {}
   return `Matching messages in your demo inbox:\n\n${messages.map(m => `• ${m.subject} — ${m.fromName}\n  ${m.preview}`).join('\n\n')}\n\nDemo search preview. Connect a model for answers grounded in these emails.`;
 }
 
-export function modelPayload(ai, action, messages, prompt, { preferences = {}, brain = null, styleVoice = '', structuredSummary = false, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone } = {}) {
-  const context = messages.map(m => Object.fromEntries(Object.entries({ ...(structuredSummary ? { messageId: m.id } : {}), from: m.fromEmail || m.fromName ? `${m.fromName || ''} <${m.fromEmail || ''}>` : '', subject: m.subject, date: m.date, body: m.body?.slice(0, ['ask', 'briefing', 'skill'].includes(action) ? 5000 : 18000) }).filter(([, value]) => value)));
+export function modelPayload(ai, action, messages, prompt, { preferences = {}, brain = null, styleVoice = '', structuredSummary = false, includeHistory = false, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone } = {}) {
+  const context = messages.map((m, index) => Object.fromEntries(Object.entries({ ...(structuredSummary ? { messageId: m.id } : {}), from: m.fromEmail || m.fromName ? `${m.fromName || ''} <${m.fromEmail || ''}>` : '', subject: m.subject, date: m.date, body: m.body?.slice(0, ['ask', 'briefing', 'skill'].includes(action) || (includeHistory && action === 'reply' && index > 0) ? 5000 : 18000) }).filter(([, value]) => value)));
   const instructions = {
     style: 'Describe the writing style shared by these sent email samples: tone, formality, sentence length, greeting and closing habits. Return an editable style guide under 2000 characters. Do not include personal facts, names, addresses, projects, or quoted sample text. This is a style description, not model training.',
     summary: 'Summarize the selected email in a few clear bullet points. Include explicit requests, dates, and decisions only if present.',
@@ -171,7 +171,7 @@ export function modelPayload(ai, action, messages, prompt, { preferences = {}, b
     briefing: 'Create an inbox briefing with priority items, explicit deadlines, and pending questions. Cite subjects. Do not invent calendar data, dates, or missing tasks.',
     skill: 'Follow the user-authored skill instructions using only the supplied emails. Cite subjects. Do not invent missing information or claim to take external actions.',
   };
-  const instruction = instructions[action];
+  const instruction = instructions[action] && instructions[action] + (includeHistory && action === 'reply' ? ' The first email is the selected reply target. All remaining emails are historical context from the same sender, not separate requests to answer. Use them only to clarify the reply to the first email; do not assume an old request or commitment is still current.' : '');
   if (!instruction) throw new Error('Unknown model behavior.');
   const classification = ['summary', 'briefing'].includes(action) ? ` Group the summary by P0–P4. ${priorityGuide}` : '';
   const format = structuredSummary ? ' Return only valid JSON: {"items":[{"messageId":"exact supplied ID","priority":"P0|P1|P2|P3|P4","summary":"short summary with subject, explicit request/deadline if present"}]}. Include exactly one entry per supplied email and no other IDs. Do not use Markdown fences.' : '';

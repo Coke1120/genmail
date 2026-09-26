@@ -6,6 +6,7 @@ struct NativeSearchSettingsView: View {
     @Binding var operationBusy: Bool
     enum Presentation { case search, model }
     var presentation: Presentation = .search
+    var onConfigureModel: (() -> Void)?
     @State private var value: JSON = .null
     @State private var options: JSON = .null
     @State private var baseline: JSON = .null
@@ -17,8 +18,24 @@ struct NativeSearchSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SectionHeading(title: presentation == .model ? "Embedding model" : "Search & Semantic Indexing", detail: presentation == .model ? "Smart search (智慧搜尋) uses this separate embedding model. Choose indexing scope and review batches in Search." : "Keyword search stays local. Configure the embedding connection in Model. Smart search (智慧搜尋) is optional, stays within your approved scope, and each indexing batch needs review.")
+            if !testResult.isEmpty { Text(testResult).foregroundStyle(.secondary).textSelection(.enabled) }
+            if busy { ProgressView().controlSize(.small) }
+            if !error.isEmpty { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             if options.isNull { ProgressView(presentation == .model ? "Loading embedding settings…" : "Loading search settings…") }
             else {
+                if presentation == .search {
+                    GroupBox("Embedding connection") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(value["settings"]["model"].nonempty ? value["settings"]["model"].string : "No embedding model saved").font(.headline)
+                            Text(value["settings"]["baseUrl"].string).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                            HStack {
+                                Button("Test Connection") { action("test") }.disabled(!value["settings"]["model"].nonempty).accessibilityIdentifier("search.testConnection")
+                                if let onConfigureModel { Button("Edit in Model…", action: onConfigureModel) }
+                            }.disabled(busy || indexing)
+                            Text("Tests the saved connection with a fixed sentence, never your mail. Does not save settings or change the index; the provider may charge for this request.").font(.caption).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(6)
+                    }
+                }
                 configuration.disabled(busy || indexing)
                 Group {
                     Text("\(Int(value["indexed"].number)) / \(Int(value["eligible"].number)) eligible messages indexed · \(Int(value["pending"].number)) pending").font(.headline)
@@ -30,9 +47,6 @@ struct NativeSearchSettingsView: View {
                     }.disabled(busy)
                 }
             }
-            if !testResult.isEmpty { Text(testResult).foregroundStyle(.secondary).textSelection(.enabled) }
-            if busy { ProgressView().controlSize(.small) }
-            if !error.isEmpty { Text(error).foregroundStyle(.red).textSelection(.enabled) }
         }
         .task { do { let next = try await model.request("/search/settings"); initialize(next) } catch { self.error = error.localizedDescription } }
         .task(id: indexing) {
