@@ -1,6 +1,23 @@
 # Verification — 27 September 2026
 
-## 0.6.0-beta.9 candidate — reader assistance and compact layout
+## 0.6.0-beta.9 paired prerelease
+
+[0.6.0-beta.9](https://github.com/Coke1120/Morrow-Mail/releases/tag/v0.6.0-beta.9) was published as a prerelease at 2026-09-26T20:35:06Z from tag commit `d9026841a93f07079440c6cf098cdaf315a21f54`. All five required platform jobs and the publisher in [tag CI 36267966420](https://github.com/Coke1120/Morrow-Mail/actions/runs/36267966420) passed. The redundant main run for the same commit was cancelled; the tag ran the complete unchanged gates.
+
+The release includes message AI popups, explicit same-sender history replies, compact reader details/summaries and the saved embedding Test Connection under Search. CI passed 98 Rust tests, strict fmt/Clippy, debug/release builds and seven Node↔Rust contracts; the Node suite passed 160 cases with two conditional Rust cases skipped (covered by the separate contracts). Local checks passed all 162 Node cases with those gates enabled. Both desktops passed package/launch checks and original updater plus actual old-installer-to-Rust upgrade/restart/backup acceptance. Windows packaged smoke verified fresh onboarding, owned inbox/search/paging/drafts, private API and normal exit.
+
+All six public assets were downloaded. The pinned Ed25519 manifest signature, exact archive sizes/SHA-256/checksum files and safe archive paths passed. Both bundles identify beta.9 and the Rust runtime, include Google Desktop OAuth configuration and dependency notices, and contain no standalone Node backend or private workspace database/key/recovery files. The downloaded Mac app passed deep/strict ad-hoc codesign and plist validation, reports the correct service version and runs CLI help.
+
+A live read-only update check using the downloaded Rust service in a fresh disposable workspace identified beta.9 and correctly reported no newer update. The canonical Node checker with installed version beta.8 reported beta.9 available. No mail, calendar or external model endpoint was contacted; no installed app or existing workspace was replaced.
+
+| Public archive | Bytes | SHA-256 |
+| --- | ---: | --- |
+| macOS arm64 | 11,138,973 | `3019ec8dc7cbbd4b27eb62ab634746be7ac1c85267d61c8be0ea26a7335beb24` |
+| Windows x64 | 167,975,625 | `c70848394451eba84d004bb5bf6f9197794fbec03ad1397e21673bea4c5a0320` |
+
+The focused native popup walkthrough and its Settings automation limitation are recorded below. History uses downloaded, permitted mail with the saved context/body limits; it does not fetch or analyze an unlimited provider mailbox. This remains an ad-hoc signed/unnotarized macOS and unsigned Windows beta, with live-provider/model and complete manual UI/accessibility acceptance still pending. Existing published assets were not replaced.
+
+## 0.6.0-beta.9 local preparation — reader assistance and compact layout
 
 Per-message Summarize, Suggest Reply and Translate now open an account-bound popup without changing the mailbox, selection or page. Suggest with History separately reviews the saved model, permissions and limit before generating, then reports used/matched downloaded messages. Both services scan exact same-sender metadata in the owning account and take the selected message plus newest permitted matches up to the saved 1–50 limit. Unchecked fields are withheld; historical bodies are bounded to 5,000 UTF-16 characters and the target to 18,000. Source, connection, permission, writing-style and relevant Email Brain changes invalidate results. Only an explicit Use in Draft creates an editable reply; nothing is sent automatically.
 
@@ -12,7 +29,7 @@ An isolated native SwiftUI walkthrough with fictional mail and injected model re
 
 The local beta.9 Rust macOS package also passed `npm run macos:build`, deep/strict ad-hoc codesign and plist validation. `npm run updater:rust-upgrade:test` passed the original Node installer → actual SwiftUI/Rust candidate replacement/restart, both-PID wait, previous-app retention, encrypted settings/key/uncertain draft/calendar-retry preservation and bundled backup restoration. The installed app was not replaced.
 
-Publication still depends on the existing paired tag workflow, both updater/upgrade acceptance jobs and post-download signature/hash verification. Ad-hoc macOS signing, unsigned Windows, live-account and complete manual UI/accessibility acceptance limitations remain.
+Publication subsequently passed the paired tag workflow, updater/upgrade jobs and post-download signature/hash checks recorded above. Ad-hoc macOS signing, unsigned Windows, live-account and complete manual UI/accessibility acceptance limitations remain.
 
 ## 0.6.0-beta.8 paired prerelease
 
