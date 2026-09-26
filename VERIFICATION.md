@@ -1,14 +1,23 @@
 # Verification — 27 September 2026
 
-## 0.6.0-beta.8 release candidate
+## 0.6.0-beta.8 paired prerelease
 
-The beta.5 tag CI was cancelled before publication after Git push revealed the repository rename. Public API probes confirmed the old path returns 301 and the canonical `Coke1120/Morrow-Mail` path returns 200. Both runtime update URLs, current product links and fixture expectations now use the canonical path; redirect/signature validation remains unchanged. Existing beta.4-and-earlier installations need a one-time manual download. Canonical-path fixture checks pass: all nine Rust updater tests, seven Node updater/desktop tests, strict updater Clippy and the legacy signed install/restart harness. Beta.6 debug/release binaries rebuilt successfully.
+[0.6.0-beta.8](https://github.com/Coke1120/Morrow-Mail/releases/tag/v0.6.0-beta.8) was published on 2026-09-26 at 19:06:21 UTC from tag commit `a0abf9e23aec25b3a5ebdc719474baac93bb1590`. All five required jobs and the publisher in [tag CI 36263198738](https://github.com/Coke1120/Morrow-Mail/actions/runs/36263198738) passed: Ubuntu/macOS/Windows full checks, dependency audits and benchmarks, both desktop packages, native/packaged acceptance, original updater tests and actual old-installer-to-Rust upgrade/restart/backup preservation on both platforms.
 
-Beta.6 was also withheld: its Windows packaged smoke test still expected a visible Demo inbox. The updated harness verifies fresh Add account onboarding, then a marked disposable workspace seeded with a fictional connected owner, preserving search, manual unread, paging, complete drafts and private API assertions. Both cases pass locally with Electron and the Rust service. Beta.7 passed Windows fresh onboarding but timed out during desktop shutdown. The harness now owns both disposable workspaces and removes them only after Electron exits, avoiding recursive cleanup while Chromium may hold Windows file locks. Both cases and their exits pass locally; Windows confirmation remains part of the next gate. Beta.5–beta.7 tags remain unpublished; their assets are not reused.
+The full Rust suite contains 96 tests; strict fmt/Clippy, debug/release builds and seven Node↔Rust contracts passed. CI's Node suite passes 152 tests with two conditional Rust cases skipped there; the separate seven-case contract run passes without skips. Local `MORROW_TEST_RUST=1 npm run check` also passed all 154 cases and the React production build. Windows packaged smoke verifies fresh Add account onboarding without Demo, then an owned fictional mailbox: manual unread, search/highlights/saved search, bounded pages, complete drafts, private API and normal exit. Both local Rust and Node compatibility modes pass the same two cases. No owner's workspace or live provider writes were used.
 
-The candidate includes the previously unreleased reading, Gmail/activity, settings, reply/forward and reviewed AI controls described below. package.json and the lockfile agree on beta.8. Publication uses the existing tag workflow: all three platform check jobs and both Rust desktop upgrade jobs must succeed before the paired packages and signed manifest become public. Local beta.5 `npm run rust:test` passes all 96 Rust tests, strict fmt/Clippy, debug/release builds and seven Node↔Rust contracts. The prior local results below are preparation evidence; tagged CI and public-asset verification will be recorded after completion.
+All six public assets were downloaded after publication. The pinned Ed25519 manifest signature, exact ZIP sizes/SHA-256/checksum files and safe archive paths pass. Both packages identify version 0.6.0-beta.8 and the Rust service, include bundled Google Desktop OAuth configuration and dependency notices, and contain no standalone Node backend, workspace database, encryption key or recovery files. The downloaded macOS app passes deep/strict ad-hoc codesign and plist checks; its service reports the correct version and its CLI help runs. The canonical public update API reports beta.8 as available from beta.4.
 
-## Safe reading, layout and import recovery — unreleased
+| Public archive | Bytes | SHA-256 |
+| --- | ---: | --- |
+| macOS arm64 | 11,024,736 | `7eab8cfcf2f28e836fa099cc6bd377c53b57faca11ee0576899905e8253a2de4` |
+| Windows x64 | 167,905,711 | `a80e62a2c97b5df9a927749d00e8eeab40534e880ef9dcac6c3a75c5a3f0bb6c` |
+
+Prepublication candidates beta.5–beta.7 remain unpublished. Beta.5 was cancelled when the repository rename exposed the old update API's 301 redirect; both services now use canonical `Coke1120/Morrow-Mail` URLs without relaxing redirect/signature checks. Beta.6 found a stale visible-Demo smoke assumption. Beta.7 passed Windows fresh onboarding but timed out during shutdown; disposable workspace cleanup now runs in the external driver after Electron exits, avoiding deletion while Chromium can hold file locks; beta.8 passes both exits. Published older assets were not replaced. **Beta.4 and earlier need one manual download** because their installed updater still uses the old API path.
+
+This is an ad-hoc signed/unnotarized macOS and unsigned Windows prerelease. Live-account/provider approval, other hardware/minimum OS, full manual UI/IME/accessibility acceptance and stable signing remain pending. The local preparation evidence and feature-specific limits below remain applicable; passing fixtures is not stable-production certification.
+
+## Safe reading, layout and import recovery — 0.6.0-beta.8
 
 Newly fetched Gmail/Outlook/IMAP messages retain sanitized HTML for reading, separately from plain-text search/AI context. The reader disables active content and blocks images until per-message consent. Native UI stays SwiftUI; only the message body uses a private, script-disabled WebKit view. Provider organization adds reviewed Gmail Spam and Outlook Junk moves. Phishing reports and sender blocking remain provider-site actions. Right/bottom/focused layouts, expanded reading, unread-row styling, General preference auto-save and macOS close-to-Dock behavior are implemented.
 
@@ -18,7 +27,7 @@ Passed locally: full Node checks (154/154, no skips, React production build), fu
 
 A built-React walkthrough with fictional local mail observed formatted body/link rendering with blocked images, right/bottom/focused layouts, General auto-save across a tab switch, and failed-import Resume changing to queued work. It found an unread-sender CSS specificity issue, corrected to inherit the whole unread row's weight. The browser automation connection then failed during the external-link confirmation check, so that interactive step is not claimed as verified; protocol validation, CSP and sandbox controls are covered by executable tests. The fixture service was stopped and its temporary workspace removed. No owner's workspace, real provider write or paid AI request was used. Windows execution, live-provider acceptance, malware/phishing detection and attachment/CID rendering are not established by these checks.
 
-## Gmail coverage and visible activity — unreleased
+## Gmail coverage and visible activity — 0.6.0-beta.8
 
 Gmail refresh now checks Inbox, Sent, Drafts, Starred and All Mail with bounded pages. All Mail history imports retain the selected date range and durable checkpoints. Both services refresh provider metadata while preserving explicit local changes, heal legacy forced Inbox/Sent classification, and keep confirmed provider label changes separate from local folder overrides. Imported provider drafts require a new local copy before editing/sending; owner and To/Cc/Bcc remain bound and the original stays unchanged.
 
@@ -31,7 +40,7 @@ Passed locally: `MORROW_TEST_RUST=1 CARGO_INCREMENTAL=0 npm run check` (137/137 
 A browser walkthrough of the built React app used fictional local messages and injected provider fixtures. It observed fetching → completed activity for all five scopes, history queued → paused, archived starred mail with its user label, and saving a Gmail draft as a second local draft with normalized To, retained Bcc and locked owner. The original remained visible. There were no browser console errors; the test server and tab were closed and the temporary workspace removed. This is fixture/browser evidence, not native visual automation, Windows execution or live Google/model acceptance. No real provider write or paid model call was made. The rebuilt local macOS Rust app also passes deep/strict ad-hoc codesign and plist validation; it is an unpublished development build.
 
 
-## Embedding and learning actions — unreleased
+## Embedding and learning actions — 0.6.0-beta.8
 
 Both clients now offer embedding Test Connection with unsaved model fields, Index Now with a saved-scope/budget confirmation, and Learn Now with an account-bound Sent-sample confirmation. Learning generates a proposal; Save Approved Style remains a separate action and preserves manual Email Brain contacts, notes and voice.
 
@@ -39,7 +48,7 @@ Local checks passed: `npm run check` (117 passed, two gated tests skipped, React
 
 A browser walkthrough of the actual built React client used a temporary fictional mailbox and injected model fixtures. It passed unsaved embedding Test Connection, Index Now cancel/confirm/completion, Learn Now cancel/confirm/proposal, and explicit Save Approved Style activation. Cancelling retained previews and made no analysis/indexing call. The fixture server and tab were closed afterward. This is browser UI evidence with isolated Node services, not native visual or Windows packaged execution, and no live provider or external model acceptance is claimed.
 
-## Mail reading and account/settings UX — unreleased
+## Mail reading and account/settings UX — 0.6.0-beta.8
 
 The current native inbox retains its page, visible metadata rows and selection across read-state revisions. The isolated Rust native harness explicitly opens and switches unread messages on page two, then refreshes without a reset; all six sorts, combined duplicate IDs, manual unread handling and source-account ownership remain covered. Both clients remove Demo from navigation, settings and sender choices, with Add account onboarding and a real-account default for legacy Demo selections. Internal fixture data is retained. Embedding connection fields now live in Model; Search keeps scope, budget and index review. Reply All deduplicates sender/To/Cc and excludes the owner and original Bcc; plain-text Forward locks the source owner, starts with blank recipients and does not include attachments or reply threading.
 
