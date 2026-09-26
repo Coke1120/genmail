@@ -5,7 +5,7 @@ test('desktop opens only the issued loopback sign-in shape or confirmed HTTPS li
   const base = 'http://127.0.0.1:39123', state = 'a'.repeat(64);
   for (const kind of ['oauth', 'calendar-oauth']) for (const provider of ['google', 'microsoft']) assert.equal(isSignInURL(`http://localhost:39123/api/${kind}/${provider}/authorize?state=${state}`, base), true);
   for (const url of [`http://localhost:39124/api/oauth/google/authorize?state=${state}`, `http://localhost:39123/api/oauth/google/callback?state=${state}`, `http://localhost:39123/api/oauth/google/authorize?state=${state}&next=https://bad.example`, `http://user@localhost:39123/api/oauth/google/authorize?state=${state}`, 'file:///C:/Windows/system32/cmd.exe', 'javascript:alert(1)', 'https://bad.example/', 'invalid']) assert.equal(isSignInURL(url, base), false);
-  assert.equal(isExternalURL('https://github.com/Coke1120/genmail'), true);
+  assert.equal(isExternalURL('https://github.com/Coke1120/Morrow-Mail'), true);
   for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'http://localhost:22', 'https://user:pass@example.com', 'ms-settings:']) assert.equal(isExternalURL(url), false);
 });
 

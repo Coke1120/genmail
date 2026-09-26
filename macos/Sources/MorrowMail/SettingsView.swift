@@ -398,7 +398,7 @@ struct NativeSettingsView: View {
                 VStack(alignment: .leading) { Text("Morrow Mail").font(.largeTitle.bold()); Text("A little more room to think.").foregroundStyle(.secondary) }
             }
             HStack {
-                Link("GitHub", destination: URL(string: "https://github.com/Coke1120/genmail")!)
+                Link("GitHub", destination: URL(string: "https://github.com/Coke1120/Morrow-Mail")!)
                 Link("GitHub Sponsors", destination: URL(string: "https://github.com/sponsors/Coke1120")!)
                 Link("Buy Me a Coffee", destination: URL(string: "https://buymeacoffee.com/Coke1120")!)
             }

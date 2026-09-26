@@ -38,16 +38,17 @@ What changed since 0.6.0-beta.4:
 - Reviewed provider moves support Gmail Spam and Outlook Junk; phishing reports and sender blocking remain provider-site actions. Mail and AI activity show fetching, checkpointed imports, queued/running work and safe errors.
 - Temporary read-only history fetch failures retry at most three times with persisted progress. Authentication, invalid cursors/pages and database failures need explicit recovery; older unexplained failed imports can be resumed manually.
 - General preferences auto-save with visible progress and retry on failure. Embedding settings move to Model with a fixed-input Test Connection; Index Now prepares a scope/budget review. Learn Now creates a proposal, and Save Approved Style separately activates it without overwriting manual Email Brain memory.
+- Fix update checks/downloads and product links for the renamed repository without relaxing trust checks. The unpublished beta.5 candidate was cancelled before release.
 - Update contributor guidance and user documentation. Rust remains the desktop backend, with the existing agent CLI, built-in OAuth and signed workspace-preserving updater.
 
 CLI quick start:
 - macOS: '/Applications/Morrow Mail.app/Contents/Resources/morrow-service' cli --help
 - Windows PowerShell, from the extracted app folder: & '.\\resources\\app\\runtime\\morrow-service.exe' cli --help
-- Usage, JSON contracts, review/send examples and limits: https://github.com/Coke1120/genmail/blob/v${version}/docs/CLI.md
+- Usage, JSON contracts, review/send examples and limits: https://github.com/Coke1120/Morrow-Mail/blob/v${version}/docs/CLI.md
 - Configure accounts in the app first. External agents with workspace access are not restricted by the in-app AI context checkboxes; trust the agent and authorize each delivery. No CLI attachments, account setup, implicit sync or automatic retries.
 
 Updating:
-- Versions 0.5.0-beta.2 and 0.6.0-beta.1 or later can download this release through Settings > About > Check for updates. Save or discard edits before Install & Restart. Earlier versions can install the package manually.
+- **One-time manual update from beta.4 and earlier:** the GitHub repository was renamed to Coke1120/Morrow-Mail. Older update checks reject its API redirect; download and install this package manually. This release uses the canonical address for future in-app updates, with signature and redirect protections unchanged.
 - Keep a verified workspace backup and close the old app before opening the new one. The workspace stays separate from the app; binary rollback never silently restores an older database over current data.
 - The signed manifest, pinned Ed25519 key, exact platform/version checks and SHA-256 validation remain unchanged. Read-only installation directories retain the manual-download option.
 

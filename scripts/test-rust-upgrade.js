@@ -121,8 +121,8 @@ try {
   const loader = join(directory, 'fetch-fixture.mjs');
   writeFileSync(loader, `import {readFileSync} from 'node:fs';
 globalThis.fetch = async url => {
-  if (String(url).startsWith('https://api.github.com/repos/Coke1120/genmail/releases?')) return new Response(JSON.stringify([{tag_name:${JSON.stringify('v' + version)},draft:false,prerelease:true}]));
-  const base=${JSON.stringify(`https://github.com/Coke1120/genmail/releases/download/v${version}/`)};
+  if (String(url).startsWith('https://api.github.com/repos/Coke1120/Morrow-Mail/releases?')) return new Response(JSON.stringify([{tag_name:${JSON.stringify('v' + version)},draft:false,prerelease:true}]));
+  const base=${JSON.stringify(`https://github.com/Coke1120/Morrow-Mail/releases/download/v${version}/`)};
   const files=${JSON.stringify({ 'update-manifest.json': join(directory, 'update-manifest.json'), 'update-manifest.sig': join(directory, 'update-manifest.sig'), [`Morrow-Mail-${version}-${platform}.zip`]: archive })};
   if (!String(url).startsWith(base) || !files[String(url).slice(base.length)]) throw Error('Unexpected external access in upgrade fixture');
   return new Response(readFileSync(files[String(url).slice(base.length)]));

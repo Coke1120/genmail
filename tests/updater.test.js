@@ -22,7 +22,7 @@ test('updates require the pinned signature, exact version/platform/size and safe
     assert.throws(() => verifyManifest(data, sign(null, data, privateKey).toString('base64'), version, publicKey));
   }
   let requests = 0;
-  await assert.rejects(releaseAsset('https://github.com/Coke1120/genmail/releases/download/v1/test', { fetchImpl: async () => { requests++; return new Response(null, { status:302, headers:{location:'http://127.0.0.1/private'} }); } }), /Untrusted/);
+  await assert.rejects(releaseAsset('https://github.com/Coke1120/Morrow-Mail/releases/download/v1/test', { fetchImpl: async () => { requests++; return new Response(null, { status:302, headers:{location:'http://127.0.0.1/private'} }); } }), /Untrusted/);
   assert.equal(requests, 1);
   await assert.rejects(releaseAsset('https://untrusted.invalid/update', { fetchImpl: () => { throw Error('Must not fetch'); } }), /Untrusted/);
   const directory = mkdtempSync(join(tmpdir(), 'morrow-update-guards-'));

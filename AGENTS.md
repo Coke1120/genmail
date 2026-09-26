@@ -137,6 +137,8 @@ acceptance. Never publish runtime data, fixture workspaces, or secrets.
 
 ## Paired release policy
 
+The canonical GitHub repository is `Coke1120/Morrow-Mail`; the local checkout and persisted `genmail` data/API identifiers retain their names for compatibility. Update checks deliberately reject API redirects, so use the canonical repository URL in both runtimes and fixtures. Do not rename persisted files or protocol headers for branding.
+
 Keep package.json as the common version source. Every tagged alpha or beta must build and pass
 checks on macOS and Windows before either download becomes public. Use the existing
 workflow and publisher; never replace published binaries or ship only one platform.

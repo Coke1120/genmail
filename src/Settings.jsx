@@ -645,7 +645,7 @@ export default function Settings({ state, onClose, onUpdate, notify, page = fals
           {downloadState.error && <p role="alert" className="settings-error">{downloadState.error}</p>}
           {downloadState.previous && <p role="status">{downloadState.previous}</p>}
         </fieldset>
-        <p><a href="https://github.com/Coke1120/genmail" target="_blank" rel="noreferrer">GitHub</a> · <a href="https://github.com/sponsors/Coke1120" target="_blank" rel="noreferrer">GitHub Sponsors</a> · <a href="https://buymeacoffee.com/Coke1120" target="_blank" rel="noreferrer">Buy Me a Coffee</a></p>
+        <p><a href="https://github.com/Coke1120/Morrow-Mail" target="_blank" rel="noreferrer">GitHub</a> · <a href="https://github.com/sponsors/Coke1120" target="_blank" rel="noreferrer">GitHub Sponsors</a> · <a href="https://buymeacoffee.com/Coke1120" target="_blank" rel="noreferrer">Buy Me a Coffee</a></p>
         <p className="settings-about-intro">An independent, open-source email workspace inspired by GenMail. Original design and code, MIT licensed, and built to keep your workspace on your computer.</p>
         <dl className="settings-about-status">
           <div><dt>Mailbox</dt><dd>{state.account.mode === 'demo' ? 'No mailbox selected' : `${({ google: 'Gmail API', microsoft: 'Microsoft Graph', imap: 'IMAP / SMTP' })[state.account.provider || savedMail.provider] || 'Live provider'} · ${state.account.email}`}</dd></div>

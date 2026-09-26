@@ -50,7 +50,7 @@ export function createUpdater({ dataDirectory, parentPID, updateToken }) {
       const latest = await checkUpdates({ includePrereleases });
       if (!latest.updateAvailable) throw new Error('No newer release is available for this channel.');
       version = latest.latestVersion;
-      const base = `https://github.com/Coke1120/genmail/releases/download/v${encodeURIComponent(version)}/`;
+      const base = `https://github.com/Coke1120/Morrow-Mail/releases/download/v${encodeURIComponent(version)}/`;
       const bytes = await smallAsset(base + 'update-manifest.json', 16384, controller.signal);
       const signature = (await smallAsset(base + 'update-manifest.sig', 256, controller.signal)).toString();
       const manifest = verifyManifest(bytes, signature, version), asset = manifest.platforms[platform];

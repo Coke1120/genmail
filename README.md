@@ -4,13 +4,13 @@
 
 **An open-source email client for macOS and Windows, with calendars and your choice of AI.**
 
-[![Checks](https://github.com/Coke1120/genmail/actions/workflows/check.yml/badge.svg)](https://github.com/Coke1120/genmail/actions/workflows/check.yml)
+[![Checks](https://github.com/Coke1120/Morrow-Mail/actions/workflows/check.yml/badge.svg)](https://github.com/Coke1120/Morrow-Mail/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-blue.svg)](#windows-desktop-app)
 [![macOS 13.5+](https://img.shields.io/badge/macOS-13.5%2B-black.svg)](#native-macos-app)
-[![Beta release](https://img.shields.io/github/v/release/Coke1120/genmail?include_prereleases&label=beta)](https://github.com/Coke1120/genmail/releases)
+[![Beta release](https://img.shields.io/github/v/release/Coke1120/Morrow-Mail?include_prereleases&label=beta)](https://github.com/Coke1120/Morrow-Mail/releases)
 
-[Download macOS / Windows beta](https://github.com/Coke1120/genmail/releases) · [Feature coverage](FEATURE_COVERAGE.md) · [Verification](VERIFICATION.md) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
+[Download macOS / Windows beta](https://github.com/Coke1120/Morrow-Mail/releases) · [Feature coverage](FEATURE_COVERAGE.md) · [Verification](VERIFICATION.md) · [GitHub Sponsors](https://github.com/sponsors/Coke1120) · [Buy Me a Coffee](https://buymeacoffee.com/Coke1120)
 
 Morrow Mail is an independent, MIT-licensed alternative inspired by Genspark GenMail. It runs locally with a **fully native SwiftUI macOS interface** and a **React / Electron Windows desktop interface**. Both bundle the same mail service and use the same release version. The React interface also runs in a browser for development.
 
@@ -41,7 +41,9 @@ Captured from the 0.4 development build using fictional messages and isolated pr
 
 ## Download the beta
 
-[Download the latest paired beta and checksums](https://github.com/Coke1120/genmail/releases). Starting with **v0.4.0-alpha.1**, each release contains both:
+**Upgrading from beta.4 or earlier:** download and install this release manually once. The GitHub repository was renamed to `Coke1120/Morrow-Mail`; those versions reject the old update API redirect. Beta.6 uses the canonical address and retains signature verification. Back up the workspace and quit the old app before replacing it; keep the separate data directory.
+
+[Download the latest paired beta and checksums](https://github.com/Coke1120/Morrow-Mail/releases). Starting with **v0.4.0-alpha.1**, each release contains both:
 
 | Platform | Package | Interface |
 | --- | --- | --- |
@@ -56,7 +58,7 @@ These are experimental prereleases. macOS builds are **ad-hoc signed, not Apple 
 
 This beta switches both desktop packages to the shared Rust service, adds bounded inbox paging and ships keyword/optional semantic search. It preserves built-in Google sign-in, controlled AI automation, historical import, reviewed writing-style learning and signed updates. Full provider delta sync, app-wide AI usage budgets, attachments and delayed/undo sending remain roadmap items. See [verification](VERIFICATION.md) for release checks and acceptance limits.
 
-**0.6.0-beta.5** adds safe formatted mail, right/bottom/focused reading layouts, reviewed Spam/Junk moves, visible mail/AI activity, recoverable imports and auto-saving General preferences. Demo entries are hidden; Reply All and Forward retain their source account. Embedding settings move to Model with Test Connection and Index Now; Learning adds Learn Now with explicit approval before a style becomes active. On macOS, closing the window keeps Morrow in the Dock. See the [changelog](CHANGELOG.md) for the full beta.5 changes.
+**0.6.0-beta.6** adds safe formatted mail, right/bottom/focused reading layouts, reviewed Spam/Junk moves, visible mail/AI activity, recoverable imports and auto-saving General preferences. Demo entries are hidden; Reply All and Forward retain their source account. Embedding settings move to Model with Test Connection and Index Now; Learning adds Learn Now with explicit approval before a style becomes active. On macOS, closing the window keeps Morrow in the Dock. See the [changelog](CHANGELOG.md) for the full beta.6 changes.
 
 ## Search and optional smart search
 
@@ -70,7 +72,7 @@ Use `from:jane@example.com to:me@example.com subject:"project update" after:2026
 
 Enable **Smart Search (智慧搜尋)** in the search controls and press **Search**. The query goes to the embedding endpoint; local keyword and vector rankings are merged. Query vectors are cached briefly for pagination. Hybrid results include at most 200 keyword and 200 semantic candidates; use keyword mode for exhaustive results. The initial exact vector scan accepts up to 12,000 scoped chunks and asks for narrower filters above that limit. Retrieval quality depends on your embedding model; it does not generate an answer or establish factual accuracy.
 
-Mail text goes only to the selected embedding endpoint during approved batches; a remote endpoint requires HTTPS. Changed permissions/model/connection invalidate vectors and in-flight results. Vectors stay in the local SQLite database alongside plaintext mail; API keys and search history use the existing encrypted settings store. **Clear Semantic Index / Cancel Batch** preserves mail and the keyword index. Versions through beta.4 configure the embedding connection under Search; beta.5 moves it to Model.
+Mail text goes only to the selected embedding endpoint during approved batches; a remote endpoint requires HTTPS. Changed permissions/model/connection invalidate vectors and in-flight results. Vectors stay in the local SQLite database alongside plaintext mail; API keys and search history use the existing encrypted settings store. **Clear Semantic Index / Cancel Batch** preserves mail and the keyword index. Versions through beta.4 configure the embedding connection under Search; beta.6 moves it to Model.
 
 ## Native macOS app
 
@@ -331,7 +333,7 @@ Model settings, permissions, and general preferences are **global across connect
 
 General settings include your display name, plain-text or HTML signature, theme, density, mark-read-on-open behavior, reply tone, preferred AI response language, independent target translation language (blank follows the preferred language), and sync interval. General preferences save automatically after editing, with visible saving/error status and retry on failure; other credentials, permissions and reviewed actions retain their explicit controls. These language settings control AI output, not UI localization. Timed mail sync checks all connected accounts every 1, 5, 15 or 30 minutes while the service is running; it defaults to manual. Review generated text before inserting it into a draft.
 
-**Settings → About → Check for updates** checks public releases in `Coke1120/genmail` on GitHub. Prerelease builds initially include alpha/beta releases; uncheck that option to check stable releases only. The app compares semantic versions among the latest 100 published releases, shows the installed/latest version and check time, and opens the release downloads page. Checks share no mail or credentials, time out after 10 seconds, and cache successful results for one minute. Offline, rate-limit and empty-channel responses are shown as errors, not as “up to date.” Packaged desktop builds from **0.5.0-beta.2** offer **Download update → Install & Restart**. Install an updater-enabled build manually once; older apps cannot acquire this feature themselves. The browser development interface keeps manual downloads.
+**Settings → About → Check for updates** checks public releases in `Coke1120/Morrow-Mail` on GitHub. Prerelease builds initially include alpha/beta releases; uncheck that option to check stable releases only. The app compares semantic versions among the latest 100 published releases, shows the installed/latest version and check time, and opens the release downloads page. Checks share no mail or credentials, time out after 10 seconds, and cache successful results for one minute. Offline, rate-limit and empty-channel responses are shown as errors, not as “up to date.” Packaged desktop builds from **0.5.0-beta.2** offer **Download update → Install & Restart**. Install an updater-enabled build manually once; older apps cannot acquire this feature themselves. The browser development interface keeps manual downloads.
 
 Downloads use the project's GitHub release assets and verify a pinned Ed25519 signature, exact version/platform, size and SHA-256 before extraction. The app checks archive paths and macOS compatibility/signing, then offers installation. Save or discard edits first; active writes block closing. Installation waits for the UI and private service to stop, replaces only the application, and reopens it automatically. Mail, accounts, preferences and uncertain-operation records stay in the separate data folder. Updates are not installed silently on ordinary quit.
 

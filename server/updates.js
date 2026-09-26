@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 export const currentVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
-const repository = 'https://github.com/Coke1120/genmail';
+const repository = 'https://github.com/Coke1120/Morrow-Mail';
 
 function version(value) {
   if (typeof value !== 'string' || value.length > 100) return null;
@@ -32,7 +32,7 @@ export async function checkUpdates({ includePrereleases = false, installed = cur
   if (!local) throw Object.assign(new Error('The installed version is not recognized.'), { status: 502 });
   let releases;
   try {
-    const response = await fetchImpl('https://api.github.com/repos/Coke1120/genmail/releases?per_page=100', {
+    const response = await fetchImpl('https://api.github.com/repos/Coke1120/Morrow-Mail/releases?per_page=100', {
       headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Morrow-Mail-update-check' },
       signal: AbortSignal.timeout(10000), redirect: 'error',
     });

@@ -1,8 +1,10 @@
 # Verification — 27 September 2026
 
-## 0.6.0-beta.5 release candidate
+## 0.6.0-beta.6 release candidate
 
-The candidate includes the previously unreleased reading, Gmail/activity, settings, reply/forward and reviewed AI controls described below. package.json and the lockfile agree on beta.5. Publication uses the existing tag workflow: all three platform check jobs and both Rust desktop upgrade jobs must succeed before the paired packages and signed manifest become public. Local beta.5 `npm run rust:test` passes all 96 Rust tests, strict fmt/Clippy, debug/release builds and seven Node↔Rust contracts. The prior local results below are preparation evidence; tagged CI and public-asset verification will be recorded after completion.
+The beta.5 tag CI was cancelled before publication after Git push revealed the repository rename. Public API probes confirmed the old path returns 301 and the canonical `Coke1120/Morrow-Mail` path returns 200. Both runtime update URLs, current product links and fixture expectations now use the canonical path; redirect/signature validation remains unchanged. Existing beta.4-and-earlier installations need a one-time manual download. Canonical-path fixture checks pass: all nine Rust updater tests, seven Node updater/desktop tests, strict updater Clippy and the legacy signed install/restart harness. Beta.6 debug/release binaries rebuilt successfully.
+
+The candidate includes the previously unreleased reading, Gmail/activity, settings, reply/forward and reviewed AI controls described below. package.json and the lockfile agree on beta.6. Publication uses the existing tag workflow: all three platform check jobs and both Rust desktop upgrade jobs must succeed before the paired packages and signed manifest become public. Local beta.5 `npm run rust:test` passes all 96 Rust tests, strict fmt/Clippy, debug/release builds and seven Node↔Rust contracts. The prior local results below are preparation evidence; tagged CI and public-asset verification will be recorded after completion.
 
 ## Safe reading, layout and import recovery — unreleased
 

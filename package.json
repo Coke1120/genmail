@@ -1,14 +1,14 @@
 {
   "name": "morrow-mail",
-  "version": "0.6.0-beta.5",
+  "version": "0.6.0-beta.6",
   "description": "An open-source email and calendar client for macOS and Windows, with multiple accounts and bring-your-own AI.",
-  "homepage": "https://github.com/Coke1120/genmail#readme",
+  "homepage": "https://github.com/Coke1120/Morrow-Mail#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Coke1120/genmail.git"
+    "url": "git+https://github.com/Coke1120/Morrow-Mail.git"
   },
   "bugs": {
-    "url": "https://github.com/Coke1120/genmail/issues"
+    "url": "https://github.com/Coke1120/Morrow-Mail/issues"
   },
   "keywords": [
     "macos",

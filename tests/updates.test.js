@@ -4,7 +4,7 @@ import { checkUpdates, currentVersion } from '../server/updates.js';
 
 const release = (tag_name, extra = {}) => ({ tag_name, draft: false, prerelease: tag_name.includes('-'), html_url: 'https://untrusted.invalid', ...extra });
 const response = releases => async (url, options) => {
-  assert.equal(url, 'https://api.github.com/repos/Coke1120/genmail/releases?per_page=100');
+  assert.equal(url, 'https://api.github.com/repos/Coke1120/Morrow-Mail/releases?per_page=100');
   assert.equal(options.redirect, 'error');
   assert.equal(options.headers.Authorization, undefined);
   assert.ok(options.signal instanceof AbortSignal);
@@ -18,7 +18,7 @@ test('GitHub release checks compare semantic versions and filter drafts and rele
   assert.equal(alpha.latestVersion, '0.4.0-alpha.10');
   assert.equal(alpha.updateAvailable, true);
   assert.equal(alpha.prerelease, true);
-  assert.equal(alpha.url, 'https://github.com/Coke1120/genmail/releases/tag/v0.4.0-alpha.10');
+  assert.equal(alpha.url, 'https://github.com/Coke1120/Morrow-Mail/releases/tag/v0.4.0-alpha.10');
   assert.ok(Number.isFinite(Date.parse(alpha.checkedAt)));
   const stable = await checkUpdates(options);
   assert.equal(stable.latestVersion, '0.3.0');
@@ -34,7 +34,7 @@ test('GitHub release checks compare semantic versions and filter drafts and rele
 });
 
 test('failed, malformed and empty update checks never report up-to-date', async () => {
-  for (const fetchImpl of [async () => { throw Error('offline'); }, async () => ({ ok: false, status: 500 }), response({}), async () => ({ ok: true, json: async () => { throw Error('bad JSON'); } })]) {
+  for (const fetchImpl of [async () => { throw Error('offline'); }, async () => ({ ok: false, status: 500 }), async () => ({ ok: false, status: 301 }), response({}), async () => ({ ok: true, json: async () => { throw Error('bad JSON'); } })]) {
     await assert.rejects(checkUpdates({ fetchImpl }), { status: 502 });
   }
   for (const status of [403, 429]) await assert.rejects(checkUpdates({ fetchImpl: async () => ({ ok: false, status }) }), { status: 503 });

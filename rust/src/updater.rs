@@ -39,7 +39,7 @@ pub const VERSION: &str = env!("MORROW_VERSION");
 pub const PUBLIC_KEY: &str = include_str!("../../server/update-public-key.pem");
 pub const ARCHIVE_LIMIT: u64 = 750 * 1024 * 1024;
 const PLATFORMS: [&str; 2] = ["macos-arm64", "windows-x64"];
-const REPOSITORY: &str = "https://github.com/Coke1120/genmail";
+const REPOSITORY: &str = "https://github.com/Coke1120/Morrow-Mail";
 const DOWNLOAD_ERROR: &str = "Could not download or verify the update. No app files were changed. Try again or use the release downloads.";
 fn fail(message: &str) -> Error {
     Error::conflict(message)
@@ -139,7 +139,7 @@ pub fn select_release(
 async fn check_updates(client: &reqwest::Client, prereleases: bool) -> Result<Value> {
     let result = async {
         let response = client
-            .get("https://api.github.com/repos/Coke1120/genmail/releases?per_page=100")
+            .get("https://api.github.com/repos/Coke1120/Morrow-Mail/releases?per_page=100")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "Morrow-Mail-update-check")
@@ -1793,7 +1793,14 @@ mod download_tests {
                     let text = String::from_utf8_lossy(&bytes);
                     let path = text.split_whitespace().nth(1).unwrap_or("");
                     let mode = mode.load(AtomicOrdering::Acquire);
-                    let (status, headers, body) = if path.starts_with("/repos/") {
+                    let decoded_path =
+                        percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+                    let valid_path = path == "/repos/Coke1120/Morrow-Mail/releases?per_page=100"
+                        || decoded_path
+                            .starts_with("/Coke1120/Morrow-Mail/releases/download/v99.0.0/");
+                    let (status, headers, body) = if !valid_path {
+                        (404, "", b"wrong repository path".to_vec())
+                    } else if path.starts_with("/repos/") {
                         if mode == 6 {
                             (429, "", b"limited".to_vec())
                         } else {
