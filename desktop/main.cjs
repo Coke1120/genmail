@@ -3,20 +3,20 @@ const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const { createInterface } = require('node:readline');
 const { join, resolve, isAbsolute, dirname, basename } = require('node:path');
-const { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, realpathSync } = require('node:fs');
+const { mkdirSync, readFileSync, writeFileSync, realpathSync, existsSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { clientState } = require('./client-state.cjs');
 const { isSignInURL, isExternalURL } = require('./security.cjs');
 
 app.setName('Morrow Mail');
 const smoke = process.argv.includes('--smoke-test');
-const seededSmoke = smoke && !!process.env.MORROW_SMOKE_WORKSPACE;
-const smokeDir = smoke ? (seededSmoke ? realpathSync(process.env.MORROW_SMOKE_WORKSPACE) : mkdtempSync(join(tmpdir(), 'morrow-desktop-check-'))) : null;
-if (seededSmoke) {
+const smokeDir = smoke ? realpathSync(process.env.MORROW_SMOKE_WORKSPACE || '') : null;
+if (smoke) {
   const parent = dirname(smokeDir), temporary = realpathSync(tmpdir());
   const sameParent = process.platform === 'win32' ? parent.toLowerCase() === temporary.toLowerCase() : parent === temporary;
   if (!isAbsolute(process.env.MORROW_SMOKE_WORKSPACE) || !sameParent || !/^morrow-desktop-check-[A-Za-z0-9]+$/.test(basename(smokeDir)) || readFileSync(join(smokeDir, 'disposable-smoke-fixture'), 'utf8') !== 'Morrow desktop acceptance fixture') throw new Error('Smoke checks require a marked disposable temporary workspace.');
 }
+const seededSmoke = smoke && existsSync(join(smokeDir, 'genmail.sqlite'));
 const workspaceOverride = process.env.MORROW_DATA_DIR;
 if (workspaceOverride && !isAbsolute(workspaceOverride)) throw new Error('MORROW_DATA_DIR must be an absolute workspace path.');
 if (smokeDir || workspaceOverride) {
@@ -87,10 +87,8 @@ async function stop(code = 0) {
       app.relaunch();
     }
   }
-  const finish = () => {
-    if (smokeDir) { try { rmSync(smokeDir, { recursive: true, force: true, maxRetries: 5 }); } catch {} }
-    app.exit(code);
-  };
+  // The external smoke driver cleans its workspace after Chromium releases file locks.
+  const finish = () => app.exit(code);
   if (!child || child.exitCode !== null) return finish();
   child.once('exit', finish);
   child.stdin.end();

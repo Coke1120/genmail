@@ -41,7 +41,7 @@ Captured from the 0.4 development build using fictional messages and isolated pr
 
 ## Download the beta
 
-**Upgrading from beta.4 or earlier:** download and install this release manually once. The GitHub repository was renamed to `Coke1120/Morrow-Mail`; those versions reject the old update API redirect. Beta.7 uses the canonical address and retains signature verification. Back up the workspace and quit the old app before replacing it; keep the separate data directory.
+**Upgrading from beta.4 or earlier:** download and install this release manually once. The GitHub repository was renamed to `Coke1120/Morrow-Mail`; those versions reject the old update API redirect. Beta.8 uses the canonical address and retains signature verification. Back up the workspace and quit the old app before replacing it; keep the separate data directory.
 
 [Download the latest paired beta and checksums](https://github.com/Coke1120/Morrow-Mail/releases). Starting with **v0.4.0-alpha.1**, each release contains both:
 
@@ -58,7 +58,7 @@ These are experimental prereleases. macOS builds are **ad-hoc signed, not Apple 
 
 This beta switches both desktop packages to the shared Rust service, adds bounded inbox paging and ships keyword/optional semantic search. It preserves built-in Google sign-in, controlled AI automation, historical import, reviewed writing-style learning and signed updates. Full provider delta sync, app-wide AI usage budgets, attachments and delayed/undo sending remain roadmap items. See [verification](VERIFICATION.md) for release checks and acceptance limits.
 
-**0.6.0-beta.7** adds safe formatted mail, right/bottom/focused reading layouts, reviewed Spam/Junk moves, visible mail/AI activity, recoverable imports and auto-saving General preferences. Demo entries are hidden; Reply All and Forward retain their source account. Embedding settings move to Model with Test Connection and Index Now; Learning adds Learn Now with explicit approval before a style becomes active. On macOS, closing the window keeps Morrow in the Dock. See the [changelog](CHANGELOG.md) for the full beta.7 changes.
+**0.6.0-beta.8** adds safe formatted mail, right/bottom/focused reading layouts, reviewed Spam/Junk moves, visible mail/AI activity, recoverable imports and auto-saving General preferences. Demo entries are hidden; Reply All and Forward retain their source account. Embedding settings move to Model with Test Connection and Index Now; Learning adds Learn Now with explicit approval before a style becomes active. On macOS, closing the window keeps Morrow in the Dock. See the [changelog](CHANGELOG.md) for the full beta.8 changes.
 
 ## Search and optional smart search
 
@@ -72,7 +72,7 @@ Use `from:jane@example.com to:me@example.com subject:"project update" after:2026
 
 Enable **Smart Search (智慧搜尋)** in the search controls and press **Search**. The query goes to the embedding endpoint; local keyword and vector rankings are merged. Query vectors are cached briefly for pagination. Hybrid results include at most 200 keyword and 200 semantic candidates; use keyword mode for exhaustive results. The initial exact vector scan accepts up to 12,000 scoped chunks and asks for narrower filters above that limit. Retrieval quality depends on your embedding model; it does not generate an answer or establish factual accuracy.
 
-Mail text goes only to the selected embedding endpoint during approved batches; a remote endpoint requires HTTPS. Changed permissions/model/connection invalidate vectors and in-flight results. Vectors stay in the local SQLite database alongside plaintext mail; API keys and search history use the existing encrypted settings store. **Clear Semantic Index / Cancel Batch** preserves mail and the keyword index. Versions through beta.4 configure the embedding connection under Search; beta.7 moves it to Model.
+Mail text goes only to the selected embedding endpoint during approved batches; a remote endpoint requires HTTPS. Changed permissions/model/connection invalidate vectors and in-flight results. Vectors stay in the local SQLite database alongside plaintext mail; API keys and search history use the existing encrypted settings store. **Clear Semantic Index / Cancel Batch** preserves mail and the keyword index. Versions through beta.4 configure the embedding connection under Search; beta.8 moves it to Model.
 
 ## Native macOS app
 

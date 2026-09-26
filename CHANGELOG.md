@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0-beta.7 — 2026-09-27
+## 0.6.0-beta.8 — 2026-09-27
 
 - Use the renamed `Coke1120/Morrow-Mail` repository for update checks, downloads and product links without relaxing redirect or signature checks. Older installed versions require a one-time manual update; beta.5 was cancelled before publication.
 
