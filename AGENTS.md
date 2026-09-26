@@ -92,7 +92,7 @@ npm run macos:test           # Swift model checks, UI compilation, native API in
 npm run macos:rust:test      # actual native client with production Rust service
 npm run macos:build          # self-contained app in build/macos/Morrow Mail.app
 npm run windows:build        # Windows x64 host: self-contained Electron app
-npm run desktop:test -- --packaged  # Windows packaged smoke test
+npm run desktop:test -- --packaged  # fresh onboarding + owned fixture mailbox on Windows
 npm run updater:test               # isolated install/restart acceptance on macOS/Windows
 npm run updater:rust-upgrade:test   # original installer → actual Rust app, restart and backup
 codesign --verify --deep --strict 'build/macos/Morrow Mail.app'
@@ -103,6 +103,7 @@ Avoid parallel builds targeting the same output. Inspect free disk space before 
 
 Account-routing changes need coverage for duplicate IDs, combined views,
 account-specific sending/AI, reconnect/migration, and disconnect isolation.
+Desktop smoke checks must cover both fresh Add account onboarding and an owned fictional mailbox, never depend on visible Demo navigation. Seed and close fixture stores before the Rust writer starts.
 Test providers live in isolated temporary workspaces and must never be shipped
 in the production app. Use a separate absolute `MORROW_DATA_DIR` for native
 acceptance; never use the owner's real workspace for fixtures. Do not send real

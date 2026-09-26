@@ -2,15 +2,21 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell, session } = require('e
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const { createInterface } = require('node:readline');
-const { join, resolve, isAbsolute } = require('node:path');
-const { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } = require('node:fs');
+const { join, resolve, isAbsolute, dirname, basename } = require('node:path');
+const { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, realpathSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { clientState } = require('./client-state.cjs');
 const { isSignInURL, isExternalURL } = require('./security.cjs');
 
 app.setName('Morrow Mail');
 const smoke = process.argv.includes('--smoke-test');
-const smokeDir = smoke ? mkdtempSync(join(tmpdir(), 'morrow-desktop-check-')) : null;
+const seededSmoke = smoke && !!process.env.MORROW_SMOKE_WORKSPACE;
+const smokeDir = smoke ? (seededSmoke ? realpathSync(process.env.MORROW_SMOKE_WORKSPACE) : mkdtempSync(join(tmpdir(), 'morrow-desktop-check-'))) : null;
+if (seededSmoke) {
+  const parent = dirname(smokeDir), temporary = realpathSync(tmpdir());
+  const sameParent = process.platform === 'win32' ? parent.toLowerCase() === temporary.toLowerCase() : parent === temporary;
+  if (!isAbsolute(process.env.MORROW_SMOKE_WORKSPACE) || !sameParent || !/^morrow-desktop-check-[A-Za-z0-9]+$/.test(basename(smokeDir)) || readFileSync(join(smokeDir, 'disposable-smoke-fixture'), 'utf8') !== 'Morrow desktop acceptance fixture') throw new Error('Smoke checks require a marked disposable temporary workspace.');
+}
 const workspaceOverride = process.env.MORROW_DATA_DIR;
 if (workspaceOverride && !isAbsolute(workspaceOverride)) throw new Error('MORROW_DATA_DIR must be an absolute workspace path.');
 if (smokeDir || workspaceOverride) {
@@ -156,24 +162,26 @@ app.whenReady().then(async () => {
     if (app.isPackaged && JSON.parse(readFileSync(join(__dirname, 'backend/package.json'), 'utf8')).version !== app.getVersion()) throw new Error('Desktop and backend versions differ.');
     // A fresh temporary workspace only: never open or mutate the owner's mailbox.
     const result = await window.webContents.executeJavaScript(`(async () => {
-      await new Promise((accept, reject) => {
-        const ready = () => document.querySelector('.message-row') && accept();
-        if (ready()) return;
-        const observer = new MutationObserver(() => { if (document.querySelector('.message-row')) { observer.disconnect(); accept(); } });
-        observer.observe(document.body, { childList: true, subtree: true });
-        setTimeout(() => { observer.disconnect(); document.querySelector('.message-row') ? accept() : reject(new Error('Inbox did not render.')); }, 10000);
-      });
-      window.morrowDesktop.writeState('morrow.account.collapsed.demo', 'true');
-      if (window.morrowDesktop.readState('morrow.account.collapsed.demo') !== 'true') throw new Error('Desktop state was not saved.');
+      const until = async predicate => { const deadline = Date.now() + 10000; while (!predicate()) { if (Date.now() > deadline) throw new Error('Desktop UI did not settle.'); await new Promise(resolve => setTimeout(resolve, 50)); } };
       const response = await fetch('/api/state'); const state = await response.json();
-      const until = async predicate => { const deadline = Date.now() + 10000; while (!predicate()) { if (Date.now() > deadline) throw new Error('Search UI did not settle.'); await new Promise(resolve => setTimeout(resolve, 50)); } };
+      if (!${seededSmoke}) {
+        await until(() => document.querySelector('.reader-empty h2')?.textContent === 'Add your first account');
+        if (state.accounts.length || document.querySelector('.message-row') || document.querySelector('.sidebar')?.textContent.includes('Demo workspace')) throw new Error('Fresh onboarding exposed a Demo mailbox.');
+        return { ok: response.ok, mode: state.account?.mode, count: 0, node: typeof window.require, bridge: typeof window.morrowDesktop?.openSignIn, csp: !!document.querySelector('script[src]') };
+      }
+      if (state.account?.id !== 'smoke@fixture.invalid') throw new Error('Unexpected smoke mailbox.');
+      const owner = state.account.id;
+      await until(() => document.querySelector('.message-row'));
+      const disclosureKey = 'morrow.account.collapsed.' + owner;
+      window.morrowDesktop.writeState(disclosureKey, 'true');
+      if (window.morrowDesktop.readState(disclosureKey) !== 'true') throw new Error('Desktop state was not saved.');
       await until(() => document.querySelector('button[aria-label="Mark unread locally"]') && !document.querySelector('.message-body [role="status"]'));
       const opened = state.messages.find(message => message.subject === document.querySelector('.reader-heading h2').textContent);
       document.querySelector('button[aria-label="Mark unread locally"]').click();
       await until(() => document.querySelector('button[aria-label="Mark read locally"]'));
       await new Promise(resolve => setTimeout(resolve, 250));
       await until(() => document.querySelector('.message-list').getAttribute('aria-busy') === 'false');
-      const refreshed = await (await fetch('/api/messages/' + encodeURIComponent(opened.id), { headers: { 'X-Genmail-Account': 'demo' } })).json();
+      const refreshed = await (await fetch('/api/messages/' + encodeURIComponent(opened.id), { headers: { 'X-Genmail-Account': owner } })).json();
       if (refreshed.message.read) throw new Error('Body refresh undid the manual mark-unread action.');
       const search = document.querySelector('input[aria-label="Search inbox"]');
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, 'Northstar');
@@ -183,14 +191,14 @@ app.whenReady().then(async () => {
       document.querySelector('.search-history summary').click();
       [...document.querySelectorAll('.search-history button')].find(button => button.textContent === 'Save this search').click();
       await until(() => [...document.querySelectorAll('.search-history button')].some(button => button.textContent.includes('★ Northstar')));
-      const history = await (await fetch('/api/search/preferences', { headers: { 'X-Genmail-Account': 'demo' } })).json();
+      const history = await (await fetch('/api/search/preferences', { headers: { 'X-Genmail-Account': owner } })).json();
       if (history.saved[0]?.query !== 'Northstar') throw new Error('Saved search was not persisted.');
       document.querySelector('button[aria-label="Clear search"]').click();
       await until(() => !document.querySelector('.search-status'));
       const metadata = await (await fetch('/api/state', { headers: { 'X-Morrow-View': 'paged' } })).json();
       if (metadata.messages.some(message => 'body' in message || 'footer' in message)) throw new Error('Metadata included message bodies.');
       for (let i = 0; i < 55; i++) {
-        const saved = await fetch('/api/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Genmail-Account': 'demo' }, body: JSON.stringify({ to: 'fixture@example.invalid', subject: 'Pagination fixture ' + i, body: 'Complete fixture draft body ' + i }) });
+        const saved = await fetch('/api/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Genmail-Account': owner }, body: JSON.stringify({ to: 'fixture@example.invalid', subject: 'Pagination fixture ' + i, body: 'Complete fixture draft body ' + i }) });
         if (!saved.ok) throw new Error('Could not seed temporary drafts.');
       }
       [...document.querySelectorAll('.account-folders button')].find(button => button.textContent.startsWith('Drafts')).click();
@@ -204,11 +212,11 @@ app.whenReady().then(async () => {
       document.querySelector('button[aria-label="Close dialog"]').click();
       return { ok: response.ok, mode: state.account?.mode, count: state.messages?.length, node: typeof window.require, bridge: typeof window.morrowDesktop?.openSignIn, csp: !!document.querySelector('script[src]') };
     })()`);
-    if (!result.ok || result.mode !== 'demo' || !result.count || result.node !== 'undefined' || result.bridge !== 'function' || !result.csp) throw new Error('Desktop smoke test failed.');
+    if (!result.ok || result.mode !== (seededSmoke ? 'live' : 'demo') || (seededSmoke ? !result.count : result.count !== 0) || result.node !== 'undefined' || result.bridge !== 'function' || !result.csp) throw new Error('Desktop smoke test failed.');
     if ((await fetch(`${origin}/api/state`)).status !== 401) throw new Error('Private API was exposed.');
     const health = await fetch(`${origin}/api/health`, { headers: { Authorization: `Bearer ${token}` } });
     if (!health.ok) throw new Error('Private service health check failed.');
-    console.log(`Desktop smoke passed: ${app.isPackaged ? 'bundled' : 'development'} service, authenticated renderer, demo inbox, indexed search/highlights/saved search, mail pagination and complete draft loading, sandbox, private API.`);
+    console.log(`Desktop smoke passed: ${app.isPackaged ? 'bundled' : 'development'} service, authenticated renderer, ${seededSmoke ? 'owned fixture inbox, indexed search/highlights/saved search, pagination and complete drafts' : 'fresh Add account onboarding without Demo'}, sandbox, private API.`);
     stop();
   }
 }).catch(error => { if (smoke) console.error(error.message); fatal(); });
