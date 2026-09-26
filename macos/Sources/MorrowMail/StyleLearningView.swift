@@ -9,6 +9,7 @@ struct StyleLearningView: View {
     var value: JSON { model.state["workspace"]["styleLearning"] }
     var preview: JSON { value["preview"] }
     var changed: Bool { options != value["settings"] || voice != preview["voice"].string }
+    var analysisBlocked: Bool { changed || !value["settings"]["enabled"].bool || !value["permitted"].bool || !model.state["settings"]["ai"]["configured"].bool || preview["status"].string == "running" }
     func flag(_ key: String) -> Binding<Bool> {
         Binding(get: { options[key].bool }, set: { options[key] = .bool($0); if key == "enabled" && !$0 { options["weekly"] = .bool(false) } })
     }
@@ -18,6 +19,10 @@ struct StyleLearningView: View {
             SectionHeading(title: "Learn my writing style", detail: "Optional, per account. Only your own Sent text is analyzed. Contact and project memory remain separate. Importing mail does not use AI tokens.")
             Text(model.state["account"]["mode"].string == "live" ? model.state["account"].id : "Choose an individual connected account in the sidebar.").font(.headline)
             VStack(alignment: .leading, spacing: 16) {
+                Button("Learn Now · Uses AI") { action("preview", learnNow: true) }.buttonStyle(.borderedProminent).disabled(analysisBlocked)
+                Text("Uses saved learning settings. Review samples and the token estimate before AI analysis generates a proposed writing style. Save Approved Style activates it for writing and replies under Email Brain permission; it does not overwrite Email Brain contacts, notes, or voice.").font(.callout).foregroundStyle(.secondary)
+                if changed { Text("Save learning settings and save or discard any proposal edits before learning again.").font(.caption).foregroundStyle(.secondary) }
+                if !model.state["settings"]["ai"]["configured"].bool { Text("Configure and save an AI model in Model settings first.").font(.caption).foregroundStyle(.secondary) }
                 Toggle("Enable writing-style learning for this account", isOn: flag("enabled")).toggleStyle(.checkbox)
                 Toggle("Analyze newly sent mail weekly", isOn: flag("weekly")).toggleStyle(.checkbox).disabled(!options["enabled"].bool)
                 Text("Weekly analysis uses cached Sent mail and this budget while Morrow is open. Enable mail refresh to capture mail sent elsewhere. Updates always require review and Save; a pending preview pauses the next analysis.").font(.caption).foregroundStyle(.secondary)
@@ -27,8 +32,8 @@ struct StyleLearningView: View {
                 HStack { Text("Token budget per analysis"); TextField("16000", value: number("tokenBudget"), format: .number.grouping(.never)).frame(width: 120) }
                 Text("4,000–64,000 tokens. Conservative UTF-8 estimate including response allowance; custom model billing may differ. No currency estimate.").font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Save Learning Settings") { action("settings", body: options) }.buttonStyle(.borderedProminent).disabled(preview["status"].string == "running")
-                    Button("Preview Samples · No AI Call") { action("preview") }.disabled(changed || !value["permitted"].bool || preview["status"].string == "running")
+                    Button("Save Learning Settings") { action("settings", body: options) }.disabled(preview["status"].string == "running")
+                    Button("Preview Samples · No AI Call") { action("preview") }.disabled(analysisBlocked)
                 }
                 if !value["permitted"].bool { Text("Requires saved learning opt-in plus AI Permissions: AI on, Email Brain, Sent, and email body access.").font(.callout).foregroundStyle(.secondary) }
                 if !preview.isNull { previewPanel }
@@ -68,7 +73,7 @@ struct StyleLearningView: View {
                 }
                 if preview["error"].nonempty { Text(preview["error"].string).foregroundStyle(.orange) }
                 if preview["status"].string == "prepared" {
-                    Button("Analyze These Samples · Uses AI") { action("generate", body: .object(["previewId": .string(preview.id)])) }.buttonStyle(.borderedProminent).disabled(changed)
+                    Button("Analyze These Samples · Uses AI") { action("generate", body: .object(["previewId": .string(preview.id)])) }.buttonStyle(.borderedProminent).disabled(analysisBlocked)
                 }
                 if preview["status"].string == "ready" {
                     TextArea(title: "Review and edit proposed style", text: $voice, height: 150)
@@ -79,13 +84,37 @@ struct StyleLearningView: View {
         }
     }
     func load() { options = value["settings"]; voice = preview["voice"].string; dirty = false }
-    func action(_ path: String, body: JSON = .object([:]), method: String = "POST") {
+    func action(_ path: String, body: JSON = .object([:]), method: String = "POST", learnNow: Bool = false) {
+        guard !model.busy, model.state["account"]["mode"].string == "live" else { return }
+        if ["preview", "generate"].contains(path) && analysisBlocked { return }
         let owner = model.state["account"].id
         if ["settings", "preview"].contains(path) && preview["status"].string == "ready" && !model.confirm("Replace the current style proposal?", detail: "Your approved style will be retained.") { return }
+        guard model.account == owner else { return }
         error = ""
         model.perform {
-            do { model.state = try await model.request("/style/\(path)", method: method, body: body, mailbox: owner); load() }
-            catch { self.error = error.localizedDescription; try? await model.reload() }
+            do {
+                let result = try await model.request("/style/\(path)", method: method, body: body, mailbox: owner)
+                guard model.account == owner else { return }
+                model.state = result; load()
+                if learnNow {
+                    let prepared = result["workspace"]["styleLearning"]["preview"]
+                    guard prepared["status"].string == "prepared", !prepared.id.isEmpty, !analysisBlocked else { return }
+                    let excerpts = prepared["samples"].array.prefix(2).enumerated().map { index, sample in
+                        let text = sample["body"].string
+                        return "Sample \(index + 1): \(text.prefix(200))\(text.count > 200 ? "…" : "")"
+                    }.joined(separator: "\n\n")
+                    let ai = result["settings"]["ai"]
+                    let detail = "Account: \(owner) · Your Sent bodies only\nModel: \(ai["model"].string)\nEndpoint: \(ai["baseUrl"].string)\n\(Int(prepared["sampleCount"].number)) / \(Int(prepared["eligible"].number)) useful samples · Cap \(Int(prepared["effectiveCap"].number))\nEstimated tokens ≤ \(Int(prepared["estimatedTokens"].number)) · Budget \(Int(prepared["tokenBudget"].number))\n\nUp to 2 short excerpts; all selected samples will be analyzed:\n\(excerpts)\n\nCancel to review full samples below. Your approved style is retained until Save Approved Style. Continue with AI analysis?"
+                    guard model.confirm("Learn Now · Uses AI", detail: detail), model.account == owner, !analysisBlocked else { return }
+                    let generated = try await model.request("/style/generate", method: "POST", body: .object(["previewId": .string(prepared.id)]), mailbox: owner)
+                    guard model.account == owner else { return }
+                    model.state = generated; load()
+                }
+            } catch {
+                guard model.account == owner else { return }
+                self.error = error.localizedDescription
+                if let refreshed = try? await model.request("/state", mailbox: owner), model.account == owner { model.state = refreshed }
+            }
         }
     }
 }

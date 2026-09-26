@@ -28,13 +28,17 @@ writeFileSync(join(directory, 'update-manifest.sig'), signature);
 expected.push('update-manifest.json', 'update-manifest.sig');
 const notes = `Morrow Mail ${version}
 
-Built-in Microsoft sign-in for Outlook mail and Calendar. Both packages are built from this same Git tag and pass the paired checks before publication.
+Safer formatted mail, broader Gmail coverage and clearer desktop controls. Both packages are built from this same Git tag and pass the paired checks before publication.
 
-What changed since 0.6.0-beta.3:
-- Click Microsoft sign-in to authorize in your browser, without entering a client ID, secret or JSON. The publisher's public desktop application ID is shared by the Rust service and Node compatibility service.
-- Both native SwiftUI on macOS and React/Electron on Windows support default mail and calendar sign-in, with separate grants and an Advanced option for custom registrations.
-- PKCE, state, browser-bound callbacks and account isolation are retained. The built-in public client never reuses a saved custom client secret.
-- Rust remains the default backend; the attached/standalone agent CLI and existing workspace/update protections are retained.
+What changed since 0.6.0-beta.4:
+- Read sanitized HTML mail with links and optional HTTPS images. Scripts, forms and embedded pages are blocked; images require per-message consent. Existing cached messages need refetching for HTML. Attachment/CID images are not included.
+- Choose a right, bottom or focused reading layout, expand the reader, and keep your inbox page/selection when reading. Senders align left; unread dots align right and only unread previews are bold. On macOS, closing the window keeps Morrow in the Dock; reopening retains your work and quitting still guards edits/writes.
+- Reply All and Forward retain the message's owning account. Demo is hidden from the interface. Imported Gmail drafts open as new local copies, preserving recipients without changing the provider original.
+- Gmail refresh checks Inbox, Sent, Drafts, Starred and All Mail, up to 50 messages per scope. Date-bounded All Mail history includes archived messages and user labels, excluding Spam/Trash. Provider metadata refresh preserves explicit local changes.
+- Reviewed provider moves support Gmail Spam and Outlook Junk; phishing reports and sender blocking remain provider-site actions. Mail and AI activity show fetching, checkpointed imports, queued/running work and safe errors.
+- Temporary read-only history fetch failures retry at most three times with persisted progress. Authentication, invalid cursors/pages and database failures need explicit recovery; older unexplained failed imports can be resumed manually.
+- General preferences auto-save with visible progress and retry on failure. Embedding settings move to Model with a fixed-input Test Connection; Index Now prepares a scope/budget review. Learn Now creates a proposal, and Save Approved Style separately activates it without overwriting manual Email Brain memory.
+- Update contributor guidance and user documentation. Rust remains the desktop backend, with the existing agent CLI, built-in OAuth and signed workspace-preserving updater.
 
 CLI quick start:
 - macOS: '/Applications/Morrow Mail.app/Contents/Resources/morrow-service' cli --help
@@ -49,7 +53,7 @@ Updating:
 
 OAuth setup:
 - Built-in Google Desktop OAuth remains available for Gmail and Google Calendar. Google Cloud API enablement, test-user access and provider verification remain publisher responsibilities; bundling the registration does not remove Testing restrictions.
-- Outlook mail and Calendar now use the bundled public Microsoft desktop registration by default; no user-supplied client ID, JSON or secret is required. Custom registrations remain available under Advanced. Organization policies may require administrator approval. Live Microsoft consent and Entra registration acceptance remain unverified; fixture checks do not establish provider approval.
+- Outlook mail and Calendar use the bundled public Microsoft desktop registration by default; no user-supplied client ID, JSON or secret is required. Custom registrations remain available under Advanced. Organization policies may require administrator approval. Live Microsoft consent and Entra registration acceptance remain unverified; fixture checks do not establish provider approval.
 - Bundled desktop app identifiers are extractable and are not user credentials. No mailbox tokens or private update signing key are shipped.
 
 Packages:
@@ -58,7 +62,7 @@ Packages:
 - Both include their runtime. No Node or Rust installation is needed. Compare the supplied SHA-256 checksum before opening.
 
 Beta limitations:
-Live-account/provider acceptance, minimum-OS and other-hardware acceptance, complete manual UI/IME/accessibility testing and stable distribution signing remain pending. Native Settings walkthrough was blocked by the automation service crashing; automated native settings/backup checks passed, but are not a substitute for visual acceptance. Provider/model tests used isolated fixtures without real sends, invitations or paid inference. Periodic sync still fetches the latest 50 messages per selected folder; full provider delta sync, attachments, app-wide AI spending caps and delayed/undo sending are not included. Studio simulations remain clearly labeled. Windows Tauri is not part of this release. This beta does not establish stable production readiness; see the tagged README.md, FEATURE_COVERAGE.md and VERIFICATION.md.
+Live-account/provider acceptance, minimum-OS and other-hardware acceptance, complete manual UI/IME/accessibility testing and stable distribution signing remain pending. Native API, WebKit isolation and window lifecycle checks passed locally; browser fixture walkthroughs are not full native visual or live-account acceptance. The browser automation connection failed during an external-link confirmation check; protocol/sandbox tests passed, but that interactive step is not claimed. Provider/model tests used isolated fixtures without real sends, invitations or paid inference. Full provider delta/deletion sync, attachments, phishing/malware verdicts, sender blocking, app-wide AI spending caps and delayed/undo sending are not included. Studio simulations remain clearly labeled. Windows Tauri is not part of this release. This beta does not establish stable production readiness; see the tagged README.md, FEATURE_COVERAGE.md and VERIFICATION.md.
 
 Support development: https://github.com/sponsors/Coke1120 · https://buymeacoffee.com/Coke1120
 `;

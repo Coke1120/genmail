@@ -44,6 +44,8 @@ fn dates_dst_clock_rollback_and_strict_summary_contract() {
         json!({"months":2}),
         json!({"inbox":false,"sent":false}),
         json!({"sent":1}),
+        json!({"allMail":"true"}),
+        json!({"allMail":true,"inbox":1}),
         json!({"unknown":true}),
     ] {
         assert_eq!(jobs::import_options(&input).unwrap_err().status, 400);
@@ -114,6 +116,102 @@ fn dates_dst_clock_rollback_and_strict_summary_contract() {
 }
 
 #[test]
+fn gmail_all_mail_scope_and_progress_are_durable_safe_and_backward_compatible() {
+    let root = directory();
+    let db = Store::open(&root).unwrap();
+    configure(&db);
+    assert_eq!(jobs::import_options(&json!({})).unwrap()["allMail"], false);
+    let options = json!({"allMail":true,"inbox":false,"sent":false});
+    assert_eq!(jobs::import_options(&options).unwrap()["allMail"], true);
+    let before = db.settings().unwrap();
+    assert_eq!(
+        jobs::start_import(&db, A, &options).unwrap_err().status,
+        400
+    );
+    assert_eq!(db.settings().unwrap(), before);
+    let mut accounts = before["mailAccounts"].clone();
+    accounts[A]["provider"] = "google".into();
+    accounts[B]["provider"] = "microsoft".into();
+    db.set_settings(&json!({"mailAccounts":accounts})).unwrap();
+    assert_eq!(
+        jobs::start_import(&db, B, &options).unwrap_err().status,
+        400
+    );
+    jobs::start_import(&db, A, &options).unwrap();
+    let status = jobs::import_status(&db, A).unwrap();
+    assert_eq!(status["currentFolder"], "all");
+    assert_eq!(status["phase"], "queued");
+    assert_eq!(status["pages"], 0);
+    assert_eq!(status["processed"], 0);
+    assert!(status["lastPageChecked"].is_null());
+    let date = (chrono::Utc::now() - chrono::Duration::days(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let sent = json!({"id":"sent","date":date,"folder":"sent","starred":true,"labels":["SENT","STARRED","Project"]});
+    let draft = json!({"id":"draft","date":date,"folder":"drafts","providerDraft":true,"labels":["DRAFT","Project"]});
+    let job = db.settings().unwrap()["imports"][A].clone();
+    jobs::apply_import_page(&db, A, &job, &json!({"messages":[sent,draft,{"id":"too-old","date":"2020-01-01T00:00:00.000Z","folder":"inbox"}],"nextCursor":"private-provider-cursor"})).unwrap();
+    let status = jobs::import_status(&db, A).unwrap();
+    assert_eq!(status["pages"], 1);
+    assert_eq!(status["processed"], 3);
+    assert_eq!(status["imported"], 2);
+    assert_eq!(status["lastPageChecked"], 3);
+    assert_eq!(status["lastPageAdded"], 2);
+    assert_eq!(
+        db.get(A, "sent").unwrap().unwrap()["labels"],
+        sent["labels"]
+    );
+    assert_eq!(db.get(A, "draft").unwrap().unwrap()["providerDraft"], true);
+    assert!(db.get(A, "too-old").unwrap().is_none());
+    assert!(db.get(B, "sent").unwrap().is_none());
+    jobs::control_import(&db, A, "pause").unwrap();
+    assert_eq!(jobs::import_status(&db, A).unwrap()["phase"], "paused");
+    drop(db);
+    let db = Store::open(&root).unwrap();
+    assert_eq!(jobs::import_status(&db, A).unwrap()["processed"], 3);
+    jobs::control_import(&db, A, "resume").unwrap();
+    let job = db.settings().unwrap()["imports"][A].clone();
+    assert_eq!(job["cursor"], "private-provider-cursor");
+    jobs::apply_import_page(&db, A, &job, &json!({"messages":[sent],"nextCursor":null})).unwrap();
+    let status = jobs::import_status(&db, A).unwrap();
+    assert_eq!(status["status"], "complete");
+    assert_eq!(status["phase"], "complete");
+    assert!(status["currentFolder"].is_null());
+    assert_eq!(status["pages"], 2);
+    assert_eq!(status["processed"], 4);
+    assert_eq!(status["imported"], 2);
+    assert_eq!(status["lastPageChecked"], 1);
+    assert_eq!(status["lastPageAdded"], 0);
+    for key in ["cursor", "visited", "connectionId", "id", "total"] {
+        assert!(status.get(key).is_none());
+    }
+    assert!(!status.to_string().contains("private-provider-cursor"));
+
+    jobs::start_import(&db, B, &json!({})).unwrap();
+    let mut imports = db.settings().unwrap()["imports"].clone();
+    imports[B].as_object_mut().unwrap().remove("pages");
+    imports[B].as_object_mut().unwrap().remove("processed");
+    imports[B]["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("allMail");
+    imports[B]["imported"] = 20.into();
+    db.set_settings(&json!({"imports":imports})).unwrap();
+    drop(db);
+    let db = Store::open(&root).unwrap();
+    let job = db.settings().unwrap()["imports"][B].clone();
+    jobs::apply_import_page(&db, B, &job, &json!({"messages":[sent],"nextCursor":null})).unwrap();
+    let status = jobs::import_status(&db, B).unwrap();
+    assert_eq!(status["currentFolder"], "sent");
+    assert!(status["pages"].is_null());
+    assert!(status["processed"].is_null());
+    assert_eq!(status["imported"], 21);
+    assert_eq!(status["lastPageChecked"], 1);
+    assert_eq!(status["lastPageAdded"], 1);
+    drop(db);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn history_checkpoints_atomic_pages_pause_resume_reconnect_and_cursor_loops() {
     let root = directory();
     let db = Store::open(&root).unwrap();
@@ -125,6 +223,8 @@ fn history_checkpoints_atomic_pages_pause_resume_reconnect_and_cursor_loops() {
     let page = |id: &str, cursor: Value| json!({"messages":[{"id":id,"date":date,"folder":"inbox","subject":"history"}],"nextCursor":cursor});
     jobs::apply_import_page(&db, A, &first, &page("inbox-1", json!("a"))).unwrap();
     assert_eq!(jobs::import_status(&db, A).unwrap()["imported"], 1);
+    assert_eq!(jobs::import_status(&db, A).unwrap()["pages"], 1);
+    assert_eq!(jobs::import_status(&db, A).unwrap()["processed"], 1);
     assert!(
         jobs::reports(&db, A)
             .unwrap()
@@ -150,6 +250,8 @@ fn history_checkpoints_atomic_pages_pause_resume_reconnect_and_cursor_loops() {
     jobs::apply_import_page(&db, A, &sent, &result).unwrap();
     assert_eq!(jobs::import_status(&db, A).unwrap()["status"], "complete");
     assert_eq!(jobs::import_status(&db, A).unwrap()["imported"], 3);
+    assert_eq!(jobs::import_status(&db, A).unwrap()["pages"], 3);
+    assert_eq!(jobs::import_status(&db, A).unwrap()["processed"], 3);
     assert!(jobs::control_import(&db, A, "resume").is_err());
     jobs::start_import(&db, A, &json!({})).unwrap();
     let job = db.settings().unwrap()["imports"][A].clone();
@@ -646,6 +748,10 @@ async fn imports_require_owner_header_and_background_respects_mailbox_gate() {
     let gate = app.0.mailbox.lock().await;
     jobs::tick(&app).await.unwrap();
     drop(gate);
+    let status = app.db(|db| jobs::import_status(db, A)).await.unwrap();
+    assert_eq!(status["phase"], "queued");
+    assert_eq!(status["pages"], 0);
+    assert_eq!(status["processed"], 0);
     assert_eq!(
         app.db(|db| jobs::import_status(db, A)).await.unwrap()["status"],
         "running"

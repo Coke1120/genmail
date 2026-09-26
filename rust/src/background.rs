@@ -113,17 +113,21 @@ pub fn import_options(input: &Value) -> Result<Value> {
         .ok_or_else(|| Error::invalid("Invalid import options."))?;
     if fields
         .keys()
-        .any(|key| !["months", "inbox", "sent"].contains(&key.as_str()))
+        .any(|key| !["months", "inbox", "sent", "allMail"].contains(&key.as_str()))
     {
         return Err(Error::invalid("Invalid import options."));
     }
-    let options = merge(json!({"months":3,"inbox":true,"sent":true}), input);
+    let options = merge(
+        json!({"months":3,"inbox":true,"sent":true,"allMail":false}),
+        input,
+    );
     if !options["months"]
         .as_u64()
         .is_some_and(|months| [1, 3, 6, 12].contains(&months))
         || !options["inbox"].is_boolean()
         || !options["sent"].is_boolean()
-        || (options["inbox"] != true && options["sent"] != true)
+        || !options["allMail"].is_boolean()
+        || (options["inbox"] != true && options["sent"] != true && options["allMail"] != true)
     {
         return Err(Error::invalid(
             "Choose 1, 3, 6, or 12 months and at least one folder.",
@@ -137,6 +141,80 @@ pub fn months_ago(months: u32, timestamp: i64) -> Result<String> {
         .map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true))
         .ok_or_else(|| Error::invalid("Invalid import date."))
 }
+fn clear_import_failure() -> Value {
+    json!({"error":"","errorCode":null,"recoveryAction":null,"nextRetryAt":null,"retryCount":0})
+}
+fn import_error_message(code: &str) -> Option<&'static str> {
+    match code {
+        "invalid_cursor" => Some(
+            "The mailbox page changed or repeated. Start a new import; cached mail is retained.",
+        ),
+        "invalid_page" => Some(
+            "The provider returned an invalid import page. Start a new import; cached mail is retained.",
+        ),
+        "storage_error" => Some(
+            "Import could not save this page. Check available disk space, then resume. Saved progress is retained.",
+        ),
+        "authorization" => Some("Reconnect this mailbox, then start a new import."),
+        "sent_unavailable" => Some(
+            "This server does not identify a Sent folder. Choose Inbox only and start a new import.",
+        ),
+        "rate_limited" => Some("The provider is limiting requests. Saved progress is retained."),
+        "provider_unavailable" => {
+            Some("The provider is temporarily unavailable. Saved progress is retained.")
+        }
+        "network_error" => Some("The provider could not be reached. Saved progress is retained."),
+        "import_failed" => Some(
+            "Import could not finish this page. Check the connection, then resume. Saved progress is retained.",
+        ),
+        "connection_changed" => Some("Connection changed. Start a new import."),
+        _ => None,
+    }
+}
+fn import_failure(error: &Error, stage: &str, job: &Value, timestamp: i64) -> Value {
+    let message = string(&error.body, "error");
+    let status = error.provider_status.unwrap_or(error.status);
+    let (code, action, retry) = if message == "Repeated import page."
+        || message == "The IMAP folder changed. Start the import again."
+    {
+        ("invalid_cursor", "restart", false)
+    } else if message == "Invalid import page." {
+        ("invalid_page", "restart", false)
+    } else if stage == "commit" {
+        ("storage_error", "resume", false)
+    } else if [401, 403].contains(&status) {
+        ("authorization", "reconnect", false)
+    } else if message.starts_with("This IMAP server does not identify a Sent folder.") {
+        ("sent_unavailable", "restart", false)
+    } else if stage == "fetch" && status == 429 {
+        ("rate_limited", "retry", true)
+    } else if stage == "fetch"
+        && error
+            .provider_status
+            .is_some_and(|s| (500..=599).contains(&s))
+    {
+        ("provider_unavailable", "retry", true)
+    } else if stage == "fetch" && error.body["code"] == "provider_network" {
+        ("network_error", "retry", true)
+    } else {
+        ("import_failed", "resume", false)
+    };
+    let count = job["retryCount"].as_u64().unwrap_or(0);
+    let delay = if retry {
+        match count {
+            0 => Some(30_000),
+            1 => Some(120_000),
+            2 => Some(300_000),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let retry_at = delay
+        .and_then(|delay| DateTime::from_timestamp_millis(timestamp + delay))
+        .map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true));
+    json!({"error":import_error_message(code).unwrap_or_default(),"errorCode":code,"status":if delay.is_some(){"running"}else{"failed"},"recoveryAction":if delay.is_none() && action=="retry"{"resume"}else{action},"nextRetryAt":retry_at,"retryCount":count+u64::from(delay.is_some()),"updatedAt":DateTime::from_timestamp_millis(timestamp).unwrap().to_rfc3339_opts(SecondsFormat::Millis,true)})
+}
 pub fn start_import(db: &Store, account: &str, input: &Value) -> Result<()> {
     let options = import_options(input)?;
     let config = db.settings()?;
@@ -144,13 +222,18 @@ pub fn start_import(db: &Store, account: &str, input: &Value) -> Result<()> {
     let connection = live
         .get(account)
         .ok_or_else(|| Error::invalid("Choose a connected mailbox."))?;
+    if options["allMail"] == true && connection["provider"] != "google" {
+        return Err(Error::invalid(
+            "All mail import is available only for Gmail.",
+        ));
+    }
     let timestamp = Utc::now();
     let before = timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
-    let mut job = json!({"id":uuid::Uuid::new_v4().to_string(),"options":options,"since":months_ago(options["months"].as_u64().unwrap() as u32,timestamp.timestamp_millis())?,"before":before,"folderIndex":0,"cursor":null,"visited":[],"status":"running","imported":0,"updatedAt":before});
+    let mut job = json!({"id":uuid::Uuid::new_v4().to_string(),"options":options,"since":months_ago(options["months"].as_u64().unwrap() as u32,timestamp.timestamp_millis())?,"before":before,"folderIndex":0,"cursor":null,"visited":[],"status":"running","imported":0,"pages":0,"processed":0,"updatedAt":before});
     if let Some(identity) = connection.get("connectionId") {
         job["connectionId"] = identity.clone();
     }
-    write_owner(db, "imports", account, job)
+    write_owner(db, "imports", account, merge(job, &clear_import_failure()))
 }
 pub fn control_import(db: &Store, account: &str, action: &str) -> Result<()> {
     let config = db.settings()?;
@@ -170,7 +253,10 @@ pub fn control_import(db: &Store, account: &str, action: &str) -> Result<()> {
         account,
         merge(
             job.clone(),
-            &json!({"id":uuid::Uuid::new_v4().to_string(),"status":if action=="pause"{"paused"}else{"running"},"error":"","updatedAt":now()}),
+            &merge(
+                clear_import_failure(),
+                &json!({"id":uuid::Uuid::new_v4().to_string(),"status":if action=="pause"{"paused"}else{"running"},"updatedAt":now()}),
+            ),
         ),
     )
 }
@@ -182,17 +268,40 @@ pub fn import_status_from(config: &Value, account: &str) -> Value {
     if !job.is_object() {
         return Value::Null;
     }
-    project(
-        job,
-        &[
-            "options",
-            "since",
-            "before",
-            "status",
-            "imported",
-            "updatedAt",
-            "error",
-        ],
+    let code = if import_error_message(string(job, "errorCode")).is_some() {
+        string(job, "errorCode")
+    } else if job["status"] == "failed" {
+        "import_failed"
+    } else {
+        ""
+    };
+    let action = if job["status"] == "running" && !string(job, "nextRetryAt").is_empty() {
+        Some("retry")
+    } else if ["failed", "paused"].contains(&string(job, "status")) {
+        Some(match code {
+            "authorization" => "reconnect",
+            "invalid_cursor" | "invalid_page" | "sent_unavailable" | "connection_changed" => {
+                "restart"
+            }
+            _ => "resume",
+        })
+    } else {
+        None
+    };
+    merge(
+        project(
+            job,
+            &[
+                "options",
+                "since",
+                "before",
+                "status",
+                "imported",
+                "updatedAt",
+                "error",
+            ],
+        ),
+        &json!({"currentFolder":import_folders(job).get(job["folderIndex"].as_u64().unwrap_or(0) as usize),"phase":if job["status"]=="running"{if string(job,"nextRetryAt").is_empty(){"queued"}else{"retrying"}}else{string(job,"status")},"pages":job["pages"],"processed":job["processed"],"lastPageChecked":job["lastPageChecked"],"lastPageAdded":job["lastPageAdded"],"nextRetryAt":job["nextRetryAt"],"retryCount":job["retryCount"].as_u64().unwrap_or(0),"error":import_error_message(code).unwrap_or_default(),"errorCode":if code.is_empty(){Value::Null}else{json!(code)},"recoveryAction":action}),
     )
 }
 pub fn import_config(db: &Store, account: &str) -> Result<Value> {
@@ -215,6 +324,9 @@ fn import_current(config: &Value, account: &str, job: &Value) -> bool {
             .is_some_and(|mail| mail["connectionId"] == job["connectionId"])
 }
 fn import_folders(job: &Value) -> Vec<&'static str> {
+    if job["options"]["allMail"] == true {
+        return vec!["all"];
+    }
     ["inbox", "sent"]
         .into_iter()
         .filter(|folder| job["options"][folder] == true)
@@ -227,6 +339,7 @@ pub fn apply_import_page(db: &Store, account: &str, job: &Value, result: &Value)
         let config = db.settings()?;
         if !import_current(&config,account,job) { return Ok(()); }
         let messages = result["messages"].as_array().filter(|messages| messages.len() <= 50).ok_or_else(|| Error::new(502,"Invalid import page."))?;
+        let checked = messages.len() as u64;
         let cursor = result.get("nextCursor").filter(|cursor| !cursor.is_null() && **cursor != false && **cursor != "");
         let hash = cursor.map(digest).transpose()?;
         if cursor.is_some_and(|cursor| *cursor == job["cursor"]) || hash.as_ref().is_some_and(|hash| job["visited"].as_array().is_some_and(|visited| visited.contains(&json!(hash)))) { return Err(Error::new(502,"Repeated import page.")); }
@@ -235,7 +348,7 @@ pub fn apply_import_page(db: &Store, account: &str, job: &Value, result: &Value)
         let folder_index = job["folderIndex"].as_u64().unwrap_or(0) + u64::from(cursor.is_none());
         let mut visited = job["visited"].as_array().cloned().unwrap_or_default();
         if let Some(hash) = hash { visited.push(hash.into()); } else { visited.clear(); }
-        write_owner(db,"imports",account,merge(job.clone(), &json!({"imported":job["imported"].as_u64().unwrap_or(0)+imported as u64,"cursor":cursor,"visited":visited,"folderIndex":folder_index,"status":if folder_index as usize>=import_folders(job).len(){"complete"}else{"running"},"error":"","updatedAt":now()})))
+        write_owner(db,"imports",account,merge(merge(job.clone(),&clear_import_failure()), &json!({"imported":job["imported"].as_u64().unwrap_or(0)+imported as u64,"pages":job["pages"].as_u64().map(|pages|pages+1),"processed":job["processed"].as_u64().map(|processed|processed+checked),"lastPageChecked":checked,"lastPageAdded":imported,"cursor":cursor,"visited":visited,"folderIndex":folder_index,"status":if folder_index as usize>=import_folders(job).len(){"complete"}else{"running"},"updatedAt":now()})))
     })
 }
 
@@ -251,7 +364,13 @@ async fn history_tick(app: &App) -> Result<()> {
                 .as_object()
                 .into_iter()
                 .flat_map(|entries| entries.iter())
-                .filter(|(account, job)| live.get(*account).is_some() && job["status"] == "running")
+                .filter(|(account, job)| {
+                    live.get(*account).is_some()
+                        && job["status"] == "running"
+                        && (string(job, "nextRetryAt").is_empty()
+                            || string(job, "nextRetryAt") <= now().as_str()
+                            || live[*account]["connectionId"] != job["connectionId"])
+                })
                 .min_by(|a, b| string(a.1, "updatedAt").cmp(string(b.1, "updatedAt")))
                 .map(|(account, job)| (account.clone(), job.clone())))
         })
@@ -263,25 +382,32 @@ async fn history_tick(app: &App) -> Result<()> {
         return app.db(move |db| {
             let current=db.settings()?;
             if current["imports"][&account]["id"]==job["id"] && current["imports"][&account]["status"]=="running" && connections(&current)[&account]["connectionId"]!=job["connectionId"] {
-                write_owner(db,"imports",&account,merge(job,&json!({"status":"paused","error":"Connection changed. Start a new import.","updatedAt":now()})))?;
+                write_owner(db,"imports",&account,merge(merge(job,&clear_import_failure()),&json!({"status":"paused","error":"Connection changed. Start a new import.","errorCode":"connection_changed","recoveryAction":"restart","updatedAt":now()})))?;
             }
             Ok(())
         }).await;
     }
+    let mut stage = "refresh";
     let work = async {
         let mail = mail::current_mail(app,&account).await?;
         if !import_current(&app.settings().await?,&account,&job) { return Ok(()); }
         let folders = import_folders(&job);
         let folder = folders.get(job["folderIndex"].as_u64().unwrap_or(0) as usize).ok_or_else(|| Error::invalid("Invalid import folder."))?;
+        stage = "fetch";
         let result = mail::fetch_page(app,&mail,&json!({"folder":folder,"since":job["since"],"before":job["before"],"cursor":job["cursor"]})).await?;
+        stage = "commit";
         let (account,job) = (account.clone(),job.clone());
         app.db(move |db| apply_import_page(db,&account,&job,&result)).await
     }.await;
-    if work.is_err() {
+    if let Err(error) = work {
+        let failure = import_failure(&error, stage, &job, Utc::now().timestamp_millis());
         app.db(move |db| {
-            if import_current(&db.settings()?,&account,&job) { write_owner(db,"imports",&account,merge(job,&json!({"status":"failed","error":"Import stopped. Check the connection and Sent folder support, then resume. If the mailbox changed, start again.","updatedAt":now()})))?; }
+            if import_current(&db.settings()?, &account, &job) {
+                write_owner(db, "imports", &account, merge(job, &failure))?;
+            }
             Ok(())
-        }).await?;
+        })
+        .await?;
     }
     Ok(())
 }
@@ -860,4 +986,71 @@ pub async fn tick(app: &App) -> Result<()> {
 pub fn stop(app: &App) {
     app.0.background.stopped.store(true, Ordering::Release);
     app.0.background.shutdown.notify_waiters();
+}
+
+#[cfg(test)]
+mod history_retry_tests {
+    use super::*;
+
+    #[test]
+    fn only_transient_reads_retry_and_commit_errors_never_expose_details() {
+        let mut network = Error::new(502, "private provider detail");
+        network.body["code"] = "provider_network".into();
+        let first = import_failure(&network, "fetch", &json!({}), 0);
+        assert_eq!(first["status"], "running");
+        assert_eq!(first["errorCode"], "network_error");
+        assert_eq!(first["nextRetryAt"], "1970-01-01T00:00:30.000Z");
+        assert!(!first.to_string().contains("private provider detail"));
+        for stage in ["commit", "refresh"] {
+            let result = import_failure(&network, stage, &json!({}), 0);
+            assert_eq!(result["status"], "failed");
+            assert!(result["nextRetryAt"].is_null());
+            assert_eq!(result["recoveryAction"], "resume");
+        }
+        for (status, expected) in [
+            (401, "reconnect"),
+            (403, "reconnect"),
+            (400, "resume"),
+            (409, "resume"),
+        ] {
+            let mut error = Error::new(502, "private response");
+            error.provider_status = Some(status);
+            let result = import_failure(&error, "fetch", &json!({}), 0);
+            assert_eq!(result["status"], "failed");
+            assert_eq!(result["recoveryAction"], expected);
+        }
+        for message in [
+            "The provider returned an unreadable response.",
+            "The provider response exceeds the size limit.",
+        ] {
+            let result = import_failure(&Error::new(502, message), "fetch", &json!({}), 0);
+            assert_eq!(result["status"], "failed");
+            assert!(result["nextRetryAt"].is_null());
+        }
+        for message in ["Invalid import page.", "Repeated import page."] {
+            let result = import_failure(&Error::new(502, message), "commit", &json!({}), 0);
+            assert_eq!(result["status"], "failed");
+            assert_eq!(result["recoveryAction"], "restart");
+        }
+        let mut provider = Error::new(502, "private provider failure");
+        provider.provider_status = Some(503);
+        assert_eq!(
+            import_failure(&provider, "commit", &json!({}), 0)["errorCode"],
+            "storage_error"
+        );
+        for (count, seconds) in [(0, 30), (1, 120), (2, 300)] {
+            let result = import_failure(&provider, "fetch", &json!({"retryCount":count}), 0);
+            assert_eq!(
+                DateTime::parse_from_rfc3339(string(&result, "nextRetryAt"))
+                    .unwrap()
+                    .timestamp(),
+                seconds
+            );
+            assert_eq!(result["retryCount"], count + 1);
+        }
+        let exhausted = import_failure(&provider, "fetch", &json!({"retryCount":3}), 0);
+        assert_eq!(exhausted["status"], "failed");
+        assert_eq!(exhausted["recoveryAction"], "resume");
+        assert!(exhausted["nextRetryAt"].is_null());
+    }
 }

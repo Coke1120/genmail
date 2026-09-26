@@ -27,7 +27,9 @@ const FIELDS: &[(&str, usize)] = &[
     ("remoteId", 0),
     ("deliveryStatus", 40),
 ];
-const FOLDERS: &[&str] = &["inbox", "starred", "sent", "drafts", "archive", "trash"];
+const FOLDERS: &[&str] = &[
+    "inbox", "starred", "sent", "drafts", "archive", "spam", "trash",
+];
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct Options {
@@ -121,7 +123,7 @@ pub fn stats(store: &Store, accounts: &[String]) -> Result<Value> {
         if folder == "inbox" {
             entry["unread"] = (entry["unread"].as_i64().unwrap_or(0) + unread).into();
         }
-        if folder != "trash" {
+        if !["trash", "spam"].contains(&folder.as_str()) {
             entry["counts"]["starred"] =
                 (entry["counts"]["starred"].as_i64().unwrap_or(0) + starred).into();
         }
@@ -136,7 +138,16 @@ fn placeholders(length: usize) -> String {
     }
 }
 pub fn page(store: &Store, accounts: &[String], input: &Value, secret: &[u8; 32]) -> Result<Value> {
-    page_at(store, accounts, input, secret, 0)
+    let mut input = input.clone();
+    let offset = match input.as_object_mut().and_then(|v| v.remove("offset")) {
+        None => 0,
+        Some(value) => value
+            .as_u64()
+            .filter(|v| *v <= 200_000)
+            .ok_or_else(|| Error::invalid("Invalid mail page offset."))?
+            as usize,
+    };
+    page_at(store, accounts, &input, secret, offset)
 }
 pub(crate) fn page_at(
     store: &Store,
@@ -145,7 +156,7 @@ pub(crate) fn page_at(
     secret: &[u8; 32],
     offset: usize,
 ) -> Result<Value> {
-    // ponytail: bounded numeric offsets for short-lived CLI sessions; use cursor sessions beyond 200k rows.
+    // ponytail: bounded numeric offsets for CLI and desktop page refresh; use cursor sessions beyond 200k rows.
     if offset > 200_000
         || offset > 0
             && input
@@ -185,7 +196,7 @@ pub(crate) fn page_at(
     let mut conditions = vec![format!("d.account IN ({})", placeholders(accounts.len()))];
     let mut params: Vec<Sql> = accounts.iter().cloned().map(Sql::Text).collect();
     if options.folder == "starred" {
-        conditions.push("d.starred=1 AND d.folder<>'trash'".into());
+        conditions.push("d.starred=1 AND d.folder NOT IN ('trash','spam')".into());
     } else if !options.folder.is_empty() {
         conditions.push("d.folder=?".into());
         params.push(options.folder.clone().into());

@@ -66,12 +66,88 @@ pub async fn current_mail(app: &App, owner: &str) -> Result<Value> {
     Ok(result)
 }
 pub async fn fetch_page(app: &App, mail: &Value, options: &Value) -> Result<Value> {
-    if ["", "imap"].contains(&string(mail, "provider")) {
+    let folder = options["folder"].as_str().unwrap_or("inbox");
+    let mut work = app.0.activity.start(
+        string(mail, "email"),
+        if string(options, "before").is_empty() {
+            "sync"
+        } else {
+            "import"
+        },
+        "Fetching mail",
+        &format!("{folder} · up to 50 messages in this page"),
+    );
+    let result = if ["", "imap"].contains(&string(mail, "provider")) {
         imap::fetch_page(mail, options).await
     } else {
         providers::fetch_page(&app.0.client, mail, options).await
-    }
+    };
+    work.finish(
+        result.is_ok(),
+        result
+            .as_ref()
+            .ok()
+            .and_then(|page| page["messages"].as_array().map(Vec::len)),
+    );
+    result
 }
+fn google_import_state(message: &Value, existing: Option<&Value>) -> Value {
+    let fields = ["folder", "read", "starred", "labels"];
+    let mut snapshot = json!({});
+    for key in fields {
+        if let Some(value) = message.get(key) {
+            snapshot[key] = value.clone();
+        }
+    }
+    let mut overrides = existing
+        .and_then(|v| v["localOverrides"].as_object())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(existing) = existing {
+        for key in fields {
+            let local = if let Some(previous) = existing["providerSnapshot"].get(key) {
+                existing.get(key).is_some_and(|value| value != previous)
+            } else if key == "labels" {
+                existing[key]
+                    .as_array()
+                    .is_some_and(|labels| !labels.is_empty())
+            } else if let Some(raw) = existing["providerLabelIds"].as_array() {
+                let previous = match key {
+                    "folder" => json!(providers::google_folder(&existing["providerLabelIds"])),
+                    "read" => json!(!raw.iter().any(|v| v == "UNREAD")),
+                    _ => json!(raw.iter().any(|v| v == "STARRED")),
+                };
+                existing.get(key).is_some_and(|value| *value != previous)
+                    && (key != "folder"
+                        || ["archive", "trash"].contains(&string(existing, "folder")))
+            } else {
+                key == "folder" && ["archive", "trash"].contains(&string(existing, "folder"))
+            };
+            if local {
+                overrides.insert(key.into(), true.into());
+            }
+        }
+    }
+    let mut result = snapshot.clone();
+    result["providerSnapshot"] = snapshot;
+    result["localOverrides"] = Value::Object(overrides);
+    for key in ["providerLabelIds", "providerSent", "providerDraft"] {
+        if let Some(value) = message.get(key) {
+            result[key] = value.clone();
+        }
+    }
+    if let Some(existing) = existing {
+        for key in fields {
+            if result["localOverrides"][key] == true
+                && let Some(value) = existing.get(key)
+            {
+                result[key] = value.clone();
+            }
+        }
+    }
+    result
+}
+
 pub fn import_messages(db: &Store, mail: &Value, messages: &[Value]) -> Result<Vec<String>> {
     let account = string(mail, "email");
     let is_imap = ["", "imap"].contains(&string(mail, "provider"));
@@ -79,9 +155,10 @@ pub fn import_messages(db: &Store, mail: &Value, messages: &[Value]) -> Result<V
     db.transaction(|db|{for message in messages{let remote=message["remoteId"].as_str().filter(|s|!s.is_empty()).unwrap_or(string(message,"id"));let folder=message["providerFolderId"].as_str().filter(|s|!s.is_empty()).unwrap_or("INBOX");
         let existing:Option<String>=db.conn.query_row("SELECT data FROM messages WHERE account=? AND COALESCE(NULLIF(json_extract(data,'$.remoteId'),''),id)=? AND (?=0 OR COALESCE(NULLIF(json_extract(data,'$.providerFolderId'),''),'INBOX')=?) ORDER BY rowid DESC LIMIT 1",params![account,remote,is_imap,folder],|row|row.get(0)).optional()?;
         let mut existing=existing.map(|s|serde_json::from_str::<Value>(&s)).transpose()?;
-        if existing.is_none()&&message["folder"]=="sent"&&string(message,"fromEmail").eq_ignore_ascii_case(account)&&!string(message,"messageId").is_empty(){let local:Option<String>=db.conn.query_row("SELECT data FROM messages WHERE account=? AND id LIKE 'sent:%' AND COALESCE(json_extract(data,'$.remoteId'),'')='' AND json_extract(data,'$.messageId')=? LIMIT 1",params![account,string(message,"messageId")],|row|row.get(0)).optional()?;existing=local.map(|s|serde_json::from_str(&s)).transpose()?;}
+        if existing.is_none()&&(message["folder"]=="sent"||(mail["provider"]=="google"&&message["providerSent"]==true))&&string(message,"fromEmail").eq_ignore_ascii_case(account)&&!string(message,"messageId").is_empty(){let local:Option<String>=db.conn.query_row("SELECT data FROM messages WHERE account=? AND id LIKE 'sent:%' AND COALESCE(json_extract(data,'$.remoteId'),'')='' AND json_extract(data,'$.messageId')=? LIMIT 1",params![account,string(message,"messageId")],|row|row.get(0)).optional()?;existing=local.map(|s|serde_json::from_str(&s)).transpose()?;}
         if existing.is_none()&&db.get(account,string(message,"id"))?.is_none(){new_ids.push(string(message,"id").to_owned());}
-        let mut value=message.clone();if let Some(existing)=existing{if string(&existing,"id").starts_with("sent:"){value=merge(value,&existing);}for key in ["id","folder","read","starred","labels"]{if let Some(entry)=existing.get(key){value[key]=entry.clone();}}value["remoteId"]=existing["remoteId"].as_str().filter(|s|!s.is_empty()).unwrap_or(remote).into();for key in ["providerFolderId","providerFolderName"]{if let Some(entry)=existing.get(key).filter(|v|!v.is_null()){value[key]=entry.clone();}}}db.upsert(account,&value)?;
+        let mut value=message.clone();if let Some(existing)=&existing{if string(existing,"id").starts_with("sent:"){value=merge(value,existing);}for key in ["id","folder","read","starred","labels"]{if let Some(entry)=existing.get(key){value[key]=entry.clone();}}value["remoteId"]=existing["remoteId"].as_str().filter(|s|!s.is_empty()).unwrap_or(remote).into();for key in ["providerFolderId","providerFolderName"]{if let Some(entry)=existing.get(key).filter(|v|!v.is_null()){value[key]=entry.clone();}}}
+        if mail["provider"]=="google"{value=merge(value,&google_import_state(message,existing.as_ref()));}db.upsert(account,&value)?;
     }Ok(())})?;
     Ok(new_ids)
 }
@@ -163,6 +240,7 @@ async fn send(app: &App, ctx: &Context) -> Result<Value> {
     let input_clone = input.clone();
     let prepared=app.db(move|db|{
         let config=db.settings()?;if !valid_account(&config,&owner){return Err(Error::conflict("This account was disconnected."));}
+        if !string(&input_clone,"draftId").is_empty() && db.get(&owner,string(&input_clone,"draftId"))?.is_some_and(|draft|draft["providerDraft"]==true) {return Err(Error::conflict("This is a read-only provider draft. Copy it to a local draft before editing or sending."));}
         let previous=attempts(&config).into_iter().find(|a|a["account"]==owner&&(a["requestId"]==request_clone||!string(&input_clone,"draftId").is_empty()&&a["draftId"]==input_clone["draftId"]));
         let mut value=initial_value;value["replyToId"]=input_clone.get("replyToId").cloned().unwrap_or(json!(""));
         // An already persisted footer is the reviewed payload; preserve its exact text across serializer upgrades.
@@ -314,7 +392,9 @@ pub async fn sync(app: &App, owners: &[String]) -> Result<Value> {
             let config = app.settings().await?;
             let job = &config["imports"][owner];
             let options = &job["options"];
-            let folders = if options.is_object() {
+            let folders = if mail["provider"] == "google" {
+                vec!["inbox", "sent", "drafts", "starred", "all"]
+            } else if options.is_object() {
                 ["inbox", "sent"]
                     .into_iter()
                     .filter(|folder| options[*folder] == true)
@@ -351,10 +431,11 @@ pub async fn sync(app: &App, owners: &[String]) -> Result<Value> {
                     let arrivals = ids
                         .into_iter()
                         .filter(|id| {
-                            job.is_null()
-                                || db.get(&owner, id).ok().flatten().is_some_and(|message| {
-                                    string(&message, "date") >= string(job, "before")
-                                })
+                            db.get(&owner, id).ok().flatten().is_some_and(|message| {
+                                message["folder"] == "inbox"
+                                    && (job.is_null()
+                                        || string(&message, "date") >= string(job, "before"))
+                            })
                         })
                         .collect::<Vec<_>>();
                     crate::background::arrivals(db, &owner, &arrivals)?;
@@ -408,7 +489,11 @@ pub async fn handle(app: &App, ctx: &Context) -> Result<Option<Response>> {
                     uuid::Uuid::new_v4().to_string()
                 } else {
                     let id = validation::text(&body["id"], "Draft ID", 8192, false)?;
-                    if get_message(db, &owner, id)?["folder"] != "drafts" {
+                    let existing = get_message(db, &owner, id)?;
+                    if existing["providerDraft"] == true {
+                        return Err(Error::conflict("This is a read-only provider draft. Copy it to a local draft before editing or sending."));
+                    }
+                    if existing["folder"] != "drafts" {
                         return Err(Error::invalid("Only drafts can be edited."));
                     }
                     id.into()
@@ -512,8 +597,12 @@ pub async fn handle(app: &App, ctx: &Context) -> Result<Option<Response>> {
             };
             mail["password"] = validation::text(password, "Mailbox password", 4096, false)?.into();
             let options = body.get("importOptions").cloned();
-            if let Some(options) = &options {
-                crate::background::import_options(options)?;
+            if let Some(options) = &options
+                && crate::background::import_options(options)?["allMail"] == true
+            {
+                return Err(Error::invalid(
+                    "All mail import is available only for Gmail.",
+                ));
             }
             imap::verify_smtp(&mail).await?;
             let input = if let Some(options) = &options {
@@ -613,7 +702,9 @@ pub async fn handle(app: &App, ctx: &Context) -> Result<Option<Response>> {
                 .ok_or_else(|| {
                     Error::invalid("Choose a current folder or label from this mailbox.")
                 })?;
-            let patch=if ["","imap"].contains(&string(&mail,"provider")){imap::organize(&mail,&message,&destination,mode).await}else{providers::organize(&app.0.client,&mail,&message,&destination,mode).await}.map_err(|_|Error::new(502,"The provider change could not be confirmed. Check your provider before retrying. Your cached copy is retained."))?;
+            let mut patch=if ["","imap"].contains(&string(&mail,"provider")){imap::organize(&mail,&message,&destination,mode).await}else{providers::organize(&app.0.client,&mail,&message,&destination,mode).await}.map_err(|_|Error::new(502,"The provider change could not be confirmed. Check your provider before retrying. Your cached copy is retained."))?;
+            let google = mail["provider"] == "google";
+            let moving = mode == "move";
             let owner = ctx.owner.clone();
             app.db(move |db| {
                 if connections(&db.settings()?).get(&owner) != Some(&mail) {
@@ -624,6 +715,31 @@ pub async fn handle(app: &App, ctx: &Context) -> Result<Option<Response>> {
                     return Err(Error::conflict(
                         "This message changed during organization. Refresh your mailbox.",
                     ));
+                }
+                if google {
+                    let remote_folder =
+                        providers::google_folder(&patch["providerLabelIds"]).to_owned();
+                    patch["providerSnapshot"] = Value::Object(
+                        current["providerSnapshot"]
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    patch["providerSnapshot"]["folder"] = remote_folder.clone().into();
+                    if moving {
+                        patch["localOverrides"] = Value::Object(
+                            current["localOverrides"]
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
+                        patch["localOverrides"]["folder"] = false.into();
+                    }
+                    patch["folder"] = if !moving && current["localOverrides"]["folder"] == true {
+                        current["folder"].clone()
+                    } else {
+                        remote_folder.into()
+                    };
                 }
                 let changed = db
                     .update(&owner, string(&message, "id"), &patch)?

@@ -22,6 +22,7 @@ use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub struct App(pub Arc<Runtime>);
 pub struct Runtime {
+    pub activity: crate::activity::Runtime,
     dist: std::path::PathBuf,
     pub background: crate::background::Runtime,
     pub ai: crate::ai::Runtime,
@@ -112,6 +113,7 @@ impl App {
         crate::learning::initialize(&store)?;
         crate::smart_search::reconcile(&store)?;
         Ok(Self(Arc::new(Runtime {
+            activity: Default::default(),
             dist,
             background: Default::default(),
             ai: Default::default(),
@@ -520,7 +522,19 @@ async fn handle_inner(app: App, request: axum::http::Request<Body>) -> Result<Re
         owner,
         paged,
     };
-    dispatch(&app, context).await
+    let mut activity = (context.method == Method::POST && route == ["ai"]).then(|| {
+        app.0.activity.start(
+            &context.owner,
+            "ai",
+            "AI assistance",
+            "Waiting for the configured model",
+        )
+    });
+    let result = dispatch(&app, context).await;
+    if let Some(work) = &mut activity {
+        work.finish(result.as_ref().is_ok_and(|r| r.status().is_success()), None);
+    }
+    result
 }
 pub(crate) async fn dispatch(app: &App, context: Context) -> Result<Response> {
     if let Some(response) = crate::calendar::handle(app, &context).await? {
@@ -600,6 +614,7 @@ pub(crate) async fn dispatch(app: &App, context: Context) -> Result<Response> {
             json!({"status":"ok","service":"morrow-mail"})
         }
         ("GET", ["state"]) => app.state(&owner, context.paged).await?,
+        ("GET", ["activity"]) => app.0.activity.snapshot(&app.settings().await?),
         ("GET", ["state", "revision"]) => {
             app.db(move |db| Ok(json!({"revision":db.revision()?,"accountId":owner})))
                 .await?
@@ -734,6 +749,16 @@ pub(crate) async fn dispatch(app: &App, context: Context) -> Result<Response> {
                 }
                 if patch.as_object().unwrap().is_empty() {
                     return Err(Error::invalid("No supported changes were provided."));
+                }
+                if original["providerLabelIds"].is_array() {
+                    let mut overrides = original["localOverrides"]
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    for key in patch.as_object().unwrap().keys() {
+                        overrides.insert(key.clone(), Value::Bool(true));
+                    }
+                    patch["localOverrides"] = Value::Object(overrides);
                 }
                 Ok(json!({"message":pages::owned(&owner,db.update(&owner,&id,&patch)?.unwrap())}))
             })

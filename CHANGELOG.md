@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0-beta.5 — 2026-09-27
+
+- Render sanitized HTML mail with links, plain-text fallback and per-message external-image consent; block scripts, forms and embedded pages.
+- Add reviewed Gmail Spam / Outlook Junk moves, retaining provider permissions and account ownership; link to the provider for phishing reports and sender blocking.
+- Add right/bottom/focused reading layouts, full-width reader expansion and more room for messages; left-align senders, move unread dots right and bold only unread previews.
+- Keep the macOS app running when its main window closes; reopen the same window from the Dock and retain quit-time write/edit guards.
+- Auto-save General preferences with visible saving/error status and retry, removing the Save Preferences button.
+- Recover transient history-fetch failures with checkpointed, bounded backoff; show specific safe failure/recovery actions instead of a permanent generic Import stopped state.
+
+- Fetch Gmail Inbox, Sent, Drafts, Starred and All Mail; add paged All Mail history imports and resolved user label names. Refresh provider metadata while preserving explicit local changes.
+- Show independently refreshed mail/AI activity with account-specific fetching, import progress, queued/running jobs and errors in both clients.
+- Open imported Gmail drafts as new local copies with their original owner and To/Cc/Bcc; leave the provider draft unchanged.
+
+- Keep the native inbox page, rows and selected message visible when marking mail read or switching messages.
+- Move embedding connection settings to Model; keep scopes, budgets and batch review in Search.
+- Add embedding Test Connection using unsaved fields and a fixed sentence; Index Now prepares a bounded batch and starts it after scope/budget confirmation.
+- Add Learn Now with sample/budget confirmation. Generated writing styles remain proposals until Save Approved Style; manual Email Brain memory is preserved.
+- Remove Demo from both clients' account/settings/sender choices; show Add account on a fresh installation and select a real mailbox for old Demo selections.
+- Add Reply All and plain-text Forward, retaining the source account, deduplicating To/Cc and excluding original Bcc. Forward does not include attachments.
+
 ## 0.6.0-beta.4 — 2026-09-26
 
 - Add built-in Microsoft desktop OAuth for Outlook mail and Calendar in SwiftUI and React. Users can open browser sign-in without entering credentials; custom clients remain under Advanced. Node and Rust share the public application ID, preserve PKCE/browser binding and never reuse a saved secret for the built-in public client.

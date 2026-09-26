@@ -1,4 +1,5 @@
 import { messageContent } from './footer.js';
+import { sanitizeMessageHTML } from './message-html.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { simpleParser } from 'mailparser';
 import { recipients } from './recipients.js';
@@ -35,7 +36,7 @@ export async function providerRequest(url, options, name) {
   try {
     response = await fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(30_000) });
   } catch {
-    throw new Error(`${name} could not be reached. Check your connection and try again.`);
+    throw Object.assign(new Error(`${name} could not be reached. Check your connection and try again.`), { code: 'provider_network' });
   }
   if (!response.ok) {
     await response.body?.cancel();
@@ -58,7 +59,7 @@ export async function providerRequest(url, options, name) {
       chunks.push(chunk);
     }
   } catch {
-    throw new Error(`${name} returned an incomplete or oversized response. Try a smaller request.`);
+    throw Object.assign(new Error(`${name} returned an incomplete or oversized response. Try a smaller request.`), bytes > maximumBytes ? {} : { code: 'provider_network' });
   }
   const text = Buffer.concat(chunks).toString('utf8');
   if (!text) return null;
@@ -169,30 +170,41 @@ function bodyParts(part, result = []) {
 async function partText(part) {
   const type = part.headers?.find(header => /^content-type$/i.test(header.name))?.value || `${part.mimeType}; charset=utf-8`;
   const parsed = await simpleParser(`Content-Type: ${type.replace(/[\r\n]/g, ' ')}\r\nContent-Transfer-Encoding: base64\r\n\r\n${Buffer.from(part.body.data, 'base64url').toString('base64')}`, { skipTextToHtml: true });
-  return parsed.text || '';
+  return { text: parsed.text || '', html: typeof parsed.html === 'string' ? parsed.html : '' };
+}
+
+export function googleFolder(labelIds = []) {
+  const labels = Array.isArray(labelIds) ? labelIds : [];
+  return labels.includes('TRASH') ? 'trash' : labels.includes('SPAM') ? 'spam' : labels.includes('DRAFT') ? 'drafts' : labels.includes('INBOX') ? 'inbox' : labels.includes('SENT') ? 'sent' : 'archive';
 }
 
 export async function normalizeGoogleMessage(message) {
+  const labelIds = message.labelIds === undefined ? [] : message.labelIds;
+  if (!Array.isArray(labelIds) || labelIds.length > 1000 || labelIds.some(id => typeof id !== 'string' || !id)) throw new Error('The mailbox returned invalid message labels.');
+  const folder = googleFolder(labelIds);
   const headers = message.payload?.headers || [];
   const metadata = await simpleParser(headers
     .filter(header => /^[\w-]+$/.test(header.name) && !/^content-|^mime-version$/i.test(header.name))
     .map(header => `${header.name}: ${String(header.value).replace(/[\r\n]/g, ' ')}`).join('\r\n') + '\r\n\r\n', { skipTextToHtml: true });
   const parts = bodyParts(message.payload);
   const plain = parts.filter(part => part.mimeType === 'text/plain');
-  const body = (await Promise.all((plain.length ? plain : parts).map(partText))).join('\n\n').trim().slice(0, 100000) || '(No inline text was available. Open this message in your original mailbox to read any attachments or large message bodies.)';
+  const decoded = await Promise.all(parts.map(partText));
+  const body = decoded.filter((_, index) => !plain.length || parts[index].mimeType === 'text/plain').map(part => part.text).join('\n\n').trim().slice(0, 100000) || '(No inline text was available. Open this message in your original mailbox to read any attachments or large message bodies.)';
+  const bodyHtml = sanitizeMessageHTML(decoded.map(part => part.html).join('\n'));
   const from = metadata.from?.value?.[0];
   const subject = metadata.subject || '(No subject)';
   return {
     id: `google:${message.id}`, fromName: from?.name || from?.address || 'Unknown sender', fromEmail: from?.address || '',
-    to: metadata.to?.text || '', cc: metadata.cc?.text || '', bcc: metadata.bcc?.text || '', subject, body, preview: preview(body), date: dateString(Number(message.internalDate) || metadata.date),
-    folder: 'inbox', providerSent: !!message.labelIds?.includes('SENT'), automated: headers.some(h => /^(auto-submitted|list-id|list-unsubscribe)$/i.test(h.name) && h.value !== 'no'), read: !message.labelIds?.includes('UNREAD'), starred: !!message.labelIds?.includes('STARRED'),
-    category: category(subject, headers), labels: [], providerLabelIds: message.labelIds || [], ...(metadata.messageId ? { messageId: metadata.messageId } : {}),
+    to: metadata.to?.text || '', cc: metadata.cc?.text || '', bcc: metadata.bcc?.text || '', subject, body, bodyHtml, preview: preview(body), date: dateString(Number(message.internalDate) || metadata.date),
+    folder, providerSent: labelIds.includes('SENT'), providerDraft: labelIds.includes('DRAFT'), automated: headers.some(h => /^(auto-submitted|list-id|list-unsubscribe)$/i.test(h.name) && h.value !== 'no'), read: !labelIds.includes('UNREAD'), starred: labelIds.includes('STARRED'),
+    category: category(subject, headers), labels: [], providerLabelIds: labelIds, ...(metadata.messageId ? { messageId: metadata.messageId } : {}),
   };
 }
 
 export async function normalizeMicrosoftMessage(message) {
   const from = message.from?.emailAddress || message.sender?.emailAddress || {};
   let body = message.body?.content || '';
+  const bodyHtml = message.body?.contentType?.toLowerCase() === 'html' ? sanitizeMessageHTML(body) : '';
   if (message.body?.contentType?.toLowerCase() === 'html') {
     body = (await simpleParser(`Content-Type: text/html; charset=utf-8\r\n\r\n${body}`, { skipTextToHtml: true })).text || '';
   }
@@ -203,7 +215,7 @@ export async function normalizeMicrosoftMessage(message) {
     to: (message.toRecipients || []).map(recipient => recipient.emailAddress?.address).filter(Boolean).join(', '),
     cc: (message.ccRecipients || []).map(r => r.emailAddress?.address).filter(Boolean).join(', '),
     bcc: (message.bccRecipients || []).map(r => r.emailAddress?.address).filter(Boolean).join(', '),
-    subject, body, preview: preview(body), date: dateString(message.receivedDateTime), folder: 'inbox',
+    subject, body, bodyHtml, preview: preview(body), date: dateString(message.receivedDateTime), folder: 'inbox',
     read: !!message.isRead, starred: message.flag?.flagStatus === 'flagged', category: category(subject, message.internetMessageHeaders),
     labels: [], ...(message.internetMessageId ? { messageId: message.internetMessageId } : {}),
   };
@@ -214,16 +226,22 @@ export async function fetchProviderMessages(mail) {
 }
 
 export async function fetchProviderPage(mail, { folder = 'inbox', since, before, cursor } = {}) {
-  if (!['inbox', 'sent'].includes(folder)) throw new Error('Unsupported import folder.');
+  if (!(mail.provider === 'google' ? ['all', 'inbox', 'sent', 'drafts', 'starred'] : ['inbox', 'sent']).includes(folder)) throw new Error('Unsupported import folder.');
   if (mail.provider === 'google') {
-    const query = new URLSearchParams({ maxResults: '50', labelIds: folder === 'sent' ? 'SENT' : 'INBOX' });
+    const query = new URLSearchParams({ maxResults: '50', includeSpamTrash: 'false' });
+    if (folder !== 'all') query.set('labelIds', { inbox: 'INBOX', sent: 'SENT', drafts: 'DRAFT', starred: 'STARRED' }[folder]);
     if (since || before) query.set('q', [since && `after:${Math.floor(Date.parse(since) / 1000)}`, before && `before:${Math.ceil(Date.parse(before) / 1000)}`].filter(Boolean).join(' '));
     if (cursor) query.set('pageToken', cursor);
     const list = await apiRequest(mail, `/messages?${query}`), messages = [];
-    for (let index = 0; index < (list.messages || []).length; index += 5) {
-      messages.push(...await Promise.all(list.messages.slice(index, index + 5).map(async item => ({
-        ...await normalizeGoogleMessage(await apiRequest(mail, `/messages/${encodeURIComponent(item.id)}?format=full`)), folder,
-      }))));
+    const entries = list?.messages === undefined ? [] : list.messages;
+    if (!Array.isArray(entries) || entries.length > 50 || entries.some(item => typeof item?.id !== 'string' || !item.id)) throw new Error('The mailbox returned an invalid message page.');
+    const labelNames = entries.length ? new Map((await googleLabels(mail)).filter(label => label.type === 'user').map(label => [label.id, label.name])) : new Map();
+    for (let index = 0; index < entries.length; index += 5) {
+      messages.push(...await Promise.all(entries.slice(index, index + 5).map(async item => {
+        const message = await normalizeGoogleMessage(await apiRequest(mail, `/messages/${encodeURIComponent(item.id)}?format=full`));
+        message.labels = message.providerLabelIds.map(id => labelNames.get(id)).filter(Boolean);
+        return message;
+      })));
     }
     return { messages, nextCursor: list.nextPageToken || null };
   }
@@ -235,7 +253,7 @@ export async function fetchProviderPage(mail, { folder = 'inbox', since, before,
   const target = cursor || `https://graph.microsoft.com/v1.0/me${path}?${query}`;
   const url = new URL(target);
   if (url.origin !== 'https://graph.microsoft.com' || url.pathname !== `/v1.0/me${path}` || url.username || url.password || url.hash) throw new Error('Invalid mailbox pagination URL.');
-  const result = await providerRequest(url.href, { headers: { Authorization: `Bearer ${mail.accessToken}`, Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"' } }, 'Microsoft');
+  const result = await providerRequest(url.href, { headers: { Authorization: `Bearer ${mail.accessToken}`, Prefer: 'outlook.body-content-type="html", IdType="ImmutableId"' } }, 'Microsoft');
   return { messages: await Promise.all((result.value || []).map(async item => ({ ...await normalizeMicrosoftMessage(item), folder, date: dateString(item[dateField]), automated: (item.internetMessageHeaders || []).some(h => /^(auto-submitted|list-id|list-unsubscribe)$/i.test(h.name) && h.value !== 'no') }))), nextCursor: result['@odata.nextLink'] || null };
 }
 
@@ -268,13 +286,19 @@ export function canOrganizeMail(mail) {
   return scopes.includes(mail.provider === 'google' ? 'https://www.googleapis.com/auth/gmail.modify' : 'Mail.ReadWrite');
 }
 
+async function googleLabels(mail) {
+  const result = await apiRequest(mail, '/labels');
+  if (!Array.isArray(result?.labels) || result.labels.length > 1000 || result.labels.some(label => typeof label?.id !== 'string' || !label.id || typeof label.name !== 'string' || !label.name)) throw new Error('The mailbox returned too many or invalid labels.');
+  return result.labels;
+}
+
 export async function listProviderFolders(mail) {
   if (!canOrganizeMail(mail)) throw new Error('Reconnect this mailbox with “Allow moving mail and managing labels” enabled.');
   if (mail.provider === 'google') {
-    const result = await apiRequest(mail, '/labels');
-    if (!Array.isArray(result?.labels) || result.labels.length > 1000) throw new Error('The mailbox returned too many or invalid labels.');
+    const labels = await googleLabels(mail);
     return [{ id: 'INBOX', name: 'Inbox', kind: 'inbox' }, { id: '__archive', name: 'Archive (remove Inbox)', kind: 'archive' },
-      ...result.labels.filter(label => label.type === 'user' && typeof label.id === 'string').map(label => ({ id: label.id, name: String(label.name), kind: 'label' }))];
+      ...labels.filter(label => label.type === 'system' && label.id === 'SPAM').map(label => ({ id: label.id, name: 'Spam', kind: 'spam' })),
+      ...labels.filter(label => label.type === 'user').map(label => ({ id: label.id, name: label.name, kind: 'label' }))];
   }
   const folders = [], pending = [{ path: '/mailFolders', prefix: '' }], seen = new Set();
   // ponytail: bounded folder discovery; add search/paging if a mailbox exceeds 300 folders.
@@ -303,7 +327,9 @@ export async function listProviderFolders(mail) {
     }
   }
   const inbox = await apiRequest(mail, '/mailFolders/inbox?$select=id');
-  return folders.map(folder => ({ ...folder, kind: folder.id === inbox?.id ? 'inbox' : folder.kind }));
+  const junk = await apiRequest(mail, '/mailFolders/junkemail?$select=id');
+  if ([inbox, junk].some(folder => typeof folder?.id !== 'string' || !folder.id)) throw new Error('The mailbox returned an invalid folder ID.');
+  return folders.map(folder => ({ ...folder, kind: folder.id === inbox.id ? 'inbox' : folder.id === junk.id ? 'spam' : folder.kind }));
 }
 
 export async function organizeProviderMessage(mail, message, destination, mode) {
@@ -314,15 +340,15 @@ export async function organizeProviderMessage(mail, message, destination, mode) 
   if (mail.provider === 'google') {
     if (mode !== 'move' && destination.kind !== 'label') throw new Error('Choose a custom Gmail label.');
     const addLabelIds = mode === 'removeLabel' || destination.kind === 'archive' ? [] : [destination.id];
-    const removeLabelIds = mode === 'removeLabel' ? [destination.id] : mode === 'move' && destination.id !== 'INBOX' ? ['INBOX'] : [];
+    const removeLabelIds = mode === 'removeLabel' ? [destination.id] : mode === 'move' ? [destination.id === 'INBOX' ? 'SPAM' : 'INBOX'] : [];
     const result = await apiRequest(mail, path + '/modify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ addLabelIds, removeLabelIds }) });
     if (!Array.isArray(result?.labelIds)) throw new Error('The provider did not confirm the resulting labels.');
-    return { providerLabelIds: result.labelIds, folder: result.labelIds.includes('INBOX') ? 'inbox' : 'archive', providerFolderName: result.labelIds.includes('INBOX') ? 'Inbox' : 'Gmail · outside Inbox' };
+    return { providerLabelIds: result.labelIds, folder: googleFolder(result.labelIds), providerSent: result.labelIds.includes('SENT'), providerDraft: result.labelIds.includes('DRAFT'), providerFolderName: result.labelIds.includes('INBOX') ? 'Inbox' : 'Gmail · outside Inbox' };
   }
   if (mode !== 'move') throw new Error('Outlook supports folder moves.');
   const headers = { Prefer: 'IdType="ImmutableId"', 'Content-Type': 'application/json' };
   const current = await apiRequest(mail, path + '?$select=id,parentFolderId', { headers });
   const moved = current?.parentFolderId === destination.id ? current : await apiRequest(mail, path + '/move', { method: 'POST', headers, body: JSON.stringify({ destinationId: destination.id }) });
   if (!moved?.id) throw new Error('The provider did not confirm the moved message.');
-  return { remoteId: `microsoft:${moved.id}`, providerFolderId: destination.id, providerFolderName: destination.name, folder: destination.kind === 'inbox' ? 'inbox' : 'archive' };
+  return { remoteId: `microsoft:${moved.id}`, providerFolderId: destination.id, providerFolderName: destination.name, folder: destination.kind === 'inbox' ? 'inbox' : destination.kind === 'spam' ? 'spam' : 'archive' };
 }

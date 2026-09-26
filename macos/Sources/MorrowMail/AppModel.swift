@@ -9,6 +9,8 @@ final class AppModel: ObservableObject {
     @Published var starting = true
     @Published var error = ""
     @Published var notice = ""
+    @Published var activity: JSON = .null
+    @Published var activityError = ""
     @Published var section = "inbox"
     @Published var selectedMessage: String? {
         didSet { if selectedMessage != oldValue { openedMessage = nil } }
@@ -36,6 +38,7 @@ final class AppModel: ObservableObject {
     private var token = ""
     private(set) var baseURL: URL?
     private var periodic: Task<Void, Never>?
+    private var activityPolling: Task<Void, Never>?
     private var refreshing = false
     private var shuttingDown = false
     private var launchAttempt = 0
@@ -58,15 +61,17 @@ final class AppModel: ObservableObject {
     var account: String { state["account"]["id"].string }
     var accounts: [JSON] { state["accounts"].array }
     var combined: Bool { account == "all" }
-    var senderAccounts: [JSON] { accounts + [.object(["id": .string("demo"), "email": .string("Demo workspace (simulated)")])] }
+    var senderAccounts: [JSON] { accounts }
+    var hasMailbox: Bool { !accounts.isEmpty && account != "demo" }
     var messages: [JSON] { state["messages"].array }
     var features: [JSON] { state["features"].array }
     var preferences: JSON { state["settings"]["preferences"] }
     var policy: JSON { state["settings"]["policy"] }
-    var mailQueryKey: String { [account, section, preferences["sort"].string, String(unreadOnly), state["revision"].string].joined(separator: "\n") }
+    var mailScopeKey: String { [account, section, preferences["sort"].string, String(unreadOnly)].joined(separator: "\n") }
+    var mailQueryKey: String { mailScopeKey + "\n" + state["revision"].string }
     var listedMessages: [JSON] {
-        if mailPage.isNull { return messages.filter { section == "studio" || (section == "starred" ? $0["starred"].bool && $0["folder"].string != "trash" : $0["folder"].string == section) } }
-        return mailPageKey == mailQueryKey ? mailPage["messages"].array : []
+        if mailPage.isNull { return messages.filter { section == "studio" || (section == "starred" ? $0["starred"].bool && !["trash", "spam"].contains($0["folder"].string) : $0["folder"].string == section) } }
+        return mailPageKey == mailScopeKey ? mailPage["messages"].array : []
     }
     var current: JSON? {
         let row = (searchResponse.isNull ? listedMessages : searchResponse["messages"].array).first { message in
@@ -74,7 +79,7 @@ final class AppModel: ObservableObject {
         }
         let owner = messageDetail["accountId"].string
         let folder = messageDetail["folder"].string
-        let inFolder = section == "studio" || (section == "starred" ? messageDetail["starred"].bool && folder != "trash" : section == folder)
+        let inFolder = section == "studio" || (section == "starred" ? messageDetail["starred"].bool && !["trash", "spam"].contains(folder) : section == folder)
         let visible = row != nil || (searchResponse.isNull && inFolder && (account == owner || combined && accounts.contains { $0.id == owner }))
         if visible && messageDetail.viewID == selectedMessage && !messageDetail.isNull { return messageDetail }
         return row
@@ -157,12 +162,27 @@ final class AppModel: ObservableObject {
             baseURL = URL(string: "http://127.0.0.1:\(port)")!
             try await reload()
             starting = false
+            activityPolling = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    if NSApp?.isActive == true {
+                        do {
+                            let next = try await self.request("/activity", mailbox: "")
+                            guard !Task.isCancelled else { return }
+                            self.activity = next; self.activityError = ""
+                        } catch {
+                            if !Task.isCancelled { self.activityError = "Activity could not be refreshed. Last known status may be out of date." }
+                        }
+                    }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+            }
             periodic = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 30_000_000_000)
                     guard !Task.isCancelled, let self else { return }
                     // The service syncs all accounts and schedules AI; this only refreshes visible state.
-                    if self.canNavigate && NSApp.isActive {
+                    if self.canNavigate && NSApp?.isActive == true {
                         self.perform {
                             let stamp = try await self.request("/state/revision", mailbox: "")
                             if stamp["revision"] != self.state["revision"] || stamp["accountId"].string != self.account { try await self.reload() }
@@ -176,7 +196,7 @@ final class AppModel: ObservableObject {
         }
     }
     func stop() {
-        shuttingDown = true; periodic?.cancel()
+        shuttingDown = true; periodic?.cancel(); activityPolling?.cancel()
         try? input?.fileHandleForWriting.close()
         if process?.isRunning == true { process?.terminate() }
         baseURL = nil
@@ -189,10 +209,12 @@ final class AppModel: ObservableObject {
         request.setValue("paged", forHTTPHeaderField: "X-Morrow-View")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if authorizeUpdate { request.setValue(token, forHTTPHeaderField: "X-Morrow-Update") }
+        let sessionToken = token
         let owner = mailbox ?? account
         if !owner.isEmpty { request.setValue(owner, forHTTPHeaderField: "X-Genmail-Account") }
         if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, response) = try await session.data(for: request)
+        guard self.baseURL == baseURL, self.token == sessionToken else { throw CancellationError() }
         guard let http = response as? HTTPURLResponse, http.url?.host == baseURL.host, http.url?.port == baseURL.port else { throw APIError("The local service returned an unexpected response.") }
         guard data.count <= 32 * 1024 * 1024 else { throw APIError("The response was too large. Narrow your request.") }
         let result = try await Task.detached(priority: .userInitiated) { try JSONDecoder().decode(JSON.self, from: data) }.value
@@ -232,23 +254,31 @@ final class AppModel: ObservableObject {
         refreshing = true; defer { refreshing = false }
         // OAuth selects its newly connected mailbox on the service. Read that view;
         // message mutations still carry their explicitly captured owner.
-        let next = try await request("/state", mailbox: "")
+        var next = try await request("/state", mailbox: "")
+        if next["account"]["id"].string == "demo", let first = next["accounts"].array.first {
+            next = try await request("/account/select", method: "POST", body: .object(["accountId": .string(first.id)]))
+        }
         guard !next["account"].isNull, !next["messages"].isNull else { throw APIError("Morrow received an incomplete workspace.") }
         if next["account"]["id"].string != account { mailPage = .null; messageDetail = .null; selectedMessage = nil; searchResponse = .null }
         state = next
     }
     @discardableResult
-    func loadMailPage(cursor: String = "", reset: Bool = true) async -> Bool {
+    func loadMailPage(cursor: String = "", reset: Bool = true, offset: Int? = nil) async -> Bool {
         guard (mailFolders.contains(section) || section == "studio"), baseURL != nil else { return false }
         mailGeneration += 1
         let ticket = mailGeneration, query = mailQueryKey
         mailLoading = true; error = ""
         defer { if ticket == mailGeneration { mailLoading = false } }
         do {
-            let result = try await request("/mail/page", method: "POST", body: .object(["folder": .string(section == "studio" ? "" : section), "sort": preferences["sort"], "unreadOnly": .bool(section != "studio" && unreadOnly), "cursor": .string(cursor), "locale": .string(Locale.current.identifier(.bcp47))]))
+            let result = try await request("/mail/page", method: "POST", body: .object(["folder": .string(section == "studio" ? "" : section), "sort": preferences["sort"], "unreadOnly": .bool(section != "studio" && unreadOnly), "cursor": .string(cursor), "offset": .number(Double(offset ?? 0)), "locale": .string(Locale.current.identifier(.bcp47))]))
             guard !Task.isCancelled, ticket == mailGeneration, query == mailQueryKey else { return false }
+            if let offset, offset > 0, result["messages"].array.isEmpty {
+                let last = max(0, (Int(result["total"].number) - 1) / 50) * 50
+                if last < offset { return await loadMailPage(reset: false, offset: last) }
+            }
             if reset { mailCursors = [""] }
-            mailPageKey = query
+            if let offset { mailCursors = Array(repeating: "", count: offset / 50 + 1) }
+            mailPageKey = mailScopeKey
             mailPage = result
             return true
         } catch {
@@ -258,11 +288,17 @@ final class AppModel: ObservableObject {
             return false
         }
     }
+    func refreshMailPage() async {
+        // Keep the current rows visible while refreshing the same mailbox snapshot.
+        let sameScope = mailPageKey == mailScopeKey
+        await loadMailPage(reset: !sameScope, offset: sameScope ? (mailCursors.count - 1) * 50 : 0)
+    }
     func turnMailPage(next: Bool) async {
-        let cursors = next ? mailCursors + [mailPage["nextCursor"].string] : Array(mailCursors.dropLast())
-        guard let cursor = cursors.last, !next || !cursor.isEmpty else { return }
-        selectedMessage = nil; messageDetail = .null
-        if await loadMailPage(cursor: cursor, reset: false) { mailCursors = cursors }
+        let index = mailCursors.count - 1 + (next ? 1 : -1)
+        guard index >= 0, !next || !mailPage["nextCursor"].string.isEmpty else { return }
+        if await loadMailPage(reset: false, offset: index * 50) {
+            selectedMessage = nil; messageDetail = .null
+        }
     }
     func loadMessage() async {
         guard let row = current else { return }
@@ -307,7 +343,7 @@ final class AppModel: ObservableObject {
     func sync() async throws {
         state = try await request("/sync", method: "POST", body: .object([:]))
         let failures = state["syncErrors"].array.map { $0["accountId"].string }
-        notice = failures.isEmpty ? "Inbox synced." : "Some accounts could not sync: " + failures.joined(separator: ", ") + ". Reconnect them in Settings."
+        notice = failures.isEmpty ? "Recent mail refreshed. Older mail follows the import range in Settings; see Activity for progress." : "Some accounts could not sync: " + failures.joined(separator: ", ") + ". Reconnect them in Settings."
     }
     func preference(_ key: String, _ value: String) {
         perform { self.state = try await self.request("/settings/preferences", method: "POST", body: .object([key: .string(value)])) }
@@ -327,8 +363,9 @@ final class AppModel: ObservableObject {
         guard !busy, compose == nil else { return }
         guard unsavedForms.isEmpty else { notice = "Save your current changes before opening a new draft."; return }
         var draft = value ?? Draft()
-        guard draft.replyToID.isEmpty || !draft.accountID.isEmpty else { error = "The reply’s mailbox is unavailable. Reopen the original message."; return }
-        if draft.accountID.isEmpty { draft.accountID = combined ? accounts.first?.id ?? "demo" : account }
+        guard (draft.replyToID.isEmpty && !draft.forwarding && !draft.sourceDraft) || !draft.accountID.isEmpty else { error = "The original mailbox is unavailable. Reopen the original message."; return }
+        if accounts.isEmpty { settings("mail"); return }
+        if draft.accountID.isEmpty { draft.accountID = combined ? accounts.first?.id ?? "" : account }
         guard senderAccounts.contains(where: { $0.id == draft.accountID }) else { error = "Reconnect this message’s mailbox before replying or editing its draft."; return }
         if draft.savedID.isEmpty, draft.footer.isNull { draft.footer = state["settings"]["footer"] }
         compose = draft

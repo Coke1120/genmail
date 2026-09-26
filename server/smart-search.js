@@ -61,7 +61,7 @@ export function createSmartSearch({ store, connections, apiBase, embed = fetchEm
       job: (() => { const job = store.getSettings().searchIndex; if (!job || job.stamp !== stamp()) return null; const { stamp: privateStamp, sources, ...safe } = job; return { ...safe, sampleCount: sources.length }; })(), permitted: resolvePolicy(store.getSettings().policy).enabled,
       local: ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value.baseUrl).hostname) };
   }
-  function update(input) {
+  function settingsInput(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => ![...Object.keys(defaults), 'apiKey', 'clearApiKey'].includes(key))) searchFail('Invalid smart search settings.');
     const previous = config(), next = { ...previous, ...input };
     if (typeof next.baseUrl !== 'string' || next.baseUrl.length > 2048) searchFail('Enter an embedding base URL of at most 2048 characters.');
@@ -78,8 +78,25 @@ export function createSmartSearch({ store, connections, apiBase, embed = fetchEm
     if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > 4096 || /[\r\n]/.test(input.apiKey))) searchFail('Invalid embedding API key.');
     next.apiKey = input.clearApiKey ? '' : input.apiKey || (previous.baseUrl === next.baseUrl ? previous.apiKey || '' : '');
     delete next.clearApiKey;
+    return next;
+  }
+  function update(input) {
+    const next = settingsInput(input);
     controller?.abort(); queryCache.clear(); dimension = 0;
     store.setSettings({ searchAI: next, searchIndex: null }); reconcile();
+  }
+  let testing = false;
+  async function testConnection(input) {
+    if (testing) searchFail('An embedding connection test is already running.', 409);
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['baseUrl', 'model', 'protocol', 'apiKey', 'clearApiKey'].includes(key))) searchFail('Invalid embedding test settings.');
+    // Connection checks do not depend on indexing scope or send any mail text.
+    const value = settingsInput({ ...input, enabled: false });
+    if (!value.model.trim()) searchFail('Choose an embedding model first.');
+    testing = true;
+    try {
+      const result = await vectors(['Morrow Mail embedding connection test.'], value);
+      return { ok: true, dimensions: result[0].length };
+    } finally { testing = false; }
   }
   function preview() {
     if (running) searchFail('Wait for the current indexing batch.', 409);
@@ -175,7 +192,7 @@ export function createSmartSearch({ store, connections, apiBase, embed = fetchEm
   }
   const previous = store.getSettings().searchIndex;
   if (previous?.status === 'running') store.setSettings({ searchIndex: { ...previous, status: 'interrupted', error: 'Indexing was interrupted. No automatic retry was made; preview another batch.' } });
-  return { state, update, preview, index, search,
+  return { state, update, testConnection, preview, index, search,
     start(id) { if (running) searchFail('An indexing batch is already running.', 409); const job = store.getSettings().searchIndex; if (!job || job.id !== id || job.status !== 'prepared' || job.stamp !== stamp()) searchFail('Prepare a fresh indexing preview.', 409); running = index(id).finally(() => { running = null; }); },
     clear() { controller?.abort(); queryCache.clear(); dimension = 0; store.search.clearVectors(); store.setSettings({ searchIndex: null }); },
     stop() { controller?.abort(); return running || Promise.resolve(); }, reconcile,

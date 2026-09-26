@@ -1,5 +1,6 @@
 import { createHistory, importOptions } from './history.js';
 import { createLearning } from './learning.js';
+import { createActivity } from './activity.js';
 import { registerSearchRoutes } from './search.js';
 import { bundledGoogleOAuth, oauthCredentials } from './oauth-client.js';
 import express from 'express';
@@ -168,6 +169,28 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     mailboxBusy = true;
     try { return await work(); } finally { mailboxBusy = false; }
   }
+  function googleImportState(message, existing) {
+    const fields = ['folder', 'read', 'starred', 'labels'];
+    const snapshot = Object.fromEntries(fields.map(key => [key, message[key]]));
+    const overrides = { ...(existing?.localOverrides || {}) };
+    const previous = existing?.providerSnapshot;
+    const raw = existing?.providerLabelIds;
+    if (existing) {
+      for (const key of fields) {
+        let local = false;
+        if (previous && Object.hasOwn(previous, key)) local = JSON.stringify(existing[key]) !== JSON.stringify(previous[key]);
+        else if (key === 'labels') local = Array.isArray(existing.labels) && existing.labels.length > 0;
+        else if (Array.isArray(raw)) {
+          const before = key === 'folder' ? providers.googleFolder(raw) : key === 'read' ? !raw.includes('UNREAD') : raw.includes('STARRED');
+          local = Object.hasOwn(existing, key) && existing[key] !== before && (key !== 'folder' || ['archive', 'trash'].includes(existing.folder));
+        } else if (key === 'folder') local = ['archive', 'trash'].includes(existing.folder);
+        if (local) overrides[key] = true;
+      }
+    }
+    return { ...snapshot, providerSnapshot: snapshot, localOverrides: overrides,
+      ...Object.fromEntries(['providerLabelIds', 'providerSent', 'providerDraft'].filter(key => Object.hasOwn(message, key)).map(key => [key, message[key]])),
+      ...Object.fromEntries(fields.filter(key => overrides[key] === true && existing && Object.hasOwn(existing, key)).map(key => [key, existing[key]])) };
+  }
   function importMessages(mail, messages) {
     const remoteKey = item => mail.provider === 'imap' ? JSON.stringify([item.providerFolderId || 'INBOX', item.remoteId || item.id]) : item.remoteId || item.id;
     const cached = store.listMessages(mail.email);
@@ -175,10 +198,11 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const localSent = new Map(cached.filter(item => item.id.startsWith('sent:') && !item.remoteId && item.messageId).map(item => [item.messageId, item]));
     const newIDs = [];
     store.transaction(() => { for (const message of messages) {
-      const existing = imported.get(remoteKey(message)) || (message.folder === 'sent' && message.fromEmail?.toLowerCase() === mail.email.toLowerCase() && localSent.get(message.messageId));
+      const existing = imported.get(remoteKey(message)) || ((message.folder === 'sent' || (mail.provider === 'google' && message.providerSent === true)) && message.fromEmail?.toLowerCase() === mail.email.toLowerCase() && localSent.get(message.messageId));
       if (!existing && !store.getMessage(mail.email, message.id)) newIDs.push(message.id);
       // Keep the original delivery fingerprint on locally sent records when attaching the provider copy.
-      store.upsertMessage(mail.email, { ...(existing?.id?.startsWith('sent:') ? { ...message, ...existing } : message), ...(existing ? { id: existing.id, remoteId: existing.remoteId || message.remoteId || message.id, providerFolderId: existing.providerFolderId || message.providerFolderId, providerFolderName: existing.providerFolderName || message.providerFolderName, folder: existing.folder, read: existing.read, starred: existing.starred, labels: existing.labels } : {}) });
+      const saved = store.upsertMessage(mail.email, { ...(existing?.id?.startsWith('sent:') ? { ...message, ...existing } : message), ...(existing ? { id: existing.id, remoteId: existing.remoteId || message.remoteId || message.id, providerFolderId: existing.providerFolderId || message.providerFolderId, providerFolderName: existing.providerFolderName || message.providerFolderName, folder: existing.folder, read: existing.read, starred: existing.starred, labels: existing.labels } : {}), ...(mail.provider === 'google' ? googleImportState(message, existing) : {}) });
+      imported.set(remoteKey(message), saved);
       if (existing) localSent.delete(message.messageId);
     } });
     return newIDs;
@@ -194,11 +218,32 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     } catch { fail('Your mailbox session expired. Reconnect this account in Settings.', 401); }
   }
   async function fetchMessages(mail) {
-    return mail.provider && mail.provider !== 'imap' ? api.fetchProviderMessages(mail) : api.fetchImapMessages(mail);
+    const finish = activity.start(mail.email, 'sync', 'Fetching mail', 'Inbox · up to 50 messages');
+    try { const messages = await (mail.provider && mail.provider !== 'imap' ? api.fetchProviderMessages(mail) : api.fetchImapMessages(mail)); finish(true, messages.length); return messages; }
+    catch (error) { finish(false); throw error; }
   }
 
-  const fetchPage = (mail, options) => (mail.provider && mail.provider !== 'imap' ? api.fetchProviderPage : api.fetchImapPage)(mail, options);
+  const fetchPage = async (mail, options) => {
+    const finish = activity.start(mail.email, options?.before ? 'import' : 'sync', 'Fetching mail', `${options?.folder || 'inbox'} · up to 50 messages in this page`);
+    try { const page = await (mail.provider && mail.provider !== 'imap' ? api.fetchProviderPage : api.fetchImapPage)(mail, options); finish(true, page.messages.length); return page; }
+    catch (error) { finish(false); throw error; }
+  };
+  async function refreshMessages(mail, options = null, since) {
+    // Keep legacy injected single-page providers usable; production Gmail refresh uses every scope.
+    if (!options && (mail.provider !== 'google' || (services.fetchProviderMessages && !services.fetchProviderPage))) return fetchMessages(mail);
+    const folders = mail.provider === 'google' ? ['inbox', 'sent', 'drafts', 'starred', 'all'] : ['inbox', 'sent'].filter(folder => options[folder]);
+    const messages = [];
+    for (const folder of folders) messages.push(...(await fetchPage(mail, { folder, ...(since ? { since } : {}) })).messages);
+    return [...new Map(messages.map(message => [message.id, message])).values()];
+  }
   const history = createHistory({ store, connection: account => connections()[account], currentMail, fetchPage, importMessages, lock: mailboxOperation, ...(services.now ? { now: services.now } : {}) });
+  const activity = createActivity({ settings, connections, importStatus: account => history.status(account) });
+  app.get('/api/activity', (_req, res) => res.json(activity.snapshot()));
+  app.use('/api/ai', (req, res, next) => {
+    if (req.method !== 'POST') return next();
+    const finish = activity.start(req.mailAccount, 'ai', 'AI assistance', 'Waiting for the configured model');
+    res.once('finish', () => finish(res.statusCode < 400)); res.once('close', () => finish(null)); next();
+  });
   const learning = createLearning({ store, connection: account => connections()[account], runModel: (...args) => api.runModel(...args), ...(services.now ? { now: services.now } : {}) });
   const smartSearch = registerSearchRoutes({ app, store, connections, apiBase, embed: services.embed, searchEngine });
   app.locals.smartSearch = smartSearch;
@@ -287,6 +332,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const password = input.password || (sameDestination ? existing.password : '');
     const mail = { provider: 'imap', email: address, password: text(password, 'Mailbox password', 4096), ...hosts };
     const options = input.importOptions === undefined ? null : importOptions(input.importOptions);
+    if (options?.allMail) fail('All mail import is available only for Gmail.');
     let messages;
     try { await api.verifySmtp(mail); messages = options ? (await fetchPage(mail, { folder: options.inbox ? 'inbox' : 'sent', since: new Date(Date.now() - 86400000).toISOString() })).messages : await fetchMessages(mail); }
     catch { fail('Mailbox connection failed. Check the hosts, ports, and app password. IMAP requires TLS; SMTP requires TLS or STARTTLS.', 502); }
@@ -335,8 +381,8 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
       try {
         const mail = await currentMail(account);
         const options = history.options(account);
-        const messages = options ? (await Promise.all(['inbox', 'sent'].filter(folder => options[folder]).map(folder => fetchPage(mail, { folder, since: history.status(account).since })))).flatMap(page => page.messages) : await fetchMessages(mail);
-        store.transaction(() => automation.arrivals(account, importMessages(mail, messages).filter(id => !history.status(account) || store.getMessage(account, id)?.date >= history.status(account).before)));
+        const messages = await refreshMessages(mail, options, options ? history.status(account).since : undefined);
+        store.transaction(() => automation.arrivals(account, importMessages(mail, messages).filter(id => store.getMessage(account, id)?.folder === 'inbox' && (!history.status(account) || store.getMessage(account, id)?.date >= history.status(account).before))));
       } catch {
         syncErrors.push({ accountId: account, error: 'Sync failed. Check your connection or reconnect this account in Settings.' });
       }
@@ -355,6 +401,8 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
   app.post('/api/oauth/:provider/start', (req, res) => {
     const provider = req.params.provider;
     if (!['google', 'microsoft'].includes(provider)) fail('Unknown mail provider.');
+    const options = req.body?.importOptions === undefined ? null : importOptions(req.body.importOptions);
+    if (options?.allMail && provider !== 'google') fail('All mail import is available only for Gmail.');
     const credentials = oauthCredentials(provider, req.body, googleOAuth);
     const config = { clientId: text(credentials.clientId, 'OAuth client ID', 1024).trim(), organize: req.body?.organize === true };
     if (provider === 'google') config.clientSecret = text(credentials.clientSecret, 'Google client secret', 4096).trim();
@@ -363,7 +411,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const browserToken = randomBytes(32).toString('hex');
     for (const [key, value] of oauthPending) if (value.expiresAt < Date.now()) oauthPending.delete(key);
     if (oauthPending.size >= 20) fail('Too many pending connections. Wait a few minutes and try again.', 429);
-    oauthPending.set(pending.state, { ...pending, importOptions: req.body?.importOptions === undefined ? null : importOptions(req.body.importOptions), provider, redirectUri, browserToken, expiresAt: Date.now() + 10 * 60 * 1000 });
+    oauthPending.set(pending.state, { ...pending, importOptions: options, provider, redirectUri, browserToken, expiresAt: Date.now() + 10 * 60 * 1000 });
     res.json({ url: `http://localhost:${port}/api/oauth/${provider}/authorize?state=${encodeURIComponent(pending.state)}` });
   });
   app.get('/api/oauth/:provider/authorize', (req, res) => {
@@ -388,7 +436,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
         let mail, messages;
         try {
           mail = await api.oauthFinish(pending.provider, { code, verifier: pending.verifier, config: pending.config, redirectUri: pending.redirectUri });
-          messages = pending.importOptions ? [] : await fetchMessages(mail);
+          messages = pending.importOptions ? [] : await refreshMessages(mail);
         } catch { fail('The provider connection failed. Check your app registration and permissions, then try again.'); }
         mail.email = canonicalAddress(email(mail.email));
         store.transaction(() => { importMessages(mail, messages); saveConnection(mail, true); if (pending.importOptions) history.start(mail.email, pending.importOptions); });
@@ -423,6 +471,13 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     } catch {
       fail('The provider change could not be confirmed. Check the message in your provider before trying again. Your cached copy is retained.', 502);
     }
+    if (provider === 'google') {
+      const current = getMessage(account, message.id);
+      const remoteFolder = providers.googleFolder(patch.providerLabelIds);
+      patch.providerSnapshot = { ...current.providerSnapshot, folder: remoteFolder };
+      if (req.body.mode === 'move') patch.localOverrides = { ...current.localOverrides, folder: false };
+      patch.folder = req.body.mode !== 'move' && current.localOverrides?.folder === true ? current.folder : remoteFolder;
+    }
     res.json({ message: ownedMessage(account, store.updateMessage(account, message.id, patch)) });
   }));
   app.patch('/api/messages/:id', (req, res) => {
@@ -440,6 +495,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     if (sendingDrafts.has(`${account}:${req.params.id}`)) fail('This draft is being sent. Wait for sending to finish.', 409);
     const original = getMessage(account, req.params.id);
     if (original.folder === 'drafts' && patch.folder && patch.folder !== 'trash') fail('Save or send this draft before moving it.');
+    if (Array.isArray(original.providerLabelIds)) patch.localOverrides = { ...original.localOverrides, ...Object.fromEntries(Object.keys(patch).map(key => [key, true])) };
     res.json({ message: ownedMessage(account, store.updateMessage(account, req.params.id, patch)) });
   });
   function content(input, draft) {
@@ -460,6 +516,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     if (input.id) {
       if (sendingDrafts.has(`${account}:${input.id}`)) fail('This draft is being sent. Wait for sending to finish.', 409);
       const existing = getMessage(account, input.id);
+      if (existing.providerDraft === true) fail('This is a read-only provider draft. Copy it to a local draft before editing or sending.', 409);
       if (existing.folder !== 'drafts') fail('Only drafts can be edited.');
     }
     if (input.replyToId) getMessage(account, input.replyToId);
@@ -472,6 +529,7 @@ export function createApp({ store, port = 3001, appUrl = `http://localhost:${por
     const input = req.body || {};
     const value = content(input, false);
     const account = req.mailAccount;
+    if (input.draftId && store.getMessage(account, input.draftId)?.providerDraft === true) fail('This is a read-only provider draft. Copy it to a local draft before editing or sending.', 409);
     const requestId = text(input.requestId, 'Send request ID', 100);
     if (!/^[a-zA-Z0-9-]{8,100}$/.test(requestId)) fail('Invalid send request ID.');
     if (input.retryUnconfirmed !== undefined && typeof input.retryUnconfirmed !== 'boolean') fail('Delivery review must be true or false.');

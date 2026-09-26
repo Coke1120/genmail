@@ -69,7 +69,7 @@ pub fn escape_html(text: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-fn clean_style(value: &str) -> String {
+pub fn clean_style(value: &str) -> String {
     static STYLES: LazyLock<HashMap<&'static str, Regex>> = LazyLock::new(|| {
         [
             (

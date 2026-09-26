@@ -39,6 +39,7 @@ test('bounded metadata pages retain all six sorts, exact owners, counts and stab
     assert.deepEqual(rows.map(m => m.viewId), expected.map(m => JSON.stringify([m.accountId, m.id])), sort);
     assert.ok(rows.every(m => !Object.hasOwn(m, 'body') && !Object.hasOwn(m, 'footer')));
     assert.equal(new Set(rows.map(m => m.viewId)).size, 122);
+    assert.deepEqual(store.messagePage(accounts, { sort, offset: 51, pageSize: 17 }).messages.map(m => m.viewId), rows.slice(51, 68).map(m => m.viewId));
   }
   const stats = store.messageStats(accounts);
   for (const account of accounts) {
@@ -49,12 +50,15 @@ test('bounded metadata pages retain all six sorts, exact owners, counts and stab
   const page = store.messagePage(accounts, { folder: 'inbox', unreadOnly: true, category: 'primary', pageSize: 3 });
   assert.equal(page.total, all.filter(m => m.folder === 'inbox' && !m.read && m.category === 'primary').length);
   assert.throws(() => store.messagePage([accounts[0]], { folder: 'inbox', unreadOnly: true, category: 'primary', pageSize: 3, cursor: page.nextCursor }), { status: 409 });
+  const second = store.messagePage(accounts, { offset: 50 });
+  store.updateMessage(second.messages[0].accountId, second.messages[0].id, { read: !second.messages[0].read });
+  assert.deepEqual(store.messagePage(accounts, { offset: 50 }).messages.map(m => m.viewId), second.messages.map(m => m.viewId));
   const before = store.revision();
   assert.throws(() => store.transaction(() => { store.updateMessage(accounts[0], 'same-1', { body: 'Rolled back' }); throw Error('rollback'); }));
   assert.notEqual(store.revision(), before); // Conservative invalidation also covers rolled-back work.
   assert.match(store.getMessage(accounts[0], 'same-1').body, /Private body/);
   assert.throws(() => store.messagePage(accounts, { folder: 'inbox', unreadOnly: true, category: 'primary', pageSize: 3, cursor: page.nextCursor }), { status: 409 });
-  for (const input of [{ pageSize: 101 }, { pageSize: '10' }, { sort: 'SQL' }, { folder: 'all' }, { cursor: 'x'.repeat(9000) }, { sql: 'SELECT *' }]) assert.throws(() => store.messagePage(accounts, input), { status: 400 });
+  for (const input of [{ offset: -1 }, { offset: 1.5 }, { offset: '50' }, { offset: null }, { offset: 200001 }, { offset: 1, cursor: page.nextCursor }, { pageSize: 101 }, { pageSize: '10' }, { sort: 'SQL' }, { folder: 'all' }, { cursor: 'x'.repeat(9000) }, { sql: 'SELECT *' }]) assert.throws(() => store.messagePage(accounts, input), { status: 400 });
   const plan = store.search.query("EXPLAIN QUERY PLAN SELECT id FROM search_documents WHERE account=? AND folder=? ORDER BY date DESC,id LIMIT 51", [accounts[0], 'inbox']);
   assert.ok(plan.some(row => row.detail.includes('mail_folder_date')));
   assert.ok(plan.every(row => !row.detail.includes('TEMP B-TREE')));

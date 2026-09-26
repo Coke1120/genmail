@@ -191,6 +191,15 @@ async fn start(app: &App, ctx: &Context, provider: &str, calendar: bool) -> Resu
     } else {
         None
     };
+    if options
+        .as_ref()
+        .is_some_and(|value| value["allMail"] == true)
+        && provider != "google"
+    {
+        return Err(Error::invalid(
+            "All mail import is available only for Gmail.",
+        ));
+    }
     let prefix = if calendar { "calendar-oauth" } else { "oauth" };
     let redirect_uri = format!(
         "http://localhost:{}/api/{prefix}/{provider}/callback",

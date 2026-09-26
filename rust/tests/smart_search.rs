@@ -1090,3 +1090,74 @@ async fn semantic_hmac_pagination_and_concurrent_requests_reuse_one_paid_query()
     task.abort();
     let _ = task.await;
 }
+
+#[tokio::test]
+async fn connection_probe_uses_unsaved_model_without_mail_settings_or_index_changes() {
+    let fixture = Fixture::new().await;
+    let model = Model::default();
+    let (url, task) = server(model.clone()).await;
+    fixture.add(A, "probe-source", json!({})).await;
+    fixture
+        .setup(&url, json!({"apiKey":"saved-fixture-key"}))
+        .await;
+    fixture.preview_run().await;
+    smart_search::tick(fixture.app()).await.unwrap();
+    let before = fixture.app().db(|db| db.settings()).await.unwrap();
+    let vectors = fixture.vectors().await;
+    assert!(vectors > 0);
+    model.seen.lock().unwrap().clear();
+    let input = json!({"baseUrl":url,"model":"unsaved-model","protocol":"openai","apiKey":""});
+    let (status, result) = fixture.request("test", Some(input.clone()), A).await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result, json!({"ok":true,"dimensions":2}));
+    let seen = model.seen.lock().unwrap().clone();
+    assert_eq!(seen[0]["authorization"], "Bearer saved-fixture-key");
+    assert_eq!(seen[0]["body"]["model"], "unsaved-model");
+    assert_eq!(
+        seen[0]["body"]["input"],
+        json!(["Morrow Mail embedding connection test."])
+    );
+    for change in [
+        json!({"baseUrl":format!("{url}/changed"),"protocol":"ollama"}),
+        json!({"clearApiKey":true}),
+    ] {
+        let mut changed = input.clone();
+        for (key, value) in change.as_object().unwrap() {
+            changed[key] = value.clone();
+        }
+        assert_eq!(fixture.request("test", Some(changed), A).await.0, 200);
+        assert!(model.seen.lock().unwrap().last().unwrap()["authorization"].is_null());
+    }
+    let count = model.count();
+    for change in [
+        json!({"model":""}),
+        json!({"baseUrl":"http://remote.invalid"}),
+        json!({"apiKey":"bad\r\nkey"}),
+        json!({"input":"private body"}),
+        json!({"enabled":true}),
+    ] {
+        let mut changed = input.clone();
+        for (key, value) in change.as_object().unwrap() {
+            changed[key] = value.clone();
+        }
+        assert_eq!(fixture.request("test", Some(changed), A).await.0, 400);
+    }
+    assert_eq!(model.count(), count);
+    *model.mode.lock().unwrap() = "invalid".into();
+    let (status, result) = fixture.request("test", Some(input.clone()), A).await;
+    assert_eq!(status, 502);
+    assert!(!result.to_string().contains("saved-fixture-key"));
+    assert_eq!(fixture.app().db(|db| db.settings()).await.unwrap(), before);
+    assert_eq!(fixture.vectors().await, vectors);
+    *model.mode.lock().unwrap() = String::new();
+    model.hold.store(true, Ordering::Release);
+    let app = fixture.app().clone();
+    let first_input = input.clone();
+    let pending = tokio::spawn(async move { request(&app, "test", Some(first_input), A).await });
+    model.wait().await;
+    assert_eq!(fixture.request("test", Some(input), A).await.0, 409);
+    model.finish();
+    assert_eq!(pending.await.unwrap().0, 200);
+    task.abort();
+    let _ = task.await;
+}

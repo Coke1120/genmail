@@ -6,7 +6,7 @@ import { simpleParser } from 'mailparser';
 import { ImapFlow } from 'imapflow';
 import { recipients } from '../server/recipients.js';
 import { sendSmtpMessage, organizeImapMessage, listImapFolders } from '../server/integrations.js';
-import { oauthStart, canOrganizeMail, listProviderFolders, organizeProviderMessage, sendProviderMessage } from '../server/providers.js';
+import { oauthStart, canOrganizeMail, listProviderFolders, organizeProviderMessage, sendProviderMessage, googleFolder, normalizeGoogleMessage } from '../server/providers.js';
 
 const google = { provider: 'google', email: 'me@example.com', accessToken: 'fixture-token', grantedScopes: 'https://www.googleapis.com/auth/gmail.modify' };
 const microsoft = { ...google, provider: 'microsoft', grantedScopes: 'Mail.ReadWrite Mail.Send' };
@@ -77,24 +77,71 @@ test('provider organization is opt-in and Google moves preserve unrelated labels
   assert.equal(patch.folder, 'archive');
 });
 
-test('Outlook lists nested folders, rejects hostile pagination, and moves immutable IDs within the account', async t => {
-  let hostile = false;
+test('Gmail spam uses verified system labels, preserves other labels, and restores Inbox', async t => {
+  for (const [labels, folder] of [[['TRASH', 'SPAM', 'DRAFT'], 'trash'], [['SPAM', 'DRAFT', 'INBOX', 'SENT'], 'spam']]) {
+    assert.equal(googleFolder(labels), folder);
+    assert.equal((await normalizeGoogleMessage({ id: 'abc', labelIds: labels })).folder, folder);
+  }
+  let labelIds = ['INBOX', 'UNREAD', 'STARRED', 'SENT', 'Label_1'], writes = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(options.headers.Authorization, 'Bearer fixture-token');
+    if (url.endsWith('/labels')) return Response.json({ labels: [
+      { id: 'SPAM', name: 'SPAM', type: 'system' }, { id: 'TRASH', name: 'TRASH', type: 'system' },
+      { id: 'Label_1', name: 'Spam', type: 'user' },
+    ] });
+    assert.equal(url, 'https://gmail.googleapis.com/gmail/v1/users/me/messages/abc/modify');
+    assert.equal(options.method, 'POST');
+    const change = JSON.parse(options.body);
+    assert.deepEqual(change, writes++ === 0 ? { addLabelIds: ['SPAM'], removeLabelIds: ['INBOX'] } : { addLabelIds: ['INBOX'], removeLabelIds: ['SPAM'] });
+    labelIds = [...labelIds.filter(id => !change.removeLabelIds.includes(id)), ...change.addLabelIds];
+    return Response.json({ labelIds });
+  });
+  const folders = await listProviderFolders(google);
+  assert.deepEqual(folders.map(({ id, kind }) => ({ id, kind })), [
+    { id: 'INBOX', kind: 'inbox' }, { id: '__archive', kind: 'archive' },
+    { id: 'SPAM', kind: 'spam' }, { id: 'Label_1', kind: 'label' },
+  ]);
+  const spam = folders.find(folder => folder.kind === 'spam'), message = { id: 'google:local', remoteId: 'google:abc' };
+  for (const mode of ['addLabel', 'removeLabel']) await assert.rejects(organizeProviderMessage(google, message, spam, mode), /custom Gmail label/);
+  await assert.rejects(organizeProviderMessage({ ...google, grantedScopes: 'https://www.googleapis.com/auth/gmail.readonly' }, message, spam, 'move'), /permission/);
+  assert.equal(writes, 0);
+  const moved = await organizeProviderMessage(google, message, spam, 'move');
+  assert.equal(moved.folder, 'spam'); assert.equal(moved.providerSent, true);
+  assert.deepEqual(moved.providerLabelIds, ['UNREAD', 'STARRED', 'SENT', 'Label_1', 'SPAM']);
+  const restored = await organizeProviderMessage(google, message, folders[0], 'move');
+  assert.equal(restored.folder, 'inbox');
+  assert.deepEqual(restored.providerLabelIds, ['UNREAD', 'STARRED', 'SENT', 'Label_1', 'INBOX']);
+  assert.equal(message.id, 'google:local'); assert.equal(writes, 2);
+});
+
+test('Outlook lists nested folders, identifies localized Junk by ID, and moves immutable IDs', async t => {
+  let hostile = false, invalidJunk = false, destination = 'child';
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     if (url.includes('/messages/')) {
       assert.match(options.headers.Prefer, /ImmutableId/);
-      if (url.endsWith('/move')) { assert.equal(JSON.parse(options.body).destinationId, 'child'); return Response.json({ id: 'immutable' }); }
+      if (url.endsWith('/move')) { assert.equal(JSON.parse(options.body).destinationId, destination); return Response.json({ id: 'immutable' }); }
       return Response.json({ id: 'immutable', parentFolderId: 'inbox-id' });
     }
     if (url.includes('/mailFolders/inbox?')) return Response.json({ id: 'inbox-id' });
-    if (url.includes('/childFolders?')) return Response.json({ value: [{ id: 'child', displayName: 'Client' }] });
+    if (url.includes('/mailFolders/junkemail?')) return Response.json({ id: invalidJunk ? null : 'junk-id' });
+    if (url.includes('/childFolders?')) return Response.json({ value: [{ id: 'child', displayName: 'Junk Email' }, { id: 'junk-id', displayName: '垃圾郵件' }] });
     return Response.json({ value: [{ id: 'inbox-id', displayName: 'Inbox' }, { id: 'parent', displayName: 'Projects', childFolderCount: 1 }], ...(hostile ? { '@odata.nextLink': 'https://attacker.example/steal' } : {}) });
   });
   const folders = await listProviderFolders(microsoft);
   assert.equal(folders[0].kind, 'inbox');
-  assert.equal(folders[2].name, 'Projects / Client');
+  assert.equal(folders[2].name, 'Projects / Junk Email');
+  assert.equal(folders[2].kind, 'folder');
+  assert.equal(folders[3].kind, 'spam');
   const patch = await organizeProviderMessage(microsoft, { id: 'microsoft:immutable' }, folders[2], 'move');
   assert.equal(patch.remoteId, 'microsoft:immutable');
   assert.equal(patch.providerFolderId, 'child');
+  destination = 'junk-id';
+  const spam = await organizeProviderMessage(microsoft, { id: 'microsoft:local', remoteId: 'microsoft:immutable' }, folders[3], 'move');
+  assert.equal(spam.folder, 'spam'); assert.equal(spam.providerFolderId, 'junk-id');
+  assert.equal(spam.remoteId, 'microsoft:immutable');
+  invalidJunk = true;
+  await assert.rejects(listProviderFolders(microsoft), /invalid folder ID/);
+  invalidJunk = false;
   hostile = true;
   await assert.rejects(listProviderFolders(microsoft), /unsafe/);
 });

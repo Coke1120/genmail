@@ -280,6 +280,181 @@ async fn wait_for(gate: &Semaphore) {
 }
 
 #[tokio::test]
+async fn provider_spam_folders_moves_and_restore() {
+    for (labels, folder) in [
+        (json!(["TRASH", "SPAM", "DRAFT"]), "trash"),
+        (json!(["SPAM", "DRAFT", "INBOX", "SENT"]), "spam"),
+    ] {
+        assert_eq!(providers::google_folder(&labels), folder);
+        assert_eq!(
+            providers::normalize_google(&json!({"id":"same","labelIds":labels})).unwrap()["folder"],
+            folder
+        );
+    }
+    let calls = Arc::new(Mutex::new(Vec::<Request>::new()));
+    let captured = calls.clone();
+    let invalid_junk = Arc::new(AtomicUsize::new(0));
+    let invalid = invalid_junk.clone();
+    let fixture = Fixture::new(Arc::new(move |request| {
+        let captured = captured.clone();
+        let invalid = invalid.clone();
+        async move {
+            captured.lock().unwrap().push(request.clone());
+            let url =
+                url::Url::parse(&format!("https://{}{}", request.host(), request.path)).unwrap();
+            if request.host() == "gmail.googleapis.com" {
+                assert_eq!(request.owner(), A);
+                if url.path().ends_with("/labels") {
+                    return Reply::Json(
+                        200,
+                        json!({"labels":[
+                            {"id":"SPAM","name":"SPAM","type":"system"},
+                            {"id":"TRASH","name":"TRASH","type":"system"},
+                            {"id":"Label_1","name":"Spam","type":"user"}
+                        ]}),
+                    );
+                }
+                assert_eq!(request.method, "POST");
+                assert_eq!(url.path(), "/gmail/v1/users/me/messages/remote/modify");
+                let body = request.json();
+                let target = if body["addLabelIds"] == json!(["SPAM"]) {
+                    assert_eq!(body["removeLabelIds"], json!(["INBOX"]));
+                    "SPAM"
+                } else {
+                    assert_eq!(
+                        body,
+                        json!({"addLabelIds":["INBOX"],"removeLabelIds":["SPAM"]})
+                    );
+                    "INBOX"
+                };
+                return Reply::Json(
+                    200,
+                    json!({"labelIds":["UNREAD","STARRED","SENT","Label_1",target]}),
+                );
+            }
+            assert_eq!(request.owner(), B);
+            match url.path() {
+                "/v1.0/me/mailFolders" => Reply::Json(
+                    200,
+                    json!({"value":[
+                        {"id":"inbox-id","displayName":"Inbox"},
+                        {"id":"custom-id","displayName":"Junk Email"},
+                        {"id":"junk-id","displayName":"垃圾郵件"}
+                    ]}),
+                ),
+                "/v1.0/me/mailFolders/inbox" => Reply::Json(200, json!({"id":"inbox-id"})),
+                "/v1.0/me/mailFolders/junkemail" => Reply::Json(
+                    200,
+                    if invalid.load(Ordering::SeqCst) == 0 {
+                        json!({"id":"junk-id"})
+                    } else {
+                        json!({"id":null})
+                    },
+                ),
+                "/v1.0/me/messages/remote" => {
+                    assert_eq!(request.headers["prefer"], "IdType=\"ImmutableId\"");
+                    Reply::Json(200, json!({"id":"remote","parentFolderId":"inbox-id"}))
+                }
+                "/v1.0/me/messages/remote/move" => {
+                    assert_eq!(request.method, "POST");
+                    assert_eq!(request.headers["prefer"], "IdType=\"ImmutableId\"");
+                    assert_eq!(request.json(), json!({"destinationId":"junk-id"}));
+                    Reply::Json(201, json!({"id":"remote","parentFolderId":"junk-id"}))
+                }
+                _ => panic!("Unexpected fixture request: {}", request.path),
+            }
+        }
+        .boxed()
+    }))
+    .await;
+    let google = connection("google", A);
+    let folders = providers::folders(&fixture.client, &google).await.unwrap();
+    assert_eq!(
+        folders,
+        vec![
+            json!({"id":"INBOX","name":"Inbox","kind":"inbox"}),
+            json!({"id":"__archive","name":"Archive (remove Inbox)","kind":"archive"}),
+            json!({"id":"SPAM","name":"Spam","kind":"spam"}),
+            json!({"id":"Label_1","name":"Spam","kind":"label"}),
+        ]
+    );
+    let message = json!({"id":"google:local","remoteId":"google:remote"});
+    let count = calls.lock().unwrap().len();
+    for mode in ["addLabel", "removeLabel"] {
+        assert!(
+            providers::organize(&fixture.client, &google, &message, &folders[2], mode)
+                .await
+                .is_err()
+        );
+    }
+    let mut readonly = google.clone();
+    readonly["grantedScopes"] = "https://www.googleapis.com/auth/gmail.readonly".into();
+    assert_eq!(
+        providers::organize(&fixture.client, &readonly, &message, &folders[2], "move")
+            .await
+            .unwrap_err()
+            .status,
+        403
+    );
+    assert_eq!(calls.lock().unwrap().len(), count);
+    let moved = providers::organize(&fixture.client, &google, &message, &folders[2], "move")
+        .await
+        .unwrap();
+    assert_eq!(moved["folder"], "spam");
+    assert_eq!(moved["providerSent"], true);
+    assert_eq!(
+        moved["providerLabelIds"],
+        json!(["UNREAD", "STARRED", "SENT", "Label_1", "SPAM"])
+    );
+    let restored = providers::organize(&fixture.client, &google, &message, &folders[0], "move")
+        .await
+        .unwrap();
+    assert_eq!(restored["folder"], "inbox");
+    assert_eq!(
+        restored["providerLabelIds"],
+        json!(["UNREAD", "STARRED", "SENT", "Label_1", "INBOX"])
+    );
+    assert_eq!(message["id"], "google:local");
+
+    let microsoft = connection("microsoft", B);
+    let folders = providers::folders(&fixture.client, &microsoft)
+        .await
+        .unwrap();
+    assert_eq!(folders[1]["kind"], "folder");
+    assert_eq!(
+        folders[2],
+        json!({"id":"junk-id","name":"垃圾郵件","kind":"spam"})
+    );
+    let moved = providers::organize(
+        &fixture.client,
+        &microsoft,
+        &json!({"id":"microsoft:local","remoteId":"microsoft:remote"}),
+        &folders[2],
+        "move",
+    )
+    .await
+    .unwrap();
+    assert_eq!(moved["folder"], "spam");
+    assert_eq!(moved["remoteId"], "microsoft:remote");
+    assert_eq!(moved["providerFolderId"], "junk-id");
+    invalid_junk.store(1, Ordering::SeqCst);
+    assert!(
+        providers::folders(&fixture.client, &microsoft)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "POST")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
 async fn both_provider_send_routes_preserve_bcc_owner_reply_and_idempotency() {
     let received = Arc::new(Mutex::new(Vec::<Request>::new()));
     let captured = received.clone();
@@ -540,9 +715,11 @@ async fn sync_combined_owners_keep_local_patches_and_stable_ids_after_provider_m
     let calls = Arc::new(Mutex::new(Vec::<Request>::new()));
     let captured = calls.clone();
     let fixture=Fixture::new(Arc::new(move|request|{let current=current.clone();let changed=changed.clone();let captured=captured.clone();async move{let owner=request.owner().to_owned();let path=url::Url::parse(&format!("https://{}{}",request.host(),request.path)).unwrap();captured.lock().unwrap().push(request.clone());let body=format!("Remote body {} for {owner}",current.load(Ordering::SeqCst));
-        if request.host()=="gmail.googleapis.com"{assert_eq!(request.method,"GET");if path.path().ends_with("/messages"){return Reply::Json(200,json!({"messages":[{"id":"same"}]}));}return Reply::Json(200,google_message("same",&owner,&body));}
+        if request.host()=="gmail.googleapis.com"{assert_eq!(request.method,"GET");if path.path().ends_with("/labels"){return Reply::Json(200,json!({"labels":[]}));}
+        if path.path().ends_with("/messages"){return Reply::Json(200,json!({"messages":[{"id":"same"}]}));}return Reply::Json(200,google_message("same",&owner,&body));}
         if path.path()=="/v1.0/me/mailFolders"{return Reply::Json(200,json!({"value":[{"id":"inbox-id","displayName":"Inbox","childFolderCount":0},{"id":"archive-id","displayName":"Archive","childFolderCount":0}]}));}
         if path.path()=="/v1.0/me/mailFolders/inbox"{return Reply::Json(200,json!({"id":"inbox-id"}));}
+        if path.path()=="/v1.0/me/mailFolders/junkemail"{return Reply::Json(200,json!({"id":"junk-id"}));}
         if path.path().ends_with("/messages/same/move"){assert_eq!(request.method,"POST");assert_eq!(request.json()["destinationId"],"archive-id");assert_eq!(request.headers["prefer"],"IdType=\"ImmutableId\"");changed.store(1,Ordering::SeqCst);return Reply::Json(201,json!({"id":"moved-id","parentFolderId":"archive-id"}));}
         if path.path().ends_with("/messages/same"){return Reply::Json(200,json!({"id":"same","parentFolderId":"inbox-id"}));}
         assert_eq!(path.path(),"/v1.0/me/mailFolders/inbox/messages");assert!(request.headers["prefer"].to_str().unwrap().contains("IdType=\"ImmutableId\""));Reply::Json(200,json!({"value":[microsoft_message(if changed.load(Ordering::SeqCst)>0{"moved-id"}else{"same"},&owner,&body)]}))
@@ -845,6 +1022,10 @@ async fn refresh_rotation_is_account_bound_and_changed_connection_discards_sync(
                 started.add_permits(1);
                 finish.acquire().await.unwrap().forget();
                 return Reply::Json(200, json!({"access_token":format!("fixture-{A}"),"refresh_token":"rotated-refresh","expires_in":3600}));
+            }
+            if request.path.ends_with("/labels") {
+                assert_eq!(request.method, "GET");
+                return Reply::Json(200, json!({"labels":[]}));
             }
             if request.path.contains("/messages?") {
                 return Reply::Json(200, json!({"messages":[{"id":"fresh"}]}));

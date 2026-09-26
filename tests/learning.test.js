@@ -126,3 +126,68 @@ test('re-enabled weekly learning starts at renewed consent and expired previews 
   await f.learning.tick(); assert.equal(calls.length, 3); assert.match(calls[2][0].body, /NEXT WEEK/);
   assert.equal(f.learning.voice(a), 'Approved initial style.');
 });
+
+test('manual learning keeps approved style through preview cancellation and proposal replacement without changing Email Brain', async t => {
+  let calls = 0;
+  const f = fixture(t, async () => { calls += 1; return { text: 'Proposed updated style.' }; }), a = f.accounts[0];
+  const workspaces = { [a]: { brain: { contacts: ['Existing contact'], notes: 'Existing notes', voice: 'Manually written voice' } }, [f.accounts[1]]: { brain: { notes: 'Other account' } } };
+  f.store.setSettings({ workspaces });
+  f.add(a, 'sample'); f.learning.updateSettings(a, { enabled: true });
+  const first = f.learning.prepare(a); await f.learning.generate(a, first.id);
+  f.learning.apply(a, { previewId: first.id, voice: 'Approved original style.' });
+  const prepared = f.learning.prepare(a); // Cancel here: preview is retained without an AI call.
+  assert.equal(calls, 1); assert.equal(f.learning.state(a).preview.status, 'prepared');
+  assert.equal(f.learning.voice(a), 'Approved original style.');
+  await f.learning.generate(a, prepared.id);
+  assert.equal(f.learning.voice(a), 'Approved original style.');
+  const replacement = f.learning.prepare(a); // Replacing a ready proposal still leaves approval intact.
+  assert.notEqual(replacement.id, prepared.id); assert.equal(calls, 2);
+  assert.equal(f.learning.voice(a), 'Approved original style.');
+  await f.learning.generate(a, replacement.id);
+  f.learning.apply(a, { previewId: replacement.id, voice: 'Explicitly approved update.' });
+  assert.equal(f.learning.voice(a), 'Explicitly approved update.');
+  assert.deepEqual(f.store.getSettings().workspaces, workspaces);
+  assert.equal(f.learning.state(f.accounts[1]).profile, null);
+});
+
+test('Learning UI offers direct learning only with saved opt-in, permissions, model and idle state', async t => {
+  const { createServer } = await import('vite');
+  const { default: React } = await import('react');
+  const { renderToString } = await import('react-dom/server');
+  const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom' });
+  t.after(() => vite.close());
+  const { default: StyleLearning } = await vite.ssrLoadModule('/src/StyleLearning.jsx');
+  const state = {
+    account: { id: 'owner@example.invalid', email: 'owner@example.invalid', mode: 'live' },
+    settings: { ai: { configured: true, model: 'fixture', baseUrl: 'http://localhost:11434/v1' }, policy: { maxMessages: 10 } },
+    workspace: { styleLearning: { settings: { enabled: true, weekly: false, months: 3, maxSamples: 5, tokenBudget: 4000 }, permitted: true, preview: null, profile: { active: true, voice: 'Approved original style.' } } },
+  };
+  const preview = { id: 'prepared-fixture', status: 'prepared', sampleCount: 1, eligible: 4, effectiveCap: 5, estimatedTokens: 1500, tokenBudget: 4000, samples: [{ body: 'Full own Sent sample text for optional review.' }] };
+  const render = (value, disabled = false) => renderToString(React.createElement(StyleLearning, { state: value, disabled, onUpdate() {}, onDirtyChange() {}, onBusyChange() {} }));
+  const button = html => html.match(/<button\b[^>]*>Learn Now · Uses AI<\/button>/)[0];
+  const html = render(state);
+  assert.match(button(html), /class="button primary"/); assert.doesNotMatch(button(html), /disabled/);
+  assert.match(html, /Uses saved learning settings/); assert.match(html, /Save Approved Style activates it for writing and replies under Email Brain permission/);
+  assert.match(html, /does not overwrite Email Brain contacts, notes, or voice/);
+  assert.match(html, /Approved original style/); assert.doesNotMatch(html, />Save approved style<\/button>/);
+  for (const block of [
+    value => { value.workspace.styleLearning.settings.enabled = false; },
+    value => { value.workspace.styleLearning.permitted = false; },
+    value => { value.settings.ai.configured = false; },
+    value => { value.workspace.styleLearning.preview = { ...preview, status: 'running' }; },
+  ]) {
+    const blocked = structuredClone(state); block(blocked);
+    assert.match(button(render(blocked)), /disabled=""/);
+  }
+  assert.match(render(state, true), /<fieldset[^>]*disabled=""/);
+  const combined = structuredClone(state); combined.account = { id: 'all', mode: 'combined' };
+  assert.match(render(combined), /<fieldset[^>]*disabled=""/);
+  for (const status of ['prepared', 'ready']) {
+    const value = structuredClone(state); value.workspace.styleLearning.preview = { ...preview, status, ...(status === 'ready' ? { voice: 'Proposed updated style.' } : {}) };
+    const proposal = render(value);
+    assert.match(proposal, /Review text sent to the model/); assert.match(proposal, /Full own Sent sample text for optional review/);
+    assert.doesNotMatch(button(proposal), /disabled/);
+    if (status === 'ready') assert.match(proposal, />Save approved style<\/button>/);
+    else assert.doesNotMatch(proposal, />Save approved style<\/button>/);
+  }
+});

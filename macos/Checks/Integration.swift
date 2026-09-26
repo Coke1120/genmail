@@ -12,6 +12,9 @@ struct NativeClientChecks {
     @MainActor static func main() async throws {
         let model = AppModel()
         await model.start()
+        let activity = try await model.request("/activity", mailbox: "")
+        assert(!activity["tasks"].isNull && !activity["checkedAt"].string.isEmpty)
+
         defer { model.stop() }
         guard !model.state.isNull else { throw APIError(model.error) }
         assert(model.state["settings"]["oauthClients"]["google"]["configured"].bool)
@@ -19,6 +22,8 @@ struct NativeClientChecks {
         assert(!String(decoding: publicState, as: UTF8.self).contains("fixture-bundled-secret"))
         assert(model.features.count == 19)
         assert(model.messages.allSatisfy { $0["body"].isNull && $0["footer"].isNull })
+        assert(model.hasMailbox && model.account == "native@example.com" && !model.senderAccounts.contains { $0.id == "demo" })
+        try await model.sync() // Fetch isolated provider fixtures into the real mailbox selected at startup.
         await model.loadMailPage()
         assert(!model.listedMessages.isEmpty && model.mailPage["pageSize"].number == 50)
         model.selectedMessage = model.listedMessages[0].viewID
@@ -58,6 +63,7 @@ struct NativeClientChecks {
         model.state = try await model.request("/settings/policy", method: "POST", body: .object(["triggers": .object(["onArrival": .bool(false), "scheduledSummary": .bool(false)])]))
         model.state = try await model.request("/settings/preferences", method: "POST", body: .object(["syncInterval": .number(0)]))
         print("Native summary schedule and separate language settings round-trip passed.")
+        try await model.selectAccount("demo") // Explicit fixture-only catalogue; no Demo entry exists in the UI.
         let selectedID = model.messages[0].id
         let calendars = try await model.request("/calendars")
         assert(calendars["connections"].array.filter { $0["connected"].bool }.count == 2)
@@ -117,15 +123,16 @@ struct NativeClientChecks {
         }
         assert(model.accounts.count == 3) // Includes the migrated legacy connection.
         try await model.selectAccount("all", folder: "inbox")
-        let duplicates = model.messages.filter { $0.id == "shared-inbox-id" }
-        assert(duplicates.count == 2 && Set(duplicates.map(\.viewID)).count == 2)
+        let allDuplicates = model.messages.filter { $0.id == "shared-inbox-id" }
+        assert(allDuplicates.count == 3 && Set(allDuplicates.map(\.viewID)).count == 3)
+        let duplicates = allDuplicates.filter { $0["accountId"].string != "native@example.com" }
         for row in duplicates {
             let detail = try await model.request("/messages/" + encodedPath(row.id), mailbox: row["accountId"].string)
             assert(detail["message"]["accountId"] == row["accountId"] && detail["message"]["body"].nonempty)
         }
         let searchOptions: JSON = .object(["query": .string("Owned"), "scope": .string("all"), "sort": .string("relevance")])
         let search = try await model.request("/search", method: "POST", body: searchOptions)
-        assert(search["total"].number == 2 && Set(search["messages"].array.map(\.viewID)).count == 2)
+        assert(search["total"].number == 3 && Set(search["messages"].array.map(\.viewID)).count == 3)
         assert(search["messages"].array.allSatisfy { !$0["searchSnippet"].array.isEmpty })
         model.searchResponse = search; model.selectedMessage = search["messages"].array[1].viewID
         assert(Draft(message: model.current!, reply: true).accountID == search["messages"].array[1]["accountId"].string)
@@ -191,7 +198,7 @@ struct NativeClientChecks {
         defer { browser.invalidateAndCancel() }
         for calendar in [false, true] {
             for provider in ["google", "microsoft"] {
-                try await model.selectAccount("demo")
+                try await model.selectAccount("native@example.com")
                 let route = calendar ? "/calendars/\(provider)/connect" : "/oauth/\(provider)/start"
                 let credentials: JSON = provider == "google" ? .object(["useDefaultClient": .bool(true)]) : .object(["clientId": .string("fixture-client")])
                 let started = try await model.request(route, method: "POST", body: credentials)
@@ -215,7 +222,7 @@ struct NativeClientChecks {
                 assert(String(decoding: page, as: UTF8.self).contains("Return to Morrow Mail"))
                 try await model.reload()
                 if calendar {
-                    assert(model.account == "demo") // Calendar sign-in does not switch the mailbox.
+                    assert(model.account == "native@example.com") // Calendar sign-in does not switch the mailbox.
                     assert(model.state["settings"]["calendars"].array.contains { $0["provider"].string == provider && $0["email"].string == "oauth-\(provider)@example.com" })
                 } else {
                     assert(model.account == "oauth-\(provider)@example.com" && model.state["account"]["mode"].string == "live")

@@ -125,7 +125,7 @@ button svg { flex-shrink: 0; }
 .avatar.blue { background: #e0e8ec; color: #6b899a; }
 .avatar.sand { background: #ece8d9; color: #958355; }
 .avatar.large { width: 36px; height: 36px; font-size: 11px; }
-.message-sender { font-size: 12px; font-weight: 550; color: #5b6951; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-sender { font-size: 12px; font-weight: inherit; text-align: left; color: #5b6951; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-row.unread .message-sender { font-weight: 650; color: #3a4a34; }
 .message-row time { color: #7b886d; margin-left: auto; font-size: 9px; white-space: nowrap; }
 .message-row.selected time { color: #8c9b7c; }
@@ -384,3 +384,27 @@ button svg { flex-shrink: 0; }
 
 .account-group.current-account > summary { color: #edf5df; background: #ffffff0a; }
 .sidebar nav.account-groups { display: block; }
+
+/* Read state applies to the whole preview, including dates and labels. */
+.message-row { font-weight: 400; }
+.message-row.unread { font-weight: 700; }
+.message-row .message-select, .message-row .message-select * { font-weight: inherit; }
+.message-row .message-sender { text-align: left; }
+.unread-indicator { display: flex; align-items: center; justify-content: flex-end; width: 8px; flex: 0 0 8px; }
+.unread-indicator .unread-dot { width: 6px; height: 6px; }
+.mail-layout-control { padding: 8px 14px; font-size: 12px; }
+.mail-layout-control select { max-width: 150px; }
+.email-display-controls { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+.message-content { min-width: 0; }
+@media (min-width: 761px) {
+  .mail-workspace.layout-bottom { flex-direction: column; }
+  .layout-bottom .message-pane { width: 100%; flex: 0 1 40%; min-height: 220px; border-right: 0; border-bottom: 1px solid #dce3d5; resize: vertical; overflow: auto; max-height: 75%; }
+  .layout-bottom .reader-pane { min-height: 240px; }
+  .layout-focus .message-pane { width: 100%; flex-basis: 100%; }
+  .layout-focus .reader-pane { display: none; }
+  .layout-focus.show-reader .message-pane { display: none; }
+  .layout-focus.show-reader .reader-pane { display: flex; }
+  .layout-focus .focus-back { display: inline-flex; }
+  .layout-right .message-pane { resize: horizontal; overflow: auto; min-width: 260px; max-width: 65%; flex-basis: auto; }
+}
+.message-row .message-select .message-sender, .message-row .message-select h3 { font-weight: inherit; }

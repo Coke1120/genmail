@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { simpleParser } from 'mailparser';
-import { oauthStart, oauthFinish, refreshMail, normalizeGoogleMessage, normalizeMicrosoftMessage, fetchProviderMessages, sendProviderMessage } from '../server/providers.js';
+import { oauthStart, oauthFinish, refreshMail, normalizeGoogleMessage, normalizeMicrosoftMessage, googleFolder, fetchProviderMessages, fetchProviderPage, listProviderFolders, organizeProviderMessage, sendProviderMessage } from '../server/providers.js';
 
 test('OAuth uses random state, PKCE, least-privilege scopes and keeps client secrets out of URLs', () => {
   for (const provider of ['google', 'microsoft']) {
@@ -83,10 +83,11 @@ test('provider listing requests immutable Microsoft IDs and bounds Google detail
   const fetch = t.mock.method(globalThis, 'fetch', async (url, options) => {
     if (url.includes('graph.microsoft.com')) {
       assert.match(options.headers.Prefer, /ImmutableId/);
-      assert.match(options.headers.Prefer, /body-content-type="text"/);
+      assert.match(options.headers.Prefer, /body-content-type="html"/);
       return new Response('{"value":[]}');
     }
     if (url.includes('maxResults')) return new Response(JSON.stringify({ messages: Array.from({ length: 12 }, (_, index) => ({ id: String(index) })) }));
+    if (url.endsWith('/labels')) return Response.json({ labels: [] });
     active++;
     maximum = Math.max(maximum, active);
     await new Promise(resolve => setImmediate(resolve));
@@ -96,7 +97,7 @@ test('provider listing requests immutable Microsoft IDs and bounds Google detail
   assert.deepEqual(await fetchProviderMessages({ provider: 'microsoft', accessToken: 'token' }), []);
   assert.equal((await fetchProviderMessages({ provider: 'google', accessToken: 'token' })).length, 12);
   assert.equal(maximum, 5);
-  assert.equal(fetch.mock.callCount(), 14);
+  assert.equal(fetch.mock.callCount(), 15);
 });
 
 test('both native sending APIs encode Unicode and RFC reply headers without contacting a mailbox', async t => {
@@ -140,4 +141,112 @@ test('history pages use chosen folders and dates and reject foreign Graph contin
   assert.match(seen[2].url.searchParams.get('$filter'), /^sentDateTime ge/);
   await assert.rejects(fetchProviderPage({ provider: 'microsoft', accessToken: 'private' }, { ...options, cursor: graph.nextCursor }), /Invalid mailbox pagination/);
   assert.equal(seen.length, 3);
+});
+
+test('Google normalization derives folder precedence and independent Sent/Draft flags from exact labels', async () => {
+  for (const [labelIds, folder] of [
+    [['TRASH', 'DRAFT', 'INBOX', 'SENT', 'STARRED'], 'trash'],
+    [['DRAFT', 'INBOX', 'SENT'], 'drafts'],
+    [['INBOX', 'SENT', 'UNREAD'], 'inbox'],
+    [['SENT', 'STARRED'], 'sent'],
+    [['Label_1'], 'archive'], [[], 'archive'],
+  ]) {
+    const message = await normalizeGoogleMessage({ id: 'stable', labelIds, payload: { headers: [] } });
+    assert.equal(googleFolder(labelIds), folder); assert.equal(message.folder, folder);
+    assert.equal(message.id, 'google:stable'); assert.deepEqual(message.providerLabelIds, labelIds);
+    assert.equal(message.providerSent, labelIds.includes('SENT')); assert.equal(message.providerDraft, labelIds.includes('DRAFT'));
+    assert.equal(message.starred, labelIds.includes('STARRED')); assert.equal(message.read, !labelIds.includes('UNREAD'));
+  }
+  assert.equal(googleFolder(), 'archive');
+  await assert.rejects(normalizeGoogleMessage({ labelIds: 'INBOX' }), /invalid message labels/);
+});
+
+test('Google pages cover all five scopes, keep stable IDs and resolve user labels once with readonly permission', async t => {
+  const mail = { provider: 'google', accessToken: 'fixture-token', grantedScopes: 'https://www.googleapis.com/auth/gmail.readonly' };
+  const rows = [
+    { id: 'dual', labelIds: ['INBOX', 'SENT', 'STARRED', 'UNREAD', 'Label_1'] },
+    { id: 'sent', labelIds: ['SENT', 'Label_2'] },
+    { id: 'draft', labelIds: ['DRAFT', 'INBOX', 'Label_1'] },
+    { id: 'archive', labelIds: ['Label_2', 'Label_deleted'] },
+  ];
+  const lists = []; let labelRequests = 0, details = 0;
+  t.mock.method(globalThis, 'fetch', async (target, options) => {
+    const url = new URL(target);
+    assert.equal(url.origin, 'https://gmail.googleapis.com'); assert.equal(options.redirect, 'error');
+    assert.equal(options.headers.Authorization, 'Bearer fixture-token');
+    if (url.pathname.endsWith('/labels')) {
+      labelRequests++;
+      return Response.json({ labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }, { id: 'SENT', name: 'SENT', type: 'system' }, { id: 'Label_1', name: '工作 / 專案', type: 'user' }, { id: 'Label_2', name: 'Travel', type: 'user' }] });
+    }
+    if (url.pathname.endsWith('/messages')) {
+      lists.push(url);
+      const label = url.searchParams.get('labelIds');
+      return Response.json({ messages: rows.filter(row => !label || row.labelIds.includes(label)).map(({ id }) => ({ id })), nextPageToken: 'opaque /?& token' });
+    }
+    details++;
+    assert.equal(url.searchParams.get('format'), 'full');
+    const row = rows.find(row => url.pathname.endsWith('/' + row.id)); assert.ok(row);
+    return Response.json({ ...row, internalDate: '1700000000000', payload: { headers: [] } });
+  });
+  const options = { since: '2026-06-24T12:00:00.000Z', before: '2026-09-24T12:00:00.000Z' };
+  for (const [folder, label] of [['all', null], ['inbox', 'INBOX'], ['sent', 'SENT'], ['drafts', 'DRAFT'], ['starred', 'STARRED']]) {
+    const page = await fetchProviderPage(mail, { ...options, folder, cursor: 'opaque /?& token' });
+    const query = lists.at(-1).searchParams;
+    assert.equal(query.get('labelIds'), label); assert.equal(query.get('includeSpamTrash'), 'false');
+    assert.equal(query.get('maxResults'), '50'); assert.equal(query.get('pageToken'), 'opaque /?& token');
+    assert.match(query.get('q'), /^after:\d+ before:\d+$/);
+    assert.equal(page.nextCursor, 'opaque /?& token');
+    for (const message of page.messages) {
+      const raw = rows.find(row => message.id === `google:${row.id}`);
+      assert.deepEqual(message.providerLabelIds, raw.labelIds); assert.equal(message.folder, googleFolder(raw.labelIds));
+      assert.deepEqual(message.labels, [raw.labelIds.includes('Label_1') ? '工作 / 專案' : 'Travel']);
+      assert.equal(message.providerSent, raw.labelIds.includes('SENT')); assert.equal(message.providerDraft, raw.labelIds.includes('DRAFT'));
+    }
+  }
+  assert.equal(labelRequests, 5); assert.equal(details, 10);
+  await assert.rejects(listProviderFolders(mail), /Allow moving mail/);
+  assert.equal(labelRequests, 5); // Readonly fetch does not weaken organization authorization.
+  for (const folder of ['all', 'drafts', 'starred']) await assert.rejects(fetchProviderPage({ ...mail, provider: 'microsoft' }, { folder }), /Unsupported import folder/);
+});
+
+test('Google custom label changes retain exact Sent and Draft classification from confirmed labels', async t => {
+  const mail = { provider: 'google', accessToken: 'fixture-token', grantedScopes: 'https://www.googleapis.com/auth/gmail.modify' };
+  let confirmed;
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (target, options) => {
+    assert.equal(target, 'https://gmail.googleapis.com/gmail/v1/users/me/messages/stable/modify');
+    assert.equal(options.method, 'POST'); assert.equal(options.redirect, 'error');
+    calls.push(JSON.parse(options.body));
+    return Response.json({ labelIds: confirmed });
+  });
+  for (const [mode, labels, folder] of [
+    ['addLabel', ['SENT', 'Label_1'], 'sent'],
+    ['removeLabel', ['DRAFT', 'SENT'], 'drafts'],
+    ['addLabel', ['TRASH', 'DRAFT', 'SENT', 'INBOX', 'Label_1'], 'trash'],
+  ]) {
+    confirmed = labels;
+    const result = await organizeProviderMessage(mail, { id: 'google:stable' }, { id: 'Label_1', kind: 'label' }, mode);
+    assert.equal(result.folder, folder); assert.deepEqual(result.providerLabelIds, labels);
+    assert.equal(result.providerSent, labels.includes('SENT')); assert.equal(result.providerDraft, labels.includes('DRAFT'));
+    assert.deepEqual(calls.at(-1), mode === 'addLabel' ? { addLabelIds: ['Label_1'], removeLabelIds: [] } : { addLabelIds: [], removeLabelIds: ['Label_1'] });
+  }
+});
+
+test('Google page and label discovery reject oversized or malformed remote lists before detail requests', async t => {
+  const mail = { provider: 'google', accessToken: 'fixture-token' };
+  let page = { messages: Array.from({ length: 51 }, (_, id) => ({ id: String(id) })) };
+  let labels = { labels: [] }, detailRequests = 0;
+  t.mock.method(globalThis, 'fetch', async target => {
+    const url = new URL(target);
+    if (url.pathname.endsWith('/messages')) return Response.json(page);
+    if (url.pathname.endsWith('/labels')) return Response.json(labels);
+    detailRequests++; return Response.json({ id: 'one' });
+  });
+  await assert.rejects(fetchProviderPage(mail, { folder: 'all' }), /invalid message page/);
+  page = { messages: [{ id: 'one' }] };
+  labels = { labels: Array.from({ length: 1001 }, (_, id) => ({ id: String(id), name: 'Label', type: 'user' })) };
+  await assert.rejects(fetchProviderPage(mail), /too many or invalid labels/);
+  labels = { labels: [{ id: 'Label_1', name: null, type: 'user' }] };
+  await assert.rejects(fetchProviderPage(mail), /too many or invalid labels/);
+  assert.equal(detailRequests, 0);
 });

@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod ai;
 pub mod background;
 pub mod calendar;
@@ -7,6 +8,7 @@ pub mod error;
 pub mod imap;
 pub mod learning;
 pub mod mail;
+pub mod message_html;
 pub mod normalize;
 pub mod oauth;
 pub mod pages;

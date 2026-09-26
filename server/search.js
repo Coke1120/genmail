@@ -5,7 +5,7 @@ import { createSmartSearch } from './smart-search.js';
 
 export const searchFail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 const fields = ['from', 'to', 'subject', 'after', 'before', 'is', 'label', 'in'];
-const folders = ['inbox', 'sent', 'drafts', 'archive', 'trash', 'starred'];
+const folders = ['inbox', 'sent', 'drafts', 'archive', 'spam', 'trash', 'starred'];
 export function parseSearch(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) searchFail('Enter valid search options.');
   const { query = '', scope = 'folder', folder = 'inbox', sort = 'relevance', page = 0, filters = {}, smart = false, cachedOnly = false } = input;
@@ -43,11 +43,11 @@ export function parseSearch(input = {}) {
 export function searchWhere(options, accounts) {
   const clauses = [`d.account IN (${accounts.map(() => '?').join(',') || 'NULL'})`], params = [...accounts];
   const folder = value => {
-    if (value === 'starred') clauses.push("d.starred=1 AND d.folder<>'trash'");
+    if (value === 'starred') clauses.push("d.starred=1 AND d.folder NOT IN ('trash','spam')");
     else { clauses.push('d.folder=?'); params.push(value); }
   };
   if (options.scope === 'folder') folder(options.folder);
-  else if (!options.conditions.some(item => item.key === 'in' && item.value === 'trash')) clauses.push("d.folder<>'trash'");
+  else if (!options.conditions.some(item => item.key === 'in' && ['trash', 'spam'].includes(item.value))) clauses.push("d.folder NOT IN ('trash','spam')");
   for (const { key, value } of options.conditions) {
     if (key === 'in') folder(value);
     else if (key === 'is') clauses.push(value === 'starred' ? 'd.starred=1' : `d.unread=${value === 'unread' ? 1 : 0}`);
@@ -138,6 +138,7 @@ export function registerSearchRoutes({ app, store, connections, apiBase, embed, 
   });
   app.get('/api/search/settings', (_req, res) => res.json(smartSearch.state()));
   app.post('/api/search/settings', (req, res) => { smartSearch.update(req.body); res.json(smartSearch.state()); });
+  app.post('/api/search/test', async (req, res) => res.json(await smartSearch.testConnection(req.body)));
   app.post('/api/search/index/preview', (_req, res) => res.json(smartSearch.preview()));
   app.post('/api/search/index/run', (req, res) => { smartSearch.start(req.body?.previewId); res.status(202).json(smartSearch.state()); });
   app.post('/api/search/index/clear', (_req, res) => { smartSearch.clear(); res.json(smartSearch.state()); });

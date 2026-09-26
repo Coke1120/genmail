@@ -16,6 +16,13 @@ const styles = {
   padding: /^(?:0|[1-9]|1[0-9]|2[0-4])px$/,
 };
 
+export function cleanStyle(value = '') {
+  return value.split(';').flatMap(declaration => {
+    const [key, value, ...extra] = declaration.split(':').map(part => part.trim().toLowerCase());
+    return !extra.length && Object.hasOwn(styles, key) && styles[key].test(value) ? [`${key}:${value}`] : [];
+  }).join(';');
+}
+
 export function normalizeFooter(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('Footer must be an object.');
   const { text = '', html = '' } = value;
@@ -37,10 +44,7 @@ export function normalizeFooter(value = {}) {
         if (['https:', 'mailto:', 'tel:'].includes(url.protocol) && !url.username && !url.password) attributes += ` href="${escapeHTML(href)}"`;
       } catch { /* Ignore unsafe or relative links. */ }
     }
-    const style = (node.attribs?.style || '').split(';').flatMap(declaration => {
-      const [key, value, ...extra] = declaration.split(':').map(part => part.trim().toLowerCase());
-      return !extra.length && Object.hasOwn(styles, key) && styles[key].test(value) ? [`${key}:${value}`] : [];
-    }).join(';');
+    const style = cleanStyle(node.attribs?.style || '');
     if (style) attributes += ` style="${style}"`;
     return `<${tag}${attributes}>${['br', 'hr'].includes(tag) ? '' : children + `</${tag}>`}`;
   }

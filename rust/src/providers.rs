@@ -14,7 +14,7 @@ use reqwest::{Client, RequestBuilder};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -53,8 +53,13 @@ pub fn remote_error() -> Error {
         "The provider request could not be confirmed. Check your connection or reconnect this account.",
     )
 }
+fn network_error() -> Error {
+    let mut error = remote_error();
+    error.body["code"] = "provider_network".into();
+    error
+}
 pub async fn request(request: RequestBuilder, limit: usize) -> Result<Value> {
-    let mut response = request.send().await.map_err(|_| remote_error())?;
+    let mut response = request.send().await.map_err(|_| network_error())?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let mut error = Error::new(
@@ -77,7 +82,7 @@ pub async fn request(request: RequestBuilder, limit: usize) -> Result<Value> {
         ));
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| remote_error())? {
+    while let Some(chunk) = response.chunk().await.map_err(|_| network_error())? {
         if bytes.len() + chunk.len() > limit {
             return Err(Error::new(
                 502,
@@ -385,15 +390,35 @@ pub fn mime(raw: &[u8]) -> Result<Value> {
         .map(|s| s.replace("\r\n", "\n"))
         .unwrap_or_else(|| "(This message has no readable text.)".into());
     let body: String = body.chars().take(100000).collect();
+    let body_html = parsed
+        .body_html(0)
+        .map(|html| crate::message_html::sanitize(&html))
+        .unwrap_or_default();
     let headers = parsed
         .headers_raw()
         .map(|(name, value)| json!({"name":name,"value":value.trim()}))
         .collect::<Vec<_>>();
     let subject = parsed.subject().unwrap_or("(No subject)");
-    Ok(
-        json!({"fromName":from.and_then(|a|a.name().or(a.address())).unwrap_or("Unknown sender"),"fromEmail":from.and_then(|a|a.address()).unwrap_or(""),"to":address_text(parsed.to()),"cc":address_text(parsed.cc()),"bcc":address_text(parsed.bcc()),"subject":subject,"body":body,"preview":preview(&body),"date":DateTime::<Utc>::from_timestamp(parsed.date().map(|d|d.to_timestamp()).unwrap_or(0),0).unwrap_or_default().to_rfc3339_opts(SecondsFormat::Millis,true),"messageId":parsed.message_id().map(|id|format!("<{id}>")).unwrap_or_default(),"automated":automated(&json!(headers)),"category":category(subject,&json!(headers)),"labels":[]}),
-    )
+    let mut result = json!({"fromName":from.and_then(|a|a.name().or(a.address())).unwrap_or("Unknown sender"),"fromEmail":from.and_then(|a|a.address()).unwrap_or(""),"to":address_text(parsed.to()),"cc":address_text(parsed.cc()),"bcc":address_text(parsed.bcc()),"subject":subject,"body":body,"preview":preview(&body),"date":DateTime::<Utc>::from_timestamp(parsed.date().map(|d|d.to_timestamp()).unwrap_or(0),0).unwrap_or_default().to_rfc3339_opts(SecondsFormat::Millis,true),"messageId":parsed.message_id().map(|id|format!("<{id}>")).unwrap_or_default(),"automated":automated(&json!(headers)),"category":category(subject,&json!(headers)),"labels":[]});
+    result["bodyHtml"] = body_html.into();
+    Ok(result)
 }
+pub fn google_folder(label_ids: &Value) -> &'static str {
+    let Some(labels) = label_ids.as_array() else {
+        return "archive";
+    };
+    [
+        ("TRASH", "trash"),
+        ("SPAM", "spam"),
+        ("DRAFT", "drafts"),
+        ("INBOX", "inbox"),
+        ("SENT", "sent"),
+    ]
+    .into_iter()
+    .find_map(|(label, folder)| labels.iter().any(|v| v == label).then_some(folder))
+    .unwrap_or("archive")
+}
+
 pub fn normalize_google(message: &Value) -> Result<Value> {
     let headers = message["payload"]["headers"]
         .as_array()
@@ -418,6 +443,7 @@ pub fn normalize_google(message: &Value) -> Result<Value> {
     let mut stack = vec![&message["payload"]];
     let mut plain = Vec::new();
     let mut html = Vec::new();
+    let mut formatted = Vec::new();
     let mut count = 0;
     while let Some(part) = stack.pop() {
         count += 1;
@@ -460,6 +486,7 @@ pub fn normalize_google(message: &Value) -> Result<Value> {
                 plain.push(string(&parsed, "body").to_owned());
             } else {
                 html.push(string(&parsed, "body").to_owned());
+                formatted.push(string(&parsed, "bodyHtml").to_owned());
             }
         }
         if let Some(parts) = part["parts"].as_array() {
@@ -479,6 +506,7 @@ pub fn normalize_google(message: &Value) -> Result<Value> {
     };
     result["id"] = format!("google:{}", string(message, "id")).into();
     result["body"] = body.clone().into();
+    result["bodyHtml"] = crate::message_html::sanitize(&formatted.join("\n")).into();
     result["preview"] = preview(&body).into();
     if let Some(ms) = message["internalDate"]
         .as_str()
@@ -492,9 +520,16 @@ pub fn normalize_google(message: &Value) -> Result<Value> {
             .into();
     }
     let labels = message["labelIds"].as_array().cloned().unwrap_or_default();
+    if message.get("labelIds").is_some_and(|v| !v.is_array())
+        || labels.len() > 1000
+        || labels.iter().any(|v| v.as_str().is_none_or(str::is_empty))
+    {
+        return Err(remote_error());
+    }
+    let folder = google_folder(&message["labelIds"]);
     result = merge(
         result,
-        &json!({"folder":"inbox","providerSent":labels.contains(&json!("SENT")),"read":!labels.contains(&json!("UNREAD")),"starred":labels.contains(&json!("STARRED")),"automated":automated(&json!(headers)),"providerLabelIds":labels}),
+        &json!({"folder":folder,"providerSent":labels.contains(&json!("SENT")),"providerDraft":labels.contains(&json!("DRAFT")),"read":!labels.contains(&json!("UNREAD")),"starred":labels.contains(&json!("STARRED")),"automated":automated(&json!(headers)),"providerLabelIds":labels}),
     );
     Ok(result)
 }
@@ -502,6 +537,11 @@ pub fn normalize_microsoft(message: &Value) -> Result<Value> {
     let from = message.get("from").unwrap_or(&message["sender"]);
     let from = &from["emailAddress"];
     let body = string(&message["body"], "content");
+    let body_html = if string(&message["body"], "contentType").eq_ignore_ascii_case("html") {
+        crate::message_html::sanitize(body)
+    } else {
+        String::new()
+    };
     let body = if string(&message["body"], "contentType").eq_ignore_ascii_case("html") {
         content::plain_html(body)?
     } else {
@@ -531,21 +571,38 @@ pub fn normalize_microsoft(message: &Value) -> Result<Value> {
             .unwrap_or_default()
             .into();
     }
+    result["bodyHtml"] = body_html.into();
     Ok(result)
 }
 pub async fn fetch_page(client: &Client, mail: &Value, options: &Value) -> Result<Value> {
     let folder = options["folder"].as_str().unwrap_or("inbox");
-    if !["inbox", "sent"].contains(&folder) {
+    let provider = string(mail, "provider");
+    let supported = if provider == "google" {
+        &["all", "inbox", "sent", "drafts", "starred"][..]
+    } else {
+        &["inbox", "sent"][..]
+    };
+    if !supported.contains(&folder) {
         return Err(Error::invalid("Unsupported import folder."));
     }
-    let provider = string(mail, "provider");
     definition(provider)?;
     if provider == "google" {
         let query = {
             let mut query = url::form_urlencoded::Serializer::new(String::new());
             query
                 .append_pair("maxResults", "50")
-                .append_pair("labelIds", if folder == "sent" { "SENT" } else { "INBOX" });
+                .append_pair("includeSpamTrash", "false");
+            if folder != "all" {
+                query.append_pair(
+                    "labelIds",
+                    match folder {
+                        "sent" => "SENT",
+                        "drafts" => "DRAFT",
+                        "starred" => "STARRED",
+                        _ => "INBOX",
+                    },
+                );
+            }
             let mut filter = Vec::new();
             for (key, operator) in [("since", "after"), ("before", "before")] {
                 if !string(options, key).is_empty() {
@@ -570,9 +627,27 @@ pub async fn fetch_page(client: &Client, mail: &Value, options: &Value) -> Resul
         };
         let list = get(client, mail, &format!("/messages?{query}")).await?;
         let entries = list["messages"].as_array().cloned().unwrap_or_default();
-        if entries.len() > 50 {
+        if list.get("messages").is_some_and(|v| !v.is_array())
+            || entries.len() > 50
+            || entries.iter().any(|item| string(item, "id").is_empty())
+        {
             return Err(remote_error());
         }
+        let label_names: HashMap<String, String> = if entries.is_empty() {
+            HashMap::new()
+        } else {
+            google_labels(client, mail)
+                .await?
+                .iter()
+                .filter(|label| label["type"] == "user")
+                .map(|label| {
+                    (
+                        string(label, "id").to_owned(),
+                        string(label, "name").to_owned(),
+                    )
+                })
+                .collect()
+        };
         let mut messages = Vec::new();
         for entries in entries.chunks(5) {
             let results = futures_util::future::join_all(entries.iter().map(|item| async {
@@ -585,7 +660,13 @@ pub async fn fetch_page(client: &Client, mail: &Value, options: &Value) -> Resul
                 let mut value = tokio::task::spawn_blocking(move || normalize_google(&raw))
                     .await
                     .map_err(|_| remote_error())??;
-                value["folder"] = folder.into();
+                value["labels"] = value["providerLabelIds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|id| label_names.get(id.as_str().unwrap()))
+                    .map(|name| json!(name))
+                    .collect();
                 Ok::<_, Error>(value)
             }))
             .await;
@@ -634,7 +715,7 @@ pub async fn fetch_page(client: &Client, mail: &Value, options: &Value) -> Resul
             .bearer_auth(string(mail, "accessToken"))
             .header(
                 "Prefer",
-                "outlook.body-content-type=\"text\", IdType=\"ImmutableId\"",
+                "outlook.body-content-type=\"html\", IdType=\"ImmutableId\"",
             ),
         8 * 1024 * 1024,
     )
@@ -758,6 +839,21 @@ pub fn can_organize(mail: &Value) -> bool {
         }
     })
 }
+async fn google_labels(client: &Client, mail: &Value) -> Result<Vec<Value>> {
+    let result = get(client, mail, "/labels").await?;
+    let labels = result["labels"]
+        .as_array()
+        .filter(|labels| labels.len() <= 1000)
+        .ok_or_else(remote_error)?;
+    if labels
+        .iter()
+        .any(|label| string(label, "id").is_empty() || string(label, "name").is_empty())
+    {
+        return Err(remote_error());
+    }
+    Ok(labels.clone())
+}
+
 pub async fn folders(client: &Client, mail: &Value) -> Result<Vec<Value>> {
     if !can_organize(mail) {
         return Err(Error::new(
@@ -766,15 +862,17 @@ pub async fn folders(client: &Client, mail: &Value) -> Result<Vec<Value>> {
         ));
     }
     if mail["provider"] == "google" {
-        let result = get(client, mail, "/labels").await?;
-        let labels = result["labels"]
-            .as_array()
-            .filter(|v| v.len() <= 1000)
-            .ok_or_else(remote_error)?;
+        let labels = google_labels(client, mail).await?;
         let mut folders = vec![
             json!({"id":"INBOX","name":"Inbox","kind":"inbox"}),
             json!({"id":"__archive","name":"Archive (remove Inbox)","kind":"archive"}),
         ];
+        folders.extend(
+            labels
+                .iter()
+                .filter(|v| v["type"] == "system" && v["id"] == "SPAM")
+                .map(|v| json!({"id":v["id"],"name":"Spam","kind":"spam"})),
+        );
         folders.extend(
             labels
                 .iter()
@@ -836,9 +934,15 @@ pub async fn folders(client: &Client, mail: &Value) -> Result<Vec<Value>> {
         }
     }
     let inbox = get(client, mail, "/mailFolders/inbox?$select=id").await?;
+    let junk = get(client, mail, "/mailFolders/junkemail?$select=id").await?;
+    if string(&inbox, "id").is_empty() || string(&junk, "id").is_empty() {
+        return Err(remote_error());
+    }
     for folder in &mut folders {
         if folder["id"] == inbox["id"] {
             folder["kind"] = "inbox".into();
+        } else if folder["id"] == junk["id"] {
+            folder["kind"] = "spam".into();
         }
     }
     Ok(folders)
@@ -876,8 +980,12 @@ pub async fn organize(
         };
         let remove = if mode == "removeLabel" {
             vec![destination["id"].clone()]
-        } else if mode == "move" && destination["id"] != "INBOX" {
-            vec![json!("INBOX")]
+        } else if mode == "move" {
+            vec![json!(if destination["id"] == "INBOX" {
+                "SPAM"
+            } else {
+                "INBOX"
+            })]
         } else {
             vec![]
         };
@@ -895,7 +1003,7 @@ pub async fn organize(
         let labels = result["labelIds"].as_array().ok_or_else(remote_error)?;
         let inbox = labels.contains(&json!("INBOX"));
         return Ok(
-            json!({"providerLabelIds":labels,"folder":if inbox{"inbox"}else{"archive"},"providerFolderName":if inbox{"Inbox"}else{"Gmail · outside Inbox"}}),
+            json!({"providerLabelIds":labels,"folder":google_folder(&result["labelIds"]),"providerSent":labels.contains(&json!("SENT")),"providerDraft":labels.contains(&json!("DRAFT")),"providerFolderName":if inbox{"Inbox"}else{"Gmail · outside Inbox"}}),
         );
     }
     if mode != "move" {
@@ -927,6 +1035,6 @@ pub async fn organize(
         return Err(remote_error());
     }
     Ok(
-        json!({"remoteId":format!("microsoft:{}",string(&moved,"id")),"providerFolderId":destination["id"],"providerFolderName":destination["name"],"folder":if destination["kind"]=="inbox"{"inbox"}else{"archive"}}),
+        json!({"remoteId":format!("microsoft:{}",string(&moved,"id")),"providerFolderId":destination["id"],"providerFolderName":destination["name"],"folder":if destination["kind"]=="inbox"{"inbox"}else if destination["kind"]=="spam"{"spam"}else{"archive"}}),
     )
 }

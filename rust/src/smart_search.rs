@@ -32,6 +32,7 @@ const INDEX_VERSION: u32 = 1;
 pub struct SmartState {
     worker: Mutex<()>,
     query_gate: Mutex<()>,
+    test_gate: Mutex<()>,
     cache: Mutex<VecDeque<CachedQuery>>,
     initialized: AtomicBool,
     cancellation: watch::Sender<u64>,
@@ -379,7 +380,7 @@ pub fn state(db: &Store) -> Result<Value> {
         json!({"settings":value,"eligible":inventory.eligible,"indexed":inventory.ready,"pending":inventory.eligible-inventory.ready,"job":job,"permitted":policy::resolve(&settings["policy"])["enabled"],"local":local,"indexVersion":INDEX_VERSION}),
     )
 }
-pub fn update(db: &Store, input: &Value) -> Result<()> {
+fn settings_input(db: &Store, input: &Value) -> Result<Value> {
     let defaults = defaults();
     let object = input
         .as_object()
@@ -478,6 +479,10 @@ pub fn update(db: &Store, input: &Value) -> Result<()> {
         json!("")
     };
     next.as_object_mut().unwrap().remove("clearApiKey");
+    Ok(next)
+}
+pub fn update(db: &Store, input: &Value) -> Result<()> {
+    let next = settings_input(db, input)?;
     db.transaction(|db|{db.set_settings(&json!({"searchAI":next,"searchIndex":null,"searchGeneration":uuid::Uuid::new_v4().to_string()}))?;reconcile(db)})
 }
 pub fn preview(db: &Store) -> Result<Value> {
@@ -1277,6 +1282,31 @@ pub async fn handle(app: &App, ctx: &Context) -> Result<Option<Response>> {
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
             app.0.smart.cache.lock().await.clear();
             result
+        }
+        ("POST", ["search", "test"]) => {
+            let _gate =
+                app.0.smart.test_gate.try_lock().map_err(|_| {
+                    Error::conflict("An embedding connection test is already running.")
+                })?;
+            let mut input = ctx.body.clone();
+            if input.as_object().is_none_or(|v| {
+                v.keys().any(|key| {
+                    !["baseUrl", "model", "protocol", "apiKey", "clearApiKey"]
+                        .contains(&key.as_str())
+                })
+            }) {
+                return Err(Error::invalid("Invalid embedding test settings."));
+            }
+            // The fixed probe is independent of mail permissions and index scope.
+            input["enabled"] = false.into();
+            let value = app.db(move |db| settings_input(db, &input)).await?;
+            let result = fetch_embeddings(
+                app,
+                &value,
+                &["Morrow Mail embedding connection test.".into()],
+            )
+            .await?;
+            json!({"ok":true,"dimensions":result[0].len()})
         }
         ("POST", ["search", "index", "preview"]) => app.db(preview).await?,
         ("POST", ["search", "index", "clear"]) => {

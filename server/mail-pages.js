@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
-const folders = ['inbox', 'starred', 'sent', 'drafts', 'archive', 'trash'];
+const folders = ['inbox', 'starred', 'sent', 'drafts', 'archive', 'spam', 'trash'];
 const sorts = ['newest', 'oldest', 'sender', 'subject', 'unread', 'starred'];
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 const fields = { id: null, fromName: 254, fromEmail: 254, to: 4096, subject: 1000, preview: 240, date: 40, folder: 20, category: 40, remoteId: null, deliveryStatus: 40 };
@@ -25,19 +25,20 @@ export function createMailPages(db, revision) {
         const entry = result[row.account]; entry.total += row.count;
         if (Object.hasOwn(entry.counts, row.folder) && row.folder !== 'starred') entry.counts[row.folder] = row.count;
         if (row.folder === 'inbox') entry.unread += row.unread;
-        if (row.folder !== 'trash') entry.counts.starred += row.starred;
+        if (!['trash', 'spam'].includes(row.folder)) entry.counts.starred += row.starred;
       }
       return result;
     },
     page(accounts, input = {}) {
-      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['folder', 'category', 'unreadOnly', 'sort', 'cursor', 'pageSize', 'locale'].includes(key))) fail('Invalid mail page.');
-      const { folder = '', category = 'all', unreadOnly = false, sort = 'newest', cursor = '', pageSize = 50, locale = 'en' } = input;
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['folder', 'category', 'unreadOnly', 'sort', 'cursor', 'pageSize', 'locale', 'offset'].includes(key))) fail('Invalid mail page.');
+      const { folder = '', category = 'all', unreadOnly = false, sort = 'newest', cursor = '', pageSize = 50, locale = 'en', offset = 0 } = input;
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 200000 || (offset && cursor)) fail('Invalid mail page offset.');
       if ((folder !== '' && !folders.includes(folder)) || !['all', 'primary', 'updates', 'newsletters'].includes(category) || typeof unreadOnly !== 'boolean' || !sorts.includes(sort) || typeof cursor !== 'string' || cursor.length > 8192 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) fail('Invalid mail folder, sorting or page size.');
       if (typeof locale !== 'string' || !locale || locale.length > 100) fail('Invalid sorting locale.');
       let collator; try { collator = new Intl.Collator(locale, { sensitivity: 'base', numeric: true }); } catch { fail('Invalid sorting locale.'); }
       const scope = createHash('sha256').update(JSON.stringify([accounts, folder, category, unreadOnly, sort, pageSize, locale, revision()])).digest('hex');
       const clauses = [`d.account IN (${accounts.map(() => '?').join(',') || 'NULL'})`], params = [...accounts];
-      if (folder === 'starred') clauses.push("d.starred=1 AND d.folder<>'trash'");
+      if (folder === 'starred') clauses.push("d.starred=1 AND d.folder NOT IN ('trash','spam')");
       else if (folder) { clauses.push('d.folder=?'); params.push(folder); }
       if (category !== 'all') { clauses.push('d.category=?'); params.push(category); }
       if (unreadOnly) clauses.push('d.unread=1');
@@ -69,10 +70,10 @@ export function createMailPages(db, revision) {
       const rows = db.prepare(`WITH page AS MATERIALIZED (
         SELECT d.rowid,${order.map(([key], i) => `${key} AS k${i}`).join(',')} FROM search_documents d
         ${['sender', 'subject'].includes(sort) ? 'JOIN messages m ON m.account=d.account AND m.id=d.id' : ''}
-        WHERE ${clauses.join(' AND ')} ORDER BY ${order.map(([key, direction]) => `${key} ${direction}`).join(',')} LIMIT ?)
+        WHERE ${clauses.join(' AND ')} ORDER BY ${order.map(([key, direction]) => `${key} ${direction}`).join(',')} LIMIT ? OFFSET ?)
         SELECT ${projection} AS data,d.account,${order.map((_, i) => `p.k${i}`).join(',')} FROM page p
         JOIN search_documents d ON d.rowid=p.rowid JOIN messages m ON m.account=d.account AND m.id=d.id
-        ORDER BY ${order.map(([, direction], i) => `p.k${i} ${direction}`).join(',')}`).all(...params, pageSize + 1);
+        ORDER BY ${order.map(([, direction], i) => `p.k${i} ${direction}`).join(',')}`).all(...params, pageSize + 1, offset);
       const more = rows.length > pageSize; if (more) rows.pop();
       const last = rows.at(-1), payload = more ? Buffer.from(JSON.stringify({ scope, keys: order.map((_, i) => last[`k${i}`]) })).toString('base64url') : '';
       return { messages: rows.map(row => { const message = messageSummary(JSON.parse(row.data)); return { ...message, accountId: row.account, viewId: JSON.stringify([row.account, message.id]) }; }),

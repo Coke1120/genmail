@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, sync::LazyLock};
 
-pub const FOLDERS: &[&str] = &["inbox", "sent", "drafts", "archive", "trash", "starred"];
+pub const FOLDERS: &[&str] = &[
+    "inbox", "sent", "drafts", "archive", "spam", "trash", "starred",
+];
 const FIELDS: &[&str] = &[
     "from", "to", "subject", "after", "before", "is", "label", "in",
 ];
@@ -232,7 +234,7 @@ pub fn where_clause(
             return Err(Error::invalid("Choose a valid mailbox folder."));
         }
         if value == "starred" {
-            clauses.push("d.starred=1 AND d.folder<>'trash'".into());
+            clauses.push("d.starred=1 AND d.folder NOT IN ('trash','spam')".into());
         } else {
             clauses.push("d.folder=?".into());
             params.push(value.to_owned().into());
@@ -243,9 +245,9 @@ pub fn where_clause(
         folder_clause(folder, &mut clauses, &mut params)?;
     } else if !conditions
         .iter()
-        .any(|c| c.key == "in" && c.value == "trash")
+        .any(|c| c.key == "in" && ["trash", "spam"].contains(&c.value.as_str()))
     {
-        clauses.push("d.folder<>'trash'".into());
+        clauses.push("d.folder NOT IN ('trash','spam')".into());
     }
     for c in conditions {
         match c.key.as_str() {

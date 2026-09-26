@@ -76,7 +76,7 @@ struct NativeMailSearch: View {
                 Toggle("Smart Search (智慧搜尋)", isOn: $smart).toggleStyle(.checkbox)
                 Button("Configure…") { model.settingsTab = "search"; model.showSettings = true }
             }
-            Text("Words use AND; quotes match a phrase. Filters narrow your scope. Trash requires an explicit folder choice. Smart search sends your query to the embedding model when you press Search.").font(.caption).foregroundStyle(.secondary)
+            Text("Gmail labels: choose Current account view and enter the label name. Words use AND; quotes match a phrase. Filters narrow your scope. Trash requires an explicit folder choice. Smart search sends your query to the embedding model when you press Search.").font(.caption).foregroundStyle(.secondary)
         }
     }
     var resultStatus: some View {

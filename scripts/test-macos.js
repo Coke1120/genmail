@@ -10,6 +10,10 @@ try {
   execFileSync('swiftc', ['macos/Sources/MorrowMail/Models.swift', 'macos/Checks/main.swift', '-o', executable], { stdio: 'inherit' });
   execFileSync(executable, [], { stdio: 'inherit' });
   execFileSync('swift', ['build', '--package-path', 'macos'], { stdio: 'inherit' });
+  execFileSync(process.execPath, ['scripts/test-email-reader.js'], { stdio: 'inherit' });
+  const windowChecks = join(directory, 'window-checks');
+  execFileSync('swiftc', ['-D', 'MORROW_WINDOW_CHECKS', '-parse-as-library', 'macos/Sources/MorrowMail/Models.swift', 'macos/Sources/MorrowMail/AppModel.swift', 'macos/Sources/MorrowMail/MorrowMailApp.swift', 'macos/Checks/WindowAssertions.swift', '-o', windowChecks], { stdio: 'inherit' });
+  execFileSync(windowChecks, [], { stdio: 'inherit', timeout: 30000 });
   const bundle = join(directory, 'Checks.app/Contents'), resources = join(bundle, 'Resources'), backend = join(resources, 'backend');
   mkdirSync(join(bundle, 'MacOS'), { recursive: true });
   mkdirSync(backend, { recursive: true });

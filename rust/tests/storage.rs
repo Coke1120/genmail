@@ -155,6 +155,27 @@ fn partial_index_keeps_all_metadata_pages_consistent_during_backfill() {
     let expected = sorts.map(|sort| {
         pages::page(&db, &owners, &json!({"sort":sort}), &[0; 32]).unwrap()["messages"].clone()
     });
+    for (i, sort) in sorts.iter().enumerate() {
+        assert_eq!(
+            pages::page(
+                &db,
+                &owners,
+                &json!({"sort":sort,"offset":5,"pageSize":3}),
+                &[0; 32]
+            )
+            .unwrap()["messages"],
+            json!(&expected[i].as_array().unwrap()[5..8])
+        );
+    }
+    for offset in [
+        json!(-1),
+        json!(1.5),
+        json!("5"),
+        json!(null),
+        json!(200001),
+    ] {
+        assert!(pages::page(&db, &owners, &json!({"offset":offset}), &[0; 32]).is_err());
+    }
     db.conn
         .execute(
             "DELETE FROM search_documents WHERE account=? AND id IN ('same-0','same-4')",

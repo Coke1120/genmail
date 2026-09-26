@@ -59,13 +59,22 @@ struct NativeRustChecks {
     }
 
     @MainActor static func main() async throws {
+        let empty = AppModel()
+        empty.state = .object(["account": .object(["id": .string("demo")]), "accounts": .array([])])
+        try check(!empty.hasMailbox && empty.senderAccounts.isEmpty, "empty app still exposes a demo sender")
+        empty.newDraft()
+        try check(empty.compose == nil && empty.showSettings && empty.settingsTab == "mail", "empty compose did not lead to Add account")
         let model = AppModel()
         defer { model.stop() }
         await model.start()
+        let activity = try await model.request("/activity", mailbox: "")
+        assert(!activity["tasks"].isNull && !activity["checkedAt"].string.isEmpty)
+
         try check(model.baseURL != nil && !model.state.isNull && model.error.isEmpty, "service launch failed: \(model.error)")
         try check(model.dataDirectory.path == ProcessInfo.processInfo.environment["MORROW_DATA_DIR"], "fixture workspace override was not retained")
         try check(Bundle.main.object(forInfoDictionaryKey: "MorrowServiceRuntime") as? String == "rust", "bundle did not select Rust")
         try check(model.accounts.count == 2 && model.account == first, "seeded account migration failed")
+        try check(model.hasMailbox && model.senderAccounts.map(\.id) == [first, second], "real account selection retained the demo sender")
         try check(model.preferences["syncInterval"].number == 0 && !model.policy["enabled"].bool, "fixture background network settings changed")
         try check(model.state["settings"]["oauthClients"]["google"]["configured"].bool, "trusted bundled OAuth client was not loaded")
         try check(model.state["settings"]["oauthClients"]["microsoft"]["configured"].bool, "built-in Microsoft OAuth client was not available")
@@ -123,6 +132,23 @@ struct NativeRustChecks {
         try check(!model.listedMessages.isEmpty && model.listedMessages.allSatisfy { !$0["read"].bool }, "unread filter included read mail")
         model.unreadOnly = false
         print("Native Rust: owner-bound detail/patch and manual unread preservation passed.")
+        try check(await model.loadMailPage(), "inbox reset failed")
+        await model.turnMailPage(next: true)
+        let secondPage = model.listedMessages.map(\.viewID)
+        let secondUnread = model.listedMessages.first { !$0["read"].bool }!
+        model.selectedMessage = secondUnread.viewID
+        await model.loadMessage()
+        try check(model.current?["read"].bool == true && model.selectedMessage == secondUnread.viewID, "reading page two lost its selection")
+        try check(model.mailCursors.count == 2 && model.listedMessages.map(\.viewID) == secondPage, "revision change blanked or reset page two")
+        await model.refreshMailPage()
+        try check(model.mailCursors.count == 2 && model.listedMessages.map(\.viewID) == secondPage && model.current?.viewID == secondUnread.viewID, "refresh did not retain page two and its detail")
+        let nextMessage = model.listedMessages.first { $0.viewID != secondUnread.viewID }!
+        model.selectedMessage = nextMessage.viewID
+        await model.loadMessage()
+        await model.refreshMailPage()
+        try check(model.current?.viewID == nextMessage.viewID && model.mailCursors.count == 2, "switching mail reset the page")
+        print("Native Rust: read/switch keeps page two, visible rows and selected detail.")
+
 
         model.selectedMessage = nil
         model.messageDetail = .null
@@ -196,6 +222,7 @@ struct NativeRustChecks {
         model.state = try await model.request("/settings/policy", method: "POST", body: .object(["enabled": .bool(false)]))
         print("Native Rust: disabled AI permissions, local demo assistance and one-use simulated workflow passed.")
 
+        try await model.selectAccount(first, folder: "inbox")
         let browser = URLSession(configuration: .ephemeral, delegate: RustStopOAuthRedirects(), delegateQueue: nil)
         defer { browser.invalidateAndCancel() }
         for calendar in [false, true] {
@@ -227,7 +254,7 @@ struct NativeRustChecks {
             }
         }
         try await model.reload()
-        try check(model.account == "demo" && model.accounts.count == 2, "uncompleted OAuth changed an account")
+        try check(model.account == first && model.accounts.count == 2, "uncompleted OAuth changed an account")
         try check(model.state["settings"]["calendars"].array.allSatisfy { !$0["connected"].bool }, "uncompleted OAuth created a calendar connection")
         print("Native Rust: trusted OAuth configuration and browser-bound PKCE handoff passed without external requests.")
 

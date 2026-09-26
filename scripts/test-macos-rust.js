@@ -42,7 +42,7 @@ try {
       accessToken: 'fixture-native-rust-access', refreshToken: 'fixture-native-rust-refresh', expiresAt: 4_102_444_800_000,
     }]));
     store.transaction(() => {
-      store.setSettings({ mailAccounts: connections, mail: connections[accounts[0]], activeAccount: accounts[0],
+      store.setSettings({ mailAccounts: connections, mail: connections[accounts[0]], activeAccount: 'demo',
         preferences: { syncInterval: 0, markReadOnOpen: true, sort: 'newest' },
         ai: null, policy: { enabled: false }, calendars: {}, imports: {}, smartSearch: { enabled: false } });
       for (const email of accounts) {

@@ -1,4 +1,5 @@
 import { messageContent } from './footer.js';
+import { sanitizeMessageHTML } from './message-html.js';
 import { recipients } from './recipients.js';
 import { priorityGuide } from './summaries.js';
 import { ImapFlow } from 'imapflow';
@@ -62,7 +63,7 @@ export async function fetchImapPage(mail, { folder = 'inbox', since, before, cur
           remoteId: `imap:${client.mailbox.uidValidity}:${entry.uid}`, providerFolderId: path, providerFolderName: path, fromName: from.name || from.address || 'Unknown sender',
           fromEmail: from.address || '', to: parsed?.to?.text || mail.email, cc: parsed?.cc?.text || '', bcc: parsed?.bcc?.text || '',
           subject: parsed?.subject || entry.envelope?.subject || '(No subject)',
-          body: body.slice(0, 100000), preview: body.replace(/\s+/g, ' ').slice(0, 180),
+          body: body.slice(0, 100000), bodyHtml: sanitizeMessageHTML(parsed?.html), preview: body.replace(/\s+/g, ' ').slice(0, 180),
           date: Number.isNaN(new Date(date).getTime()) ? new Date().toISOString() : new Date(date).toISOString(),
           folder, automated: large || ['auto-submitted', 'list-id', 'list-unsubscribe'].some(key => parsed?.headers.has(key) && parsed.headers.get(key) !== 'no'), read: entry.flags.has('\\Seen'), starred: entry.flags.has('\\Flagged'),
           category: parsed?.headers.has('list-unsubscribe') ? 'newsletters' : 'primary', labels: [],

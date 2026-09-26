@@ -12,21 +12,22 @@ a React / Electron Windows desktop interface and an optional browser development
 shared API contracts.
 
 - `macos/Sources/MorrowMail/`: SwiftUI views, native client, and local service lifecycle.
-- `server/app.js`: mail accounts, request routing, settings, sending, AI, and workflows.
+- `rust/src/`: production desktop service: storage, authenticated API, providers, OAuth, AI, background jobs, search and signed updater. Rust is the default; `server/` remains the browser/development and explicit Node compatibility service. Keep shared contracts compatible.
+- `server/app.js`: Node mail accounts, request routing, settings, sending, AI, and workflows.
 - `server/store.js`: SQLite messages and encrypted settings.
 - `server/providers.js`, `server/integrations.js`: provider integrations.
 - `server/calendar-*.js`: independent calendar connections and idempotent creation.
 - `server/policy.js`, `server/workflows.js`, `shared/features.js`: permissions and behavior catalog.
 - `src/`: shared Windows/browser React interface.
 - `desktop/`: isolated Electron Windows shell and restricted desktop bridge.
-- `tests/`, `macos/Checks/`: backend and native client checks.
+- `rust/tests/`, `tests/`, `macos/Checks/`: Rust/Node contracts, isolated TLS fixtures and native client checks.
 - `scripts/`: development, backup, build, and test commands.
 
 ## Implementation rules
 
 Reuse existing helpers, SwiftUI controls, and installed dependencies. Keep changes
 small and address the shared cause of a bug. Do not add speculative abstractions.
-Do not replace the native interface with a web view.
+Do not replace the native interface with a web view. Only sanitized message HTML uses an isolated reader: no email scripts, forms, frames, service token or script bridge. Block external images by default; HTTPS images require per-message consent and links require destination review. Preserve plain-text fallback and keep HTML out of AI/list metadata. CID images and attachments remain unsupported.
 
 `settings.mailAccounts` maps an email address to its encrypted connection. Legacy
 `settings.mail` is read when the map is absent and retained as a compatibility
@@ -39,12 +40,33 @@ accounts: use `viewId` for UI identity and selection, and keep the original `id`
 for API/provider operations. Every bound mutation carries `X-Genmail-Account`.
 Capture and validate that account before doing work; never route a send or an AI
 request through the globally selected view. `all` is a combined read/sync view,
-not a sending identity. Demo messages do not appear in combined real mail.
+not a sending identity. Demo is internal fixture data, hidden from navigation, settings and sender choices; a fresh workspace shows Add account. Never delete cached user data as an onboarding shortcut.
 
-Replies and saved drafts keep their owner. Only new unsaved messages may choose
-a different From account. Keep uncertain-send records and explicit retry review;
+Replies, forwards, provider-draft copies and saved drafts keep their owner. Reply All excludes the owner and original Bcc; forwarding is unthreaded with blank recipients. Imported Gmail drafts must be copied to a new local draft before editing/sending; leave the provider original unchanged.
+
+Only new unsaved messages may choose a different From account. Keep uncertain-send records and explicit retry review;
 never automatically resend. Calendar creation retains its original request ID
 and payload across retries and app restarts.
+
+Keep provider metadata separate from explicit local changes: Gmail imports use
+`providerSnapshot` and server-written `localOverrides`. Never trust client-supplied
+override markers. Provider moves use actual resulting labels, preserve stable local
+identity and clear only the applicable local folder override. Gmail refresh covers
+five bounded scopes; All Mail history excludes Spam/Trash and is not a complete mirror.
+
+History retry is only for transient read-fetch network/429/5xx failures, at most
+three delays (30/120/300 seconds) with the same checkpoint. Never auto-retry sending,
+calendar creation, authentication, malformed/cyclic cursors or database failures.
+Public import errors come from the fixed allowlist, not stored provider text;
+`nextRetryAt` and `retryCount` are safe status metadata. Activity is observational
+and must not trigger AI/provider work or invent coverage percentages.
+
+General preferences auto-save as serialized field diffs; preserve edits made during
+an in-flight save and expose retry on failure. Credentials, permissions, paid model
+batches and learned-style application keep their explicit review/save controls.
+Native read-state refresh retains page, rows and selection. Closing the main macOS
+window keeps the scene/service/unsaved work alive; Dock reopens it, while quitting
+retains unsaved-edit and active-write guards.
 
 Enforce AI permissions on the server before constructing context. Keep accounts
 separate, redact unchecked fields, and discard results when applicable permissions
@@ -59,20 +81,25 @@ never connection secrets.
 
 ## Build and verify
 
-Use Node 22.13+ and Apple's Swift command-line tools on macOS. No new test framework
+Use Node 22.13+, Rust 1.98+ with rustfmt/clippy, and Apple's Swift command-line tools on macOS. No new test framework
 is needed. Run checks appropriate to the change:
 
 ```sh
 npm ci                       # install pinned dependencies when needed
+npm run rust:test            # Rust fmt/clippy/tests/builds and Node↔Rust contracts
 npm run check                # backend tests and React production build
 npm run macos:test           # Swift model checks, UI compilation, native API integration
+npm run macos:rust:test      # actual native client with production Rust service
 npm run macos:build          # self-contained app in build/macos/Morrow Mail.app
 npm run windows:build        # Windows x64 host: self-contained Electron app
 npm run desktop:test -- --packaged  # Windows packaged smoke test
 npm run updater:test               # isolated install/restart acceptance on macOS/Windows
+npm run updater:rust-upgrade:test   # original installer → actual Rust app, restart and backup
 codesign --verify --deep --strict 'build/macos/Morrow Mail.app'
 plutil -lint 'build/macos/Morrow Mail.app/Contents/Info.plist'
 ```
+
+Avoid parallel builds targeting the same output. Inspect free disk space before full builds; `CARGO_INCREMENTAL=0` reduces local accumulation. Generated build cleanup must never touch private workspaces.
 
 Account-routing changes need coverage for duplicate IDs, combined views,
 account-specific sending/AI, reconnect/migration, and disconnect isolation.
@@ -101,7 +128,7 @@ provider verification where applicable. Do not claim error-free operation.
 
 Manual provider organization is separate from local patches and simulations. Require
 an explicit mailbox header, server-validated destination, confirmation and provider
-write permission. IMAP moves require MOVE + UIDPLUS and matching UIDVALIDITY.
+write permission. Gmail Spam and Outlook Junk are reviewed provider moves; phishing reports and sender blocking remain provider-site actions, never simulated success. IMAP moves require MOVE + UIDPLUS and matching UIDVALIDITY.
 Keep the local message ID stable while recording the provider's destination ID.
 To/Cc/Bcc belong to the send fingerprint and uncertain draft; never drop Bcc from
 the provider delivery submission or expose it in SMTP recipient-visible headers.

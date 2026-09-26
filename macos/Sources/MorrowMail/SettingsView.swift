@@ -6,10 +6,17 @@ struct NativeSettingsView: View {
     @Environment(\.dismiss) var dismiss
     @State private var values: JSON = .null
     @State private var baseline: JSON = .null
+    @State private var preferenceTask: Task<Void, Never>?
+    @State private var preferenceSaving = false
+    @State private var preferenceError = ""
+    @State private var visible = false
+    @State private var mailSnapshot: JSON = .null
+    @State private var mailStatusVersion = 0
+    @State private var importRefreshError = ""
     @State private var searchDirty = false
     @State private var searchBusy = false
     @State private var learningDirty = false
-    @State private var importSettings: JSON = .object(["months": .number(3), "inbox": .bool(true), "sent": .bool(true)])
+    @State private var importSettings: JSON = .object(["months": .number(3), "inbox": .bool(true), "sent": .bool(true), "allMail": .bool(true)])
     @State private var provider = "google"
     @State private var mailOAuth: JSON = .object([:])
     @State private var calendarOAuth: JSON = .object([:])
@@ -20,15 +27,17 @@ struct NativeSettingsView: View {
     @State private var downloadState: JSON = .null
     @State private var includePrereleases = (Bundle.main.object(forInfoDictionaryKey: "MorrowReleaseVersion") as? String ?? "").contains("-")
     private let tabs = [("general", "General", "slider.horizontal.3"), ("mail", "Mail", "envelope"), ("learning", "Learning", "text.badge.star"), ("search", "Search", "magnifyingglass"), ("model", "Model", "cpu"), ("permissions", "AI Permissions", "checkmark.shield"), ("calendar", "Calendar", "calendar"), ("about", "About", "info.circle")]
+    private let generalKeys = ["displayName", "signature", "signatureFormat", "theme", "density", "replyTone", "language", "translationLanguage", "syncInterval", "markReadOnOpen"]
+    private var displayedAccounts: [JSON] { mailSnapshot.isNull ? model.accounts : mailSnapshot.array }
     var dirty: Bool { searchDirty || learningDirty || values != baseline || mailOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } || calendarOAuth.object.values.contains { $0.object.values.contains(where: \.nonempty) } }
     var body: some View {
         VStack(spacing: 0) {
-            HStack { Text("Your workspace").font(.title2.bold()); Spacer(); if dirty { Text("Unsaved changes").font(.caption).foregroundStyle(.secondary) }; Button("Done") { close() }.keyboardShortcut(.cancelAction).disabled(model.busy || searchBusy) }.padding(22)
+            HStack { Text("Your workspace").font(.title2.bold()); Spacer(); if dirty { Text("Unsaved changes").font(.caption).foregroundStyle(.secondary) }; Button("Done") { close() }.keyboardShortcut(.cancelAction).disabled(model.busy || searchBusy || preferenceSaving) }.padding(22)
             Divider()
             HStack(spacing: 0) {
                 List(tabs, id: \.0, selection: Binding(get: { model.settingsTab }, set: { next in
-                    if searchBusy { return }
-                    if (learningDirty || searchDirty) && !model.confirmDiscard("Discard unsaved learning or search settings?") { return }
+                    if searchBusy || model.busy || preferenceSaving { return }
+                    if (learningDirty || searchDirty) && !model.confirmDiscard("Discard unsaved learning, search or embedding settings?") { return }
                     model.settingsTab = next
                 })) { tab in Label(tab.1, systemImage: tab.2).tag(tab.0) }.listStyle(.sidebar).frame(width: 165)
                 ScrollView {
@@ -37,13 +46,16 @@ struct NativeSettingsView: View {
                         case "mail": mailPage
                         case "learning": StyleLearningView(dirty: $learningDirty)
                         case "search": NativeSearchSettingsView(dirty: $searchDirty, operationBusy: $searchBusy)
-                        case "model": modelPage
+                        case "model":
+                            modelPage.disabled(searchBusy)
+                            Divider()
+                            NativeSearchSettingsView(dirty: $searchDirty, operationBusy: $searchBusy, presentation: .model)
                         case "permissions": permissionsPage
                         case "calendar": calendarPage
                         case "about": aboutPage
                         default: generalPage
                         }
-                    }.padding(28).frame(maxWidth: .infinity, alignment: .leading).disabled(model.busy)
+                    }.padding(28).frame(maxWidth: .infinity, alignment: .leading).disabled(model.busy || (preferenceSaving && model.settingsTab != "general"))
                 }
             }
             Divider()
@@ -54,20 +66,29 @@ struct NativeSettingsView: View {
             }.padding(14).frame(minHeight: 45)
         }.frame(width: 900, height: min(700, (NSScreen.main?.visibleFrame.height ?? 850) - 100))
         .textFieldStyle(.roundedBorder)
-        .interactiveDismissDisabled(dirty || model.busy || searchBusy)
-        .onAppear { initialize() }
+        .interactiveDismissDisabled(dirty || model.busy || searchBusy || preferenceSaving)
+        .onAppear { initialize(); visible = true }
         .onChange(of: searchDirty) { _ in model.dirty("settings", dirty) }
         .onChange(of: searchBusy) { _ in model.dirty("search-index", searchBusy) }
         .onChange(of: learningDirty) { _ in model.dirty("settings", dirty) }
         .onChange(of: values) { _ in model.dirty("settings", dirty) }
+        .onChange(of: values["preferences"]) { _ in preferenceError = ""; schedulePreferences() }
+        .onChange(of: model.busy) { _ in schedulePreferences() }
+        .onChange(of: searchBusy) { _ in schedulePreferences() }
+        .onChange(of: model.state) { _ in mailStatusVersion += 1; mailSnapshot = .null }
         .onChange(of: mailOAuth) { _ in model.dirty("settings", dirty) }
         .onChange(of: calendarOAuth) { _ in model.dirty("settings", dirty) }
-        .onDisappear { model.dirty("settings", false); model.dirty("search-index", false) }
+        .onDisappear { visible = false; preferenceTask?.cancel(); model.dirty("settings", false); model.dirty("search-index", false) }
         .task(id: model.settingsTab) {
-            guard model.settingsTab == "about" else { return }
+            let tab = model.settingsTab
+            guard ["about", "mail"].contains(tab) else { return }
             while !Task.isCancelled {
-                if let result = try? await model.request("/updates/status") { downloadState = result }
-                do { try await Task.sleep(nanoseconds: 1_500_000_000) } catch { return }
+                if tab == "about" {
+                    if let result = try? await model.request("/updates/status") { downloadState = result }
+                } else if NSApp?.isActive == true && !model.busy && !preferenceSaving {
+                    await refreshImportProgress()
+                }
+                do { try await Task.sleep(nanoseconds: tab == "mail" ? 3_000_000_000 : 1_500_000_000) } catch { return }
             }
         }
     }
@@ -112,7 +133,7 @@ struct NativeSettingsView: View {
                             let result = try await model.request("/signature/preview", method: "POST", body: values["preferences"].picking(["signature", "signatureFormat"]))
                             footerPreview = result["footer"]
                         }
-                    }
+                    }.disabled(preferenceSaving)
                     if !footerPreview.isNull { FooterPreview(footer: footerPreview) }
                 }.padding(8)
                 .onChange(of: values["preferences"]["signature"]) { _ in footerPreview = .null }
@@ -128,7 +149,12 @@ struct NativeSettingsView: View {
             field("Target translation language (blank uses preferred language)", "preferences", "translationLanguage")
             Text("These control AI output, not the app’s interface language.").font(.caption).foregroundStyle(.secondary)
             Picker("Sync all accounts while Morrow is open", selection: number("preferences", "syncInterval")) { Text("Manually").tag(0); ForEach([1, 5, 15, 30], id: \.self) { Text("Every \($0) minutes").tag($0) } }
-            Button("Save Preferences") { save("preferences") }.buttonStyle(.borderedProminent)
+            HStack {
+                if preferenceSaving { ProgressView().controlSize(.small) }
+                Text(preferenceSaving ? "Saving preferences…" : !preferenceError.isEmpty ? "Changes not saved" : preferencePatch().object.isEmpty ? "Preferences saved automatically" : "Waiting to save…").font(.callout).foregroundStyle(.secondary)
+                if !preferenceError.isEmpty { Button("Retry Saving") { Task { await savePreferences() } }.disabled(preferenceSaving) }
+            }
+            if !preferenceError.isEmpty { Text(preferenceError).font(.callout).foregroundStyle(.red).textSelection(.enabled) }
         }
     }
     var modelPage: some View {
@@ -213,16 +239,24 @@ struct NativeSettingsView: View {
     }
     var mailPage: some View {
         Group {
-            SectionHeading(title: "Bring your inbox along", detail: "Connect multiple Gmail, Outlook, or IMAP accounts. View them separately or together. Choose a history range and folders. Imports continue while Morrow is open, without AI calls.")
+            SectionHeading(title: "Bring your inbox along", detail: "Connect multiple Gmail, Outlook, or IMAP accounts. Sync checks recent mail in bounded batches. History imports fill the chosen date window while Morrow is open, without AI calls.")
             GroupBox("Import history for new connections or Start Import below") {
                 VStack(alignment: .leading, spacing: 12) {
+                    ActivityStatusView(value: model.activity, error: model.activityError)
                     Picker("History range", selection: Binding(get: { Int(importSettings["months"].number) }, set: { importSettings["months"] = .number(Double($0)) })) { ForEach([1, 3, 6, 12], id: \.self) { Text("Last \($0) month(s)").tag($0) } }
-                    ForEach(["inbox", "sent"], id: \.self) { folder in Toggle(folder.capitalized, isOn: Binding(get: { importSettings[folder].bool }, set: { importSettings[folder] = .bool($0) })).toggleStyle(.checkbox) }
-                    Text("Choose at least one folder. Cached mail is retained when choosing a shorter range. IMAP Sent requires the provider’s Sent special-use folder. Style learning is a separate opt-in in Learning.").font(.caption).foregroundStyle(.secondary)
-                    Button("Refresh Import Progress") { run { try await model.reload() } }
+                    if provider == "google" || displayedAccounts.contains(where: { $0["provider"].string == "google" }) {
+                        Toggle("All Gmail mail (Inbox, Sent, Drafts, Starred and labels; excluding Spam/Trash)", isOn: Binding(get: { importSettings["allMail"].bool }, set: { importSettings["allMail"] = .bool($0) })).toggleStyle(.checkbox)
+                    }
+                    if provider != "google" || !importSettings["allMail"].bool || displayedAccounts.contains(where: { $0["provider"].string != "google" }) {
+                        Text("Outlook / IMAP, or Gmail with All Gmail mail off:").font(.caption).foregroundStyle(.secondary)
+                        ForEach(["inbox", "sent"], id: \.self) { folder in Toggle(folder.capitalized, isOn: Binding(get: { importSettings[folder].bool }, set: { importSettings[folder] = .bool($0) })).toggleStyle(.checkbox) }
+                    }
+                    Text("Choose All Gmail mail or at least one folder. Only mail inside the chosen date window is imported; cached mail is retained when choosing a shorter range. IMAP Sent requires the provider’s Sent special-use folder. Style learning is a separate opt-in in Learning.").font(.caption).foregroundStyle(.secondary)
+                    Button("Refresh Import Progress") { run { await refreshImportProgress() } }
+                    if !importRefreshError.isEmpty { Text(importRefreshError).font(.caption).foregroundStyle(.orange) }
                 }.padding(8)
             }
-            ForEach(model.accounts) { account in
+            ForEach(displayedAccounts) { account in
                 GroupBox {
                     VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -242,13 +276,16 @@ struct NativeSettingsView: View {
                         }
                     }
                     if !account["import"].isNull {
-                        Text("Import: \(account["import"]["status"].string) · \(Int(account["import"]["imported"].number)) new messages · \(Int(account["import"]["options"]["months"].number)) months").font(.caption)
+                        Text(importProgress(account["import"])).font(.caption)
                         if account["import"]["error"].nonempty { Text(account["import"]["error"].string).font(.caption).foregroundStyle(.orange) }
-                    }
+                        if account["import"]["phase"].string == "retrying" && account["import"]["nextRetryAt"].nonempty { Text("Next retry: \(dateLabel(account["import"]["nextRetryAt"].string)). You can pause this import.").font(.caption) }
+                        if account["import"]["recoveryAction"].string == "reconnect" { Text("Reconnect this account using the sign-in form below, then start a new import.").font(.caption) }
+                        if account["import"]["recoveryAction"].string == "restart" { Text("Start a new import below to replace the unusable checkpoint. Downloaded mail is retained.").font(.caption) }
+                    } else { Text("History import has not started.").font(.caption).foregroundStyle(.secondary) }
                     HStack {
-                        Button("Start Import with Chosen Range") { importAction("start", account: account.id) }.disabled(!importSettings["inbox"].bool && !importSettings["sent"].bool)
-                        if !account["import"].isNull && account["import"]["status"].string != "complete" {
-                            Button(account["import"]["status"].string == "running" ? "Pause" : "Resume") { importAction(account["import"]["status"].string == "running" ? "pause" : "resume", account: account.id) }
+                        Button(account["provider"].string == "google" && importSettings["allMail"].bool ? "Start All Gmail Import" : "Start Import with Chosen Range") { importAction("start", account: account) }.disabled(!canImport(account["provider"].string))
+                        if let action = importControl(account["import"]) {
+                            Button(action == "pause" ? "Pause" : "Resume from Checkpoint") { importAction(action, account: account) }
                         }
                     }
                     }.padding(6)
@@ -256,7 +293,6 @@ struct NativeSettingsView: View {
             }
             HStack {
                 Button("Combined Inbox") { run { try await model.selectAccount("all", folder: "inbox") } }.disabled(model.accounts.isEmpty)
-                Button("Demo Workspace") { run { try await model.selectAccount("demo", folder: "inbox") } }
                 Button("Add Another Account") {
                     if values["mail"] != baseline["mail"] && !model.confirmDiscard() { return }
                     values["mail"] = .object(["email": .string(""), "imapHost": .string(""), "imapPort": .number(993), "smtpHost": .string(""), "smtpPort": .number(465), "password": .string("")]); baseline["mail"] = values["mail"]
@@ -272,7 +308,7 @@ struct NativeSettingsView: View {
                 HStack { Text("IMAP TLS port"); TextField("993", value: number("mail", "imapPort"), format: .number.grouping(.never)).frame(width: 100) }
                 field("SMTP hostname", "mail", "smtpHost")
                 Picker("SMTP security", selection: number("mail", "smtpPort")) { Text("465 · TLS").tag(465); Text("587 · STARTTLS").tag(587) }
-                Button("Connect & Sync") { save("mail") }.buttonStyle(.borderedProminent)
+                Button("Connect & Sync") { save("mail") }.buttonStyle(.borderedProminent).disabled(!canImport("imap"))
             } else {
                 oauthForm(provider, calendar: false)
             }
@@ -332,14 +368,14 @@ struct NativeSettingsView: View {
                         let path = calendar ? "/calendars/\(id)/connect" : "/oauth/\(id)/start"
                         var body = credentials.wrappedValue.picking(useDefault ? ["organize"] : ["clientId", "clientSecret", "organize"])
                         if useDefault { body["useDefaultClient"] = .bool(true) }
-                        if !calendar { body["importOptions"] = importSettings }
+                        if !calendar { body["importOptions"] = importOptions(for: id) }
                         let result = try await model.request(path, method: "POST", body: body)
                         try model.openOAuth(result, provider: id, calendar: calendar)
                         credentials.wrappedValue = .object([:]); status = "Browser opened. Complete sign-in, then return to Morrow to refresh your connections."
                     }
                 } label: {
                     Label("Sign in with \(id == "google" ? "Google" : "Microsoft") in browser", systemImage: "arrow.up.right.square")
-                }.buttonStyle(.borderedProminent).disabled(!useDefault && (clientID.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty || (id == "google" && secret.wrappedValue.isEmpty)))
+                }.buttonStyle(.borderedProminent).disabled((!calendar && !canImport(id)) || (!useDefault && (clientID.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty || (id == "google" && secret.wrappedValue.isEmpty))))
                 Button("Refresh Status") { run { try await model.reload(); status = "Connection status refreshed." } }
             }
             Text(useDefault ? (id == "google" ? "If Google says access is restricted to test users, the publisher must add your account or complete app verification." : "Your organization may require administrator approval to connect.") : "The sign-in button becomes available after the required credentials are entered.").font(.caption).foregroundStyle(.secondary)
@@ -409,14 +445,94 @@ struct NativeSettingsView: View {
             Text("Version \(Bundle.main.object(forInfoDictionaryKey: "MorrowReleaseVersion") as? String ?? "development") · macOS \(Bundle.main.object(forInfoDictionaryKey: "LSMinimumSystemVersion") as? String ?? "13.5") or later · MIT license").font(.caption).foregroundStyle(.secondary)
         }
     }
-    func importAction(_ action: String, account: String) {
-        run { model.state = try await model.request("/imports/\(action)", method: "POST", body: action == "start" ? importSettings : .object([:]), mailbox: account) }
+    func importOptions(for provider: String) -> JSON {
+        var options = importSettings
+        options["allMail"] = .bool(provider == "google" && importSettings["allMail"].bool)
+        return options
+    }
+    func canImport(_ provider: String) -> Bool {
+        let options = importOptions(for: provider)
+        return options["allMail"].bool || options["inbox"].bool || options["sent"].bool
+    }
+    func importProgress(_ job: JSON) -> String {
+        let labels = ["running": "History import in progress", "paused": "History import paused", "failed": "History import stopped after an error", "interrupted": "History import interrupted", "stopped": "History import stopped", "complete": "Chosen history range completed", "completed": "Chosen history range completed"]
+        let runningLabels = ["retrying": "Temporary connection problem — waiting to retry", "queued": "History import queued — waiting for the next page"]
+        let label = (job["status"].string == "running" ? runningLabels[job["phase"].string] : nil) ?? labels[job["status"].string] ?? "History import status unknown"
+        var details = [label, "\(Int(job["imported"].number)) new messages", "\(Int(job["options"]["months"].number)) months"]
+        if job["currentFolder"].nonempty { details.append(job["currentFolder"].string == "all" ? "All Gmail mail" : job["currentFolder"].string.capitalized) }
+        if !job["pages"].isNull { details.append("\(Int(job["pages"].number)) pages") }
+        if !job["processed"].isNull { details.append("\(Int(job["processed"].number)) checked") }
+        return details.joined(separator: " · ")
+    }
+    func importControl(_ job: JSON) -> String? {
+        if job["status"].string == "running" { return "pause" }
+        if ["reconnect", "restart"].contains(job["recoveryAction"].string) { return nil }
+        return ["paused", "failed", "interrupted", "stopped"].contains(job["status"].string) ? "resume" : nil
+    }
+    func refreshImportProgress() async {
+        let version = mailStatusVersion
+        do {
+            let result = try await model.request("/state", mailbox: model.account)
+            guard case .array = result["accounts"] else { throw APIError("Incomplete import status.") }
+            guard !Task.isCancelled, visible, version == mailStatusVersion else { return }
+            mailSnapshot = result["accounts"]; importRefreshError = ""
+        } catch {
+            if !Task.isCancelled, visible, version == mailStatusVersion { importRefreshError = "Import status could not be refreshed. Showing last known status." }
+        }
+    }
+    func preferencePatch() -> JSON {
+        var patch = JSON.object([:])
+        for key in generalKeys where values["preferences"][key] != baseline["preferences"][key] { patch[key] = values["preferences"][key] }
+        if patch.object["signature"] != nil || patch.object["signatureFormat"] != nil {
+            patch["signature"] = values["preferences"]["signature"]; patch["signatureFormat"] = values["preferences"]["signatureFormat"]
+        }
+        return patch
+    }
+    func schedulePreferences() {
+        preferenceTask?.cancel(); preferenceTask = nil
+        guard visible, !preferenceSaving, !model.busy, !searchBusy, preferenceError.isEmpty, !preferencePatch().object.isEmpty else { return }
+        preferenceTask = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: 600_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            preferenceTask = nil
+            await savePreferences()
+        }
+    }
+    @discardableResult
+    func savePreferences() async -> Bool {
+        guard !preferenceSaving, !model.busy, !searchBusy else { return false }
+        preferenceTask?.cancel(); preferenceTask = nil
+        let sent = preferencePatch()
+        guard !sent.object.isEmpty else { return true }
+        preferenceSaving = true; preferenceError = ""; model.dirty("preferences-save", true)
+        defer { preferenceSaving = false; model.dirty("preferences-save", false); if visible { schedulePreferences() } }
+        do {
+            let result = try await model.request("/settings/preferences", method: "POST", body: sent)
+            let received = result["settings"]["preferences"]
+            guard !received.isNull else { throw APIError("Preferences could not be saved.") }
+            guard visible else { return false }
+            let sameFooter = values["preferences"]["signature"] == sent["signature"] && values["preferences"]["signatureFormat"] == sent["signatureFormat"]
+            for key in sent.object.keys {
+                baseline["preferences"][key] = received[key]
+                if values["preferences"][key] == sent[key] && (!["signature", "signatureFormat"].contains(key) || sameFooter) { values["preferences"][key] = received[key] }
+                model.state["settings"]["preferences"][key] = received[key]
+            }
+            if sent.object["signature"] != nil { model.state["settings"]["footer"] = result["settings"]["footer"] }
+            model.dirty("settings", dirty)
+            return true
+        } catch {
+            if visible { preferenceError = error.localizedDescription + " Your changes are still here. Edit them or retry." }
+            return false
+        }
+    }
+    func importAction(_ action: String, account: JSON) {
+        let body = action == "start" ? importOptions(for: account["provider"].string) : .object([:])
+        run { model.state = try await model.request("/imports/\(action)", method: "POST", body: body, mailbox: account.id) }
     }
     func save(_ group: String) {
         run {
-            let result = try await model.request("/settings/\(group)", method: "POST", body: group == "mail" ? .object(values[group].object.merging(["importOptions": importSettings]) { _, new in new }) : values[group])
+            let result = try await model.request("/settings/\(group)", method: "POST", body: group == "mail" ? .object(values[group].object.merging(["importOptions": importOptions(for: "imap")]) { _, new in new }) : values[group])
             model.state = result
-            if group == "preferences" { values[group] = result["settings"][group] }
             if group == "ai" { values[group]["apiKey"] = .string(""); values[group]["clearApiKey"] = .bool(false) }
             if group == "mail" { values[group]["password"] = .string("") }
             baseline[group] = values[group]; model.dirty("settings", dirty)
@@ -427,7 +543,13 @@ struct NativeSettingsView: View {
         localError = ""; status = ""
         model.perform { do { try await work() } catch { localError = error.localizedDescription } }
     }
-    func close() { guard !searchBusy else { return }; if !dirty || model.confirmDiscard() { dismiss() } }
+    func close() {
+        guard !searchBusy, !model.busy, !preferenceSaving else { return }
+        Task { @MainActor in
+            guard await savePreferences(), preferencePatch().object.isEmpty else { return }
+            if !dirty || model.confirmDiscard() { dismiss() }
+        }
+    }
     func backup() {
         let panel = NSSavePanel(); panel.title = "Back Up Morrow Mail"; panel.nameFieldStringValue = "Morrow-Backup-" + Date().formatted(.iso8601.year().month().day().dateSeparator(.dash))
         panel.canCreateDirectories = true

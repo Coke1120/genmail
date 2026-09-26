@@ -153,3 +153,39 @@ test('semantic queries discard results when permissions, connections or mail cha
     await assert.rejects(result, { status: 409 }, change);
   }
 });
+
+test('embedding connection probe validates unsaved settings without mail, writes or credential forwarding', async t => {
+  const f = fixture(t), seen = [];
+  let invalid = false;
+  const server = createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port, origin = `http://127.0.0.1:${port}`;
+  const app = createApp({ store: f.store, port, appUrl: origin, nativeToken: 'probe-fixture-token', services: {
+    embed: async (config, input) => { seen.push({ config, input }); return invalid ? [[0, 0]] : [[1, 2, 3]]; },
+  } }); server.on('request', app);
+  t.after(async () => { await app.locals.smartSearch.stop(); await new Promise(resolve => server.close(resolve)); });
+  const request = async (body, headers = {}) => {
+    const response = await fetch(origin + '/api/search/test', { method: 'POST', headers: { Authorization: 'Bearer probe-fixture-token', 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    return { status: response.status, data: await response.json() };
+  };
+  app.locals.smartSearch.update({ baseUrl: 'https://embedding.example/v1', model: 'saved-model', apiKey: 'saved-fixture-key' });
+  f.store.setSettings({ policy: { enabled: false } });
+  const before = f.store.getSettings();
+  const input = { baseUrl: 'https://embedding.example/v1', model: 'unsaved-model', protocol: 'openai', apiKey: '' };
+  assert.equal((await request(input, { Authorization: '' })).status, 401);
+  assert.equal((await request(input, { Origin: 'https://hostile.invalid' })).status, 403);
+  const result = await request(input);
+  assert.deepEqual(result, { status: 200, data: { ok: true, dimensions: 3 } });
+  assert.equal(seen[0].config.model, 'unsaved-model'); assert.equal(seen[0].config.apiKey, 'saved-fixture-key');
+  assert.deepEqual(seen[0].input, ['Morrow Mail embedding connection test.']);
+  assert.equal((await request({ ...input, baseUrl: 'https://different.example', protocol: 'ollama' })).status, 200);
+  assert.equal(seen[1].config.apiKey, ''); assert.equal(seen[1].config.protocol, 'ollama');
+  assert.equal((await request({ ...input, clearApiKey: true })).status, 200); assert.equal(seen[2].config.apiKey, '');
+  const count = seen.length;
+  for (const change of [{ model: '' }, { baseUrl: 'http://remote.invalid' }, { apiKey: 'bad\r\nkey' }, { input: 'private body' }, { enabled: true }]) assert.equal((await request({ ...input, ...change })).status, 400);
+  assert.equal(seen.length, count);
+  invalid = true;
+  const failure = await request(input);
+  assert.equal(failure.status, 502); assert.doesNotMatch(JSON.stringify(failure.data), /saved-fixture-key/);
+  assert.deepEqual(f.store.getSettings(), before);
+  assert.equal(f.store.search.query('SELECT count(*) n FROM search_vectors')[0].n, 0);
+});

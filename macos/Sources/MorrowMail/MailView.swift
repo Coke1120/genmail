@@ -3,7 +3,12 @@ import AppKit
 
 struct MailWorkspace: View {
     @AppStorage("collapsedMailAccounts") private var collapsedAccounts = "[]"
+    @AppStorage("mailReaderLayout") private var readerLayout = "right"
+    @State private var columns: NavigationSplitViewVisibility = .all
+    @State private var previousColumns: NavigationSplitViewVisibility = .all
+    @State private var expandedReader = false
     @EnvironmentObject var model: AppModel
+    private var layout: String { expandedReader ? "focus" : ["right", "bottom", "focus"].contains(readerLayout) ? readerLayout : "right" }
     var filtered: [JSON] {
         if !model.searchResponse.isNull { return model.searchResponse["messages"].array }
         return model.listedMessages
@@ -16,15 +21,19 @@ struct MailWorkspace: View {
                 VStack { EmptyPane(title: "Morrow couldn’t start", detail: model.error, symbol: "exclamationmark.triangle"); Button("Try Again") { Task { await model.start() } }.padding(.bottom, 40) }
             } else {
               VStack(spacing: 0) {
-                NavigationSplitView {
+                NavigationSplitView(columnVisibility: $columns) {
                     sidebar.navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
                 } detail: {
-                    if model.section == "studio" {
+                    if model.section != "calendar" && !model.hasMailbox {
+                        VStack(spacing: 16) {
+                            EmptyPane(title: model.accounts.isEmpty ? "Add your first account" : "Choose a mailbox", detail: "Connect Gmail, Outlook, or an IMAP account to start reading your mail.", symbol: "envelope.badge")
+                            Button("Add account") { model.settings("mail") }.buttonStyle(.borderedProminent)
+                        }.padding(30)
+                    } else if model.section == "studio" {
                         if model.combined {
                             VStack(spacing: 16) {
                                 EmptyPane(title: "Choose an account for AI Studio", detail: "Each mailbox has its own AI context, skills, and activity.", symbol: "envelope.badge.shield.half.filled")
                                 ForEach(model.accounts) { account in Button(account["email"].string) { model.perform { try await model.selectAccount(account.id) } } }
-                                Button("Use Demo Workspace") { model.perform { try await model.selectAccount("demo") } }
                             }.padding(30)
                         } else { StudioView().id(model.account) }
                     }
@@ -32,41 +41,82 @@ struct MailWorkspace: View {
                     else {
                         VStack(spacing: 0) {
                           NativeMailSearch().id(model.account + ":" + model.section)
-                          HSplitView {
-                            messageList.frame(minWidth: 260, idealWidth: 310, maxWidth: 360)
-                            if let message = model.current {
-                                if model.messageDetail.viewID == message.viewID { MessageReader(message: message).frame(minWidth: 320) }
-                                else {
-                                    VStack {
-                                        if model.error.isEmpty { ProgressView("Loading message…") }
-                                        else { Button("Retry loading message") { Task { await model.loadMessage() } } }
-                                    }.frame(minWidth: 320, maxWidth: .infinity)
-                                }
-                            }
-                            else { EmptyPane(title: "A little room to think", detail: "Choose a message to read, or compose something new.", symbol: "envelope.open").frame(minWidth: 320) }
-                          }
+                          readingPanes
                         }
                     }
                 }
                 .toolbar {
                     ToolbarItemGroup {
+                        if mailFolders.contains(model.section) && model.hasMailbox {
+                            Menu {
+                                Picker("Reading layout", selection: $readerLayout) {
+                                    Label("Reader on Right", systemImage: "rectangle.lefthalf.inset.filled").tag("right")
+                                    Label("Reader Below", systemImage: "rectangle.bottomhalf.inset.filled").tag("bottom")
+                                    Label("Focus Reading", systemImage: "rectangle").tag("focus")
+                                }
+                            } label: { Label("Reading Layout", systemImage: "rectangle.split.2x1") }.help("Choose right, bottom, or focused reading")
+                            if layout == "focus" && model.current != nil {
+                                Button { leaveExpandedReader(); model.selectedMessage = nil; model.messageDetail = .null } label: { Label("Back to Messages", systemImage: "chevron.left") }.help("Back to the message list").disabled(!model.canNavigate)
+                            }
+                            Button { toggleExpandedReader() } label: {
+                                Label(expandedReader ? "Restore Panes" : "Expand Reader", systemImage: expandedReader ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            }.help(expandedReader ? "Restore the sidebar and message list" : "Give this message the full window width").disabled(model.current == nil)
+                        }
                         if model.busy { ProgressView().controlSize(.small) }
-                        Button { model.perform { try await model.sync() } } label: { Label("Sync Mail", systemImage: "arrow.clockwise") }.disabled(!model.canNavigate).help("Sync latest 50 messages per selected import folder")
-                        Button { model.newDraft() } label: { Label("Compose", systemImage: "square.and.pencil") }.disabled(model.busy).help("New message (⌘N)")
+                        Button { model.perform { try await model.sync() } } label: { Label("Sync Mail", systemImage: "arrow.clockwise") }.disabled(!model.canNavigate || !model.hasMailbox).help("Refresh recent mail; Gmail checks Inbox, Sent, Drafts, Starred and All Mail")
+                        Button { model.newDraft() } label: { Label("Compose", systemImage: "square.and.pencil") }.disabled(model.busy || !model.hasMailbox).help("New message (⌘N)")
                     }
                 }
+                    ActivityStatusView(value: model.activity, error: model.activityError, onOpenSettings: { model.settings("mail") }).padding(.horizontal, 12).padding(.vertical, 5).background(.bar)
                     if !model.error.isEmpty { statusBar(model.error, error: true) }
                     else if !model.notice.isEmpty { statusBar(model.notice, error: false) }
                     else if model.busy { HStack { ProgressView().controlSize(.small); Text("Working…").foregroundStyle(.secondary); Spacer() }.padding(9).background(.bar) }
               }
             }
         }
-        .task(id: model.mailQueryKey) { await model.loadMailPage() }
-        .task(id: (model.current?.viewID ?? "") + model.state["revision"].string) { await model.loadMessage() }
+        .task(id: model.mailQueryKey) { if model.hasMailbox { await model.refreshMailPage() } }
+        .task(id: (model.selectedMessage ?? "") + model.state["revision"].string) { await model.loadMessage() }
         .onChange(of: model.section) { section in if section != "studio" { model.selectedMessage = nil; model.messageDetail = .null }; model.mailPage = .null }
+        .onChange(of: readerLayout) { _ in leaveExpandedReader() }
+        .onChange(of: model.selectedMessage) { selection in if selection == nil { leaveExpandedReader() } }
         .sheet(item: $model.compose) { draft in ComposeView(initial: draft).environmentObject(model) }
         .sheet(item: $model.organizing) { message in OrganizeMailView(message: message).environmentObject(model) }
         .sheet(isPresented: $model.showSettings) { NativeSettingsView().environmentObject(model) }
+    }
+    private var readingPanes: some View {
+        // Keep the reader in the same container when layouts change, including its AI task state.
+        HSplitView {
+            if layout == "right" || (layout == "focus" && model.current == nil) {
+                messageList.frame(minWidth: 260, idealWidth: 310, maxWidth: layout == "focus" ? .infinity : 520)
+            }
+            VSplitView {
+                if layout == "bottom" { messageList.frame(minHeight: 160, idealHeight: 240, maxHeight: 440) }
+                readerPane.frame(minHeight: 200)
+            }
+            .frame(minWidth: layout == "focus" && model.current == nil ? 0 : 320)
+            .frame(width: layout == "focus" && model.current == nil ? 0 : nil)
+            .clipped()
+            .accessibilityHidden(layout == "focus" && model.current == nil)
+        }
+    }
+    @ViewBuilder private var readerPane: some View {
+        if let message = model.current {
+            if model.messageDetail.viewID == message.viewID { MessageReader(message: message) }
+            else {
+                VStack {
+                    if model.error.isEmpty { ProgressView("Loading message…") }
+                    else { Button("Retry loading message") { Task { await model.loadMessage() } } }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        } else { EmptyPane(title: "A little room to think", detail: "Choose a message to read, or compose something new.", symbol: "envelope.open") }
+    }
+    private func toggleExpandedReader() {
+        if expandedReader { leaveExpandedReader() }
+        else { previousColumns = columns; columns = .detailOnly; expandedReader = true }
+    }
+    private func leaveExpandedReader() {
+        guard expandedReader else { return }
+        expandedReader = false; columns = previousColumns
     }
     var sidebar: some View {
         VStack(spacing: 0) {
@@ -89,7 +139,6 @@ struct MailWorkspace: View {
                         accountGroup(account.id, title: account["email"].string, subtitle: account["provider"].string == "imap" ? "IMAP" : providerLabel(account["provider"].string), symbol: "envelope")
                     }
                 }
-                accountGroup("demo", title: "Demo workspace", subtitle: "Sample mail", symbol: "leaf")
                 Section("Workspace") {
                     Label("AI Studio", systemImage: "sparkles").tag("studio")
                     Label("Calendar", systemImage: "calendar").tag("calendar")
@@ -123,7 +172,7 @@ struct MailWorkspace: View {
     func folderRows(_ account: String) -> some View {
         ForEach(mailFolders, id: \.self) { folder in
             HStack {
-                Label(folder.capitalized, systemImage: ["inbox": "tray", "starred": "star", "sent": "paperplane", "drafts": "doc", "archive": "archivebox", "trash": "trash"][folder]!)
+                Label(folder.capitalized, systemImage: ["inbox": "tray", "starred": "star", "sent": "paperplane", "drafts": "doc", "archive": "archivebox", "spam": "exclamationmark.shield", "trash": "trash"][folder]!)
                 Spacer()
                 let count = folderCount(account, folder)
                 if count > 0 && ["inbox", "drafts"].contains(folder) { Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
@@ -131,12 +180,11 @@ struct MailWorkspace: View {
         }
     }
     func folderCount(_ account: String, _ folder: String) -> Int {
-        if account == "demo" { return Int(folder == "inbox" ? model.state["demoStats"]["unread"].number : model.state["demoStats"]["counts"][folder].number) }
         return model.accounts.filter { account == "all" || $0.id == account }.reduce(0) { $0 + Int(folder == "inbox" ? $1["unread"].number : $1["counts"][folder].number) }
     }
     var messageList: some View {
         VStack(spacing: 0) {
-            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.title2.bold()); Text(model.combined ? "All accounts" : model.account == "demo" ? "Demo workspace" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Toggle(isOn: $model.unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).help("Show unread only").accessibilityLabel("Show unread only").disabled(!model.searchResponse.isNull) }.padding(16)
+            HStack { VStack(alignment: .leading, spacing: 3) { Text(model.section.capitalized).font(.title2.bold()); Text(model.combined ? "All accounts" : model.account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }; Spacer(); Toggle(isOn: $model.unreadOnly) { Image(systemName: "line.3.horizontal.decrease.circle") }.toggleStyle(.button).help("Show unread only").accessibilityLabel("Show unread only").disabled(!model.searchResponse.isNull) }.padding(16)
             HStack {
                 Menu {
                     ForEach(["compact", "comfortable", "spacious"], id: \.self) { density in
@@ -160,20 +208,20 @@ struct MailWorkspace: View {
                 List(filtered, id: \.viewID, selection: $model.selectedMessage) { message in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Circle().fill(message["read"].bool ? .clear : morrowGreen).frame(width: 6, height: 6)
-                            Text(["sent", "drafts"].contains(message["folder"].string) ? "To: " + message["to"].string : message["fromName"].string).fontWeight(message["read"].bool ? .regular : .semibold).lineLimit(1)
+                            Text(["sent", "drafts"].contains(message["folder"].string) ? "To: " + message["to"].string : message["fromName"].string).lineLimit(1)
                             Spacer(minLength: 2)
                             if message["starred"].bool { Image(systemName: "star.fill").foregroundStyle(.orange).font(.caption) }
+                            Circle().fill(message["read"].bool ? .clear : morrowGreen).frame(width: 6, height: 6).accessibilityLabel(message["read"].bool ? "Read" : "Unread")
                         }
-                        searchHighlighted(message["searchSubject"], fallback: message["subject"].nonempty ? message["subject"].string : "(No subject)").font(.system(size: 13, weight: .medium)).lineLimit(1)
-                        if model.preferences["density"].string != "compact" { searchHighlighted(message["searchSnippet"], fallback: message["preview"].string).foregroundStyle(.secondary).font(.caption).lineLimit(model.preferences["density"].string == "spacious" ? 4 : 2) }
+                        searchHighlighted(message["searchSubject"], fallback: message["subject"].nonempty ? message["subject"].string : "(No subject)").font(.system(size: 13)).fontWeight(message["read"].bool ? .regular : .bold).lineLimit(1)
+                        if model.preferences["density"].string != "compact" { searchHighlighted(message["searchSnippet"], fallback: message["preview"].string).fontWeight(message["read"].bool ? .regular : .bold).foregroundStyle(.secondary).font(.caption).lineLimit(model.preferences["density"].string == "spacious" ? 4 : 2) }
                         if model.combined || !model.searchResponse.isNull { Text(message["accountId"].string).font(.caption2).foregroundStyle(morrowGreen).lineLimit(1) }
                         if message["searchMatch"].nonempty { Text(message["folder"].string + " · " + message["searchMatch"].string).font(.caption2).foregroundStyle(.secondary) }
                         Text(dateLabel(message["date"].string)).font(.caption2).foregroundStyle(.tertiary)
                         if message["deliveryStatus"].string == "unconfirmed" { Label("Check delivery", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
-                    }.padding(.vertical, model.preferences["density"].string == "compact" ? 3 : model.preferences["density"].string == "spacious" ? 14 : 8).tag(message.viewID)
+                    }.fontWeight(message["read"].bool ? .regular : .bold).padding(.vertical, model.preferences["density"].string == "compact" ? 3 : model.preferences["density"].string == "spacious" ? 14 : 8).tag(message.viewID)
                     .contextMenu {
-                        if model.canOrganize(message) { Button("Move / Labels on Provider…") { model.organizing = message } }
+                        if model.canOrganize(message) { Button("Move / Labels / Spam on Provider…") { model.organizing = message } }
                         Button(message["starred"].bool ? "Unstar" : "Star") { model.patch(message, .object(["starred": .bool(!message["starred"].bool)])) }
                         Button(message["read"].bool ? "Mark Unread" : "Mark Read") { model.patch(message, .object(["read": .bool(!message["read"].bool)])) }
                         if message["folder"].string != "drafts" { Button("Archive Locally") { model.patch(message, .object(["folder": .string("archive")])) } }
@@ -211,10 +259,14 @@ struct MessageReader: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                if message["folder"].string == "drafts" { Button("Edit Draft") { model.newDraft(Draft(message: message)) } }
-                else { Button { model.newDraft(Draft(message: message, reply: true)) } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") } }
+                if message["folder"].string == "drafts" { Button(message["providerDraft"].bool ? "Copy to Local Draft" : "Edit Draft") { model.newDraft(Draft(message: message)) } }
+                else {
+                    Button { model.newDraft(Draft(message: message, reply: true)) } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }.labelStyle(.iconOnly).help("Reply")
+                    Button { model.newDraft(Draft(message: message, replyAll: true)) } label: { Label("Reply All", systemImage: "arrowshape.turn.up.left.2") }.labelStyle(.iconOnly).help("Reply All")
+                    Button { model.newDraft(Draft(forwarding: message)) } label: { Label("Forward", systemImage: "arrowshape.turn.up.right") }.labelStyle(.iconOnly).help("Forward")
+                }
                 Spacer()
-                if model.canOrganize(message) { Button { model.organizing = message } label: { Label("Move / Labels", systemImage: "folder") }.help("Move or label on this mailbox’s provider") }
+                if model.canOrganize(message) { Button { model.organizing = message } label: { Label("Move / Labels / Spam", systemImage: "folder") }.help("Move, label, or move to Spam on this mailbox’s provider") }
                 Button { model.patch(message, .object(["starred": .bool(!message["starred"].bool)])) } label: { Image(systemName: message["starred"].bool ? "star.fill" : "star") }.help("Toggle star").accessibilityLabel("Toggle star")
                 if message["folder"].string != "drafts" {
                     Button { model.patch(message, .object(["folder": .string(message["folder"].string == "inbox" ? "archive" : "inbox")])) } label: { Image(systemName: message["folder"].string == "inbox" ? "archivebox" : "tray") }.help("Move locally").accessibilityLabel("Move locally")
@@ -248,7 +300,7 @@ struct MessageReader: View {
                         }
                     } else { AutomaticAssistance(messageID: message.id, account: message["accountId"].string, trigger: "onOpen") }
                     Divider()
-                    Text(message["body"].string).font(.system(size: 14)).lineSpacing(7).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    SecureMessageBody(message: message).id(message.viewID)
                     FooterPreview(footer: message["footer"])
                     Divider()
                     HStack {
@@ -315,7 +367,7 @@ struct OrganizeMailView: View {
     var choices: [JSON] { folders.filter { mode == "move" || $0["kind"].string == "label" } }
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Move / Labels on Provider").font(.title2.bold())
+            Text("Move / Labels / Spam on Provider").font(.title2.bold())
             Text(message["subject"].string).lineLimit(2)
             Text(message["accountId"].string).foregroundStyle(.secondary)
             if loading { ProgressView("Loading folders…") }
@@ -331,8 +383,11 @@ struct OrganizeMailView: View {
                     Text("Choose a destination").tag("")
                     ForEach(choices) { folder in Text(folder["name"].string).tag(folder.id) }
                 }
-                Text("This changes the message on your mail provider. Moves stay within this account. Cached messages outside Inbox remain available in local Archive; full folder synchronization is not yet supported.").font(.callout).foregroundStyle(.secondary)
+                Text("This changes the message on your mail provider. Moves stay within this account. Gmail labels are shown on downloaded mail. Archive contains mail without Inbox, Sent, Draft, Spam or Trash labels.").font(.callout).foregroundStyle(.secondary)
                 if provider == "google" { Text("Move adds the selected label and removes Inbox; other labels remain. Add / Remove label keeps the current Inbox status.").font(.caption).foregroundStyle(.secondary) }
+                Text("Choose Spam / Junk in the destination list, then Review Change to move the message. Morrow does not directly report abuse or block senders; use the same account on your provider for those actions.").font(.caption).foregroundStyle(.secondary)
+                if provider == "google" { Link("Open Gmail to report or block", destination: URL(string: "https://mail.google.com/")!) }
+                else if provider == "microsoft" { Link("Open Outlook to report or block", destination: URL(string: "https://outlook.live.com/mail/")!) }
             }
             if !localError.isEmpty { Text(localError).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
@@ -380,8 +435,8 @@ struct ComposeView: View {
         VStack(spacing: 0) {
           ScrollView {
            VStack(alignment: .leading, spacing: 16) {
-            HStack { Text(draft.savedID.isEmpty ? (draft.replyToID.isEmpty ? "New message" : "Reply") : "Your draft").font(.title2.bold()); Spacer(); Text(draft.accountID == "demo" ? "Simulated send" : draft.accountID).foregroundStyle(.secondary).font(.caption) }
-            if !draft.savedID.isEmpty || !draft.replyToID.isEmpty || draft.unconfirmed {
+            HStack { Text(draft.savedID.isEmpty ? (draft.forwarding ? "Forward" : draft.replyToID.isEmpty ? "New message" : "Reply") : "Your draft").font(.title2.bold()); Spacer(); Text(draft.accountID == "demo" ? "Simulated send" : draft.accountID).foregroundStyle(.secondary).font(.caption) }
+            if !draft.savedID.isEmpty || !draft.replyToID.isEmpty || draft.forwarding || draft.sourceDraft || draft.unconfirmed {
                 HStack {
                     Text("From").frame(width: 36, alignment: .leading).foregroundStyle(.secondary)
                     Text(draft.accountID == "demo" ? "Demo workspace (simulated)" : draft.accountID).textSelection(.enabled)
@@ -393,6 +448,8 @@ struct ComposeView: View {
                 }.disabled(model.busy)
                 .onChange(of: draft.accountID) { _ in aiResult = ""; draft.requestID = UUID().uuidString }
             }
+            if draft.sourceDraft { Text("Editing a local copy without attachments. The original Gmail draft stays in Gmail; changes here are not uploaded to it.").font(.caption).foregroundStyle(.secondary) }
+            if draft.forwarding { Text("Forwarding the message text. Attachments are not included.").font(.caption).foregroundStyle(.secondary) }
             if !draft.replyToID.isEmpty { Label("Replying from the mailbox that owns this conversation", systemImage: "lock.fill").font(.caption).foregroundStyle(.secondary) }
             if !initial.replyToID.isEmpty && initial.savedID.isEmpty && initial.body.isEmpty && !draft.unconfirmed {
                 AutomaticAssistance(messageID: initial.replyToID, account: initial.accountID, trigger: "onReply") { text in

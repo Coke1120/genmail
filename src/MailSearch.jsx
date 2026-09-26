@@ -60,7 +60,7 @@ export default function MailSearch({ api, account, folder, query, setQuery, inpu
         <label>Folder<select value={filters.in} onChange={e => setFilters({ ...filters, in: e.target.value })}><option value="">Any in selected scope</option>{['inbox', 'sent', 'drafts', 'archive', 'trash', 'starred'].map(value => <option key={value}>{value}</option>)}</select></label>
         <label className="search-wide"><input type="checkbox" checked={smart} onChange={e => setSmart(e.target.checked)} />Smart search (智慧搜尋)</label>
         <small className="search-wide">Smart search sends your query to the configured embedding model only when you press Search. <button type="button" onClick={onSettings}>Configure indexing</button></small>
-        <small className="search-wide">Words are combined with AND. Use quotes for an exact phrase. Filters narrow the chosen scope; Trash requires an explicit folder choice. Dates use UTC.</small>
+        <small className="search-wide">Gmail labels: choose Current account view and enter the label name. Words are combined with AND. Use quotes for an exact phrase. Filters narrow the chosen scope; Trash requires an explicit folder choice. Dates use UTC.</small>
       </div>}
     </form>
     <div className="search-chips">{Object.entries(filters).filter(([, value]) => value).map(([field, value]) => <button key={field} aria-label={`Remove ${field} filter`} onClick={() => setFilters({ ...filters, [field]: '' })}>{field}: {value} ×</button>)}{result?.chips?.map((chip, i) => <button key={i} onClick={() => setQuery(chip.query)} aria-label={`Remove ${chip.label}`}>{chip.label} ×</button>)}</div>
